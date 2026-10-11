@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,42 @@ def test_write_edits_create_new_file(dbt_project_dir: Path):
     assert result.written == ["models/marts/fct_orders.sql"]
     assert result.diffs[0]["op"] == "create"
     assert (dbt_project_dir / "models/marts/fct_orders.sql").is_file()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="mode bits are synthetic on Windows")
+def test_write_edits_leaves_profiles_owner_only_and_other_files_alone(
+    dbt_project_dir: Path,
+):
+    """profiles.yml is the file people hand-edit a password into, so dex writes it
+    0600 whatever the umask, and tightens an existing one it rewrites. Everything
+    else keeps the umask's mode: a model is not a credential, and a 0600 model
+    would be a surprise in a shared checkout."""
+
+    profiles = dbt_project_dir / "profiles.yml"
+    profiles.chmod(0o644)
+    previous = os.umask(0o022)
+    try:
+        result = write_edits(
+            [
+                Edit(
+                    path="profiles.yml",
+                    new_content=profiles.read_text(encoding="utf-8") + "# touched\n",
+                    old_content_hash=content_hash(profiles.read_text(encoding="utf-8")),
+                ),
+                Edit(
+                    path="models/marts/fct_orders.sql",
+                    new_content="select 2 as id\n",
+                    old_content_hash=None,
+                ),
+            ],
+            dbt_project_dir,
+        )
+    finally:
+        os.umask(previous)
+    assert sorted(result.written) == ["models/marts/fct_orders.sql", "profiles.yml"]
+    assert profiles.stat().st_mode & 0o777 == 0o600
+    model = dbt_project_dir / "models/marts/fct_orders.sql"
+    assert model.stat().st_mode & 0o777 == 0o644
 
 
 def test_write_edits_human_edit_is_a_conflict(dbt_project_dir: Path):

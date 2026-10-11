@@ -382,8 +382,10 @@ service reaches 2 compute CHC in the current UTC day. The post-run report marks
 unlocked usage records provisional because Cloud metering can lag.
 
 Setup, rotation, local execution, troubleshooting, and bounded teardown are in
-`scripts/clickhouse_cloud/README.md`. To run locally after loading the protected
-environment values:
+`scripts/clickhouse_cloud/README.md`. To run locally, with the protected
+non-secret values and the two database credentials in the environment and the
+scoped API key's two files in `DEX_SECRETS_DIR` (the README shows how to write
+them; the key is never read from the environment):
 
 ```bash
 scripts/clickhouse_cloud/run_integration.sh

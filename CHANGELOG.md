@@ -38,29 +38,6 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   on drive `C:` as `abs.ossie.yaml` inside it and Linux reads as a file named
   `C:abs.ossie.yaml`, no longer names a different file on each platform.
 
-### Added
-
-- **A BigQuery statement refused before it ran says so in `data.stage`, apart
-  from one that ran and failed** ([#524]). Since [#480] both read
-  `execution_failure`, which stays true of both, and nothing structured told
-  them apart. A statement BigQuery would not plan (the dry run, or the job
-  insert, answered 400) ran nothing, billed nothing, and will be refused again
-  until it changes; one that planned and then failed at `job.result()` may have
-  billed and can fail on the data. A host had to search the message for the
-  request line google-api-core puts in front of the first, which depends on how
-  a client library renders an HTTP error and is not a contract.
-  `WarehouseQueryError` now carries `stage` (`StatementStage.PLAN` or
-  `StatementStage.RUN`, importable from `exmergo_dex_core`), set at BigQuery's
-  three raise sites and kept by `naming()`, and `error_for` puts it in the error
-  envelope's `data.stage`, so every command and the CLI's catch-all carry it. A
-  multi-statement `explore query` carries it per statement, beside that
-  statement's `reason`. Downstream-visible and additive: `reason` and the error
-  text are unchanged, the key is absent on every other error envelope and every
-  other connector, and the profile's own aggregate statements still degrade on a
-  refused dry run rather than raising.
-
-### Fixed
-
 - **A plan for a nested dbt project has one digest on every platform and applies
   on any of them** ([#527], reported by @catincloudlabs). A plan records where
   the dbt project sits relative to the repository root, and `transform export`
@@ -90,6 +67,99 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   containment does. A name that is not a model, or that two model files share,
   is refused before any dbt run, with the same message and `reason: request`
   from both flags.
+
+### Added
+
+- **A BigQuery statement refused before it ran says so in `data.stage`, apart
+  from one that ran and failed** ([#524]). Since [#480] both read
+  `execution_failure`, which stays true of both, and nothing structured told
+  them apart. A statement BigQuery would not plan (the dry run, or the job
+  insert, answered 400) ran nothing, billed nothing, and will be refused again
+  until it changes; one that planned and then failed at `job.result()` may have
+  billed and can fail on the data. A host had to search the message for the
+  request line google-api-core puts in front of the first, which depends on how
+  a client library renders an HTTP error and is not a contract.
+  `WarehouseQueryError` now carries `stage` (`StatementStage.PLAN` or
+  `StatementStage.RUN`, importable from `exmergo_dex_core`), set at BigQuery's
+  three raise sites and kept by `naming()`, and `error_for` puts it in the error
+  envelope's `data.stage`, so every command and the CLI's catch-all carry it. A
+  multi-statement `explore query` carries it per statement, beside that
+  statement's `reason`. Downstream-visible and additive: `reason` and the error
+  text are unchanged, the key is absent on every other error envelope and every
+  other connector, and the profile's own aggregate statements still degrade on a
+  refused dry run rather than raising.
+
+### Security
+
+- **The skill wrapper finds the engine from its own location and withholds
+  credentials the engine never reads** ([#520]). `run.py` located the local
+  `packages/dex-core` through `CLAUDE_SKILL_DIR`, so whatever controlled the
+  environment could point uv at a different tree to build and run; it now uses
+  the directory the script itself lives in, which is where the harness already
+  found it. The engine (and the warm-up's uv) now runs with a copy of the
+  environment that leaves out `CLICKHOUSE_CLOUD_API_KEY`,
+  `CLICKHOUSE_CLOUD_API_SECRET`, `DEX_TEST_CH_CLOUD_API_KEY`,
+  `DEX_TEST_CH_CLOUD_API_SECRET`, `GITHUB_TOKEN`, `GH_TOKEN`, and `GHRS_TOKEN`,
+  plus `VIRTUAL_ENV` as before, and the wrapper no longer edits its own
+  environment to do it. Every connector discovery variable still passes. One
+  consequence: a private dbt package whose `packages.yml` authenticates with
+  `env_var('GITHUB_TOKEN')` no longer resolves when `transform build` runs
+  `dbt deps` through the skill; dbt's own `DBT_ENV_SECRET_GIT_CREDENTIAL` passes
+  through and is the variable to use. The missing-uv refusal now leads with
+  `brew install uv` and `pipx install uv` and links the uv docs instead of
+  printing a `curl ... | sh` an agent might run, and each `SKILL.md` and
+  `AGENTS.md` tell the agent to relay the install command, never run an
+  installer itself. Reported by Sthenos Security.
+
+- **`profiles.yml` is written owner-only, and a Snowflake private key file
+  other accounts can read is refused** ([#523]). `transform init` and every
+  apply that rewrites a `profiles.yml` now write it `0600` whatever the umask
+  says, tightening an existing one too. dex renders only `env_var()` references
+  and key paths there, but it is the file a password gets pasted into, and at
+  the usual `0644` every account on the machine could read it. Snowflake
+  discovery now refuses a `private_key_file` or `private_key_path` with any
+  group or other permission bit, the rule `ssh` applies, naming the file, its
+  mode, and the `chmod 600` that fixes it, before any connection is attempted.
+  `connect test` reports it as `configuration`, and `transform init` refuses
+  before rendering a profile. A path that does not resolve is left to the
+  connector's own error, and Windows is not checked because its mode bits are
+  synthesized. Reported by Sthenos Security.
+
+- **Integration CI hands each long-lived credential to the one step or command
+  that reads it, not to a whole job** ([#519]). The ClickHouse Cloud API key
+  and secret sat in the `clickhouse_cloud` job's environment, and
+  `preflight.sh` exported them again, so uv, pytest, dbt, and the engine all
+  inherited a control-plane key only `clickhousectl` uses. One step now writes
+  the key to owner-only files on `/dev/shm`, and the new
+  `scripts/clickhouse_cloud/secrets.sh` hands them to each `clickhousectl` call
+  (and to curl through a private config pipe) as a variable on that one
+  command; a final step removes them. The scripts read the operator's bootstrap
+  admin key and password the same way, from files named apart from the CI key's
+  so neither can stand in for the other, and unset any copies still exported in
+  the calling shell. Setup proves a newly minted key against a secrets
+  directory of its own, so its readiness check and `--dogfood` run cannot pass
+  on admin scope. The database passwords and the Snowflake dbt key pair moved
+  the same way: Cloud's DSN and dev password and Redshift's `dbt_dev` password
+  ride only on the step whose tests read them, and the Snowflake PEM is written
+  to a file by a step of its own, so the transform suite's step holds only the
+  path. Missing credentials still refuse the job rather than letting a suite
+  skip green, and `preflight.sh` exits 2 naming the file it lacks. Reported by
+  Sthenos Security.
+
+- **The dogfood databases run digest-pinned with every capability dropped**
+  ([#521]). `scripts/setup_postgres_dev.sh`, `scripts/setup_clickhouse_dev.sh`,
+  and the Postgres job's service container now pin their image by multi-arch
+  index digest and run with `--cap-drop ALL`, `no-new-privileges`, and pid and
+  memory limits. The local containers run as the image's own user, so they need
+  no capability at all; the CI service container keeps its root entrypoint and
+  adds back only `SETUID` and `SETGID`, which that entrypoint needs to drop to
+  `postgres`. ClickHouse's limits are measured rather than copied (it starts
+  about 675 threads before serving a query and peaked near 1.9 GiB over the
+  suite, so it gets 2048 pids and 4 GiB). The new
+  `scripts/check_container_hardening.sh` checks fixed invariants with
+  `docker inspect`, so a container missing any one, including one an older
+  script left behind, is refused rather than reused (remove it with `--down`).
+  Reported by Sthenos Security.
 
 ## [1.12.7] - 2026-10-08
 

@@ -177,6 +177,6 @@ an injected clock, and enforces `statement_timeout` with psycopg's real
 `QueryCanceled`. Live: an env-gated integration suite (`DEX_TEST_PG_DSN`,
 plus `DEX_TEST_PG_DEV_PASSWORD` for builds) against the seeded database from
 `scripts/postgres_seed.sql`; `scripts/setup_postgres_dev.sh` stands up the
-same thing locally in Docker, and CI runs the suite against a free, keyless
-`postgres:16` service container (kept in the integration workflow for
-pattern parity, never a merge gate).
+same thing locally in Docker, and CI runs the suite against a free, keyless,
+digest-pinned `postgres:16` service container with its capabilities dropped
+(kept in the integration workflow for pattern parity, never a merge gate).

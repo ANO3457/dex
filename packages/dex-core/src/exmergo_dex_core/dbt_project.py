@@ -521,6 +521,31 @@ def _load_profiles(project_dir: Path) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+def write_project_file(path: Path, content: str) -> None:
+    """Write one file into a dbt project, creating its parent directories.
+
+    ``profiles.yml`` is written owner-only (0600) whatever the umask says. What
+    dex renders there holds ``env_var()`` references and key paths, never a
+    secret, but it is the file people hand-edit a password into, and at the
+    usual 0644 that password is readable by every account on the machine. The
+    mode is set on the open descriptor before anything is written, so the
+    new content is never briefly exposed, and an existing file dex rewrites is
+    tightened the same way. Windows governs access through ACLs rather than mode
+    bits, so there the call changes nothing that matters, and before Python 3.13
+    ``fchmod`` does not exist on it at all.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.name != PROFILES_FILE:
+        path.write_text(content, encoding="utf-8")
+        return
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
 def write_edits(
     edits: list[Edit], project_dir: Path | str, *, confirmed: bool = False
 ) -> ApplyResult:
@@ -581,8 +606,7 @@ def write_edits(
         if edit.op is EditOp.DELETE:
             target_path.unlink(missing_ok=True)
         else:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_text(edit.new_content, encoding="utf-8")
+            write_project_file(target_path, edit.new_content)
         written.append(edit.path)
     return ApplyResult(written=written, diffs=diffs, conflicts=conflicts)
 
