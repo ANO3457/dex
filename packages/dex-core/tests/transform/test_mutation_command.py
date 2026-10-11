@@ -22,10 +22,14 @@ import pytest
 pytest.importorskip("sqlglot")
 
 from exmergo_dex_core.config import DexConfig
+from exmergo_dex_core.dbt_project import load
 from exmergo_dex_core.engine import DexEngine
+from exmergo_dex_core.envelope import Reason, reason_for
+from exmergo_dex_core.errors import RequestError
 from exmergo_dex_core.storage import FilesystemStore
 from exmergo_dex_core.transform import commands as transform_commands
 from exmergo_dex_core.transform import mutation
+from exmergo_dex_core.transform.test_scaffold import unit_test_scaffold_edits
 
 MODEL_SQL = """select
     o.id,
@@ -296,6 +300,103 @@ def test_a_model_dex_will_not_mutate_is_refused_before_any_test_runs(
     with pytest.raises(mutation.MutationError, match=message):
         transform_commands.test_mutations(_engine(project), "fct")
     assert not [c for c in calls if c["argv"][1] == "test"]
+
+
+def _write_project_yml(project: Path, **paths: list[str]) -> None:
+    lines = ["name: dex_test", 'version: "1.0.0"', "profile: dex_test"]
+    lines += [
+        f"{key.replace('_', '-')}: {json.dumps(value)}" for key, value in paths.items()
+    ]
+    (project / "dbt_project.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def ghost(project: Path) -> Path:
+    """An analysis named after a model that does not exist.
+
+    `models_analysis` begins with the characters `models` and is not under it,
+    so only a lookup that compares whole path segments keeps it out.
+    """
+
+    _write_project_yml(
+        project, model_paths=["models"], analysis_paths=["models_analysis"]
+    )
+    (project / "models_analysis").mkdir()
+    (project / "models_analysis" / "stg_ghost.sql").write_text(
+        "select 1 as id\n", encoding="utf-8"
+    )
+    return project
+
+
+def test_an_analysis_beside_the_model_path_is_refused_before_dbt_runs(
+    ghost, recorded_dbt, monkeypatch
+):
+    """Taken for the model, the analysis got the ephemeral header and a `dbt
+    compile`, and the refusal came from dbt's answer instead of from the parse,
+    where a name that is not a model costs nothing to ask about."""
+
+    calls, _plan = recorded_dbt
+    _skip_dev_target_check(monkeypatch)
+
+    with pytest.raises(RequestError, match="no model named 'stg_ghost'"):
+        transform_commands.test_mutations(_engine(ghost), "stg_ghost")
+    assert calls == []
+
+
+def test_scaffold_and_mutate_refuse_a_name_that_is_not_a_model_the_same_way(
+    ghost, recorded_dbt, monkeypatch
+):
+    """The two halves of `transform test` read one lookup, so they cannot
+    disagree about which file is a model: same refusal, same envelope reason."""
+
+    _skip_dev_target_check(monkeypatch)
+
+    with pytest.raises(RequestError) as scaffold:
+        unit_test_scaffold_edits(load(ghost), None, "stg_ghost")
+    with pytest.raises(RequestError) as mutate:
+        transform_commands.test_mutations(_engine(ghost), "stg_ghost")
+
+    assert str(mutate.value) == str(scaffold.value)
+    assert reason_for(mutate.value) is Reason.REQUEST
+
+
+@pytest.mark.parametrize("model_paths", [["src/models"], ["./src/models"]])
+def test_a_model_under_a_nested_model_path_is_the_file_that_gets_mutated(
+    project, recorded_dbt, monkeypatch, model_paths
+):
+    """`src/models` is one configured entry and two path segments. Compared as a
+    string built with the platform's separator, it never matched the POSIX keys
+    `load()` builds on Windows, so `--mutate` refused a model `--scaffold` found.
+    Asserted on the file the ephemeral header lands in, because a run that
+    patched any other file would still complete against the faked manifest."""
+
+    calls, plan = recorded_dbt
+    plan["manifest"] = _manifest()
+    plan["results"] = _results()
+    _skip_dev_target_check(monkeypatch)
+    _write_project_yml(project, model_paths=model_paths)
+    (project / "src").mkdir()
+    shutil.move(project / "models", project / "src" / "models")
+
+    shadow_run = importlib.import_module("exmergo_dex_core.transform.build").ShadowRun
+    patched: list[str] = []
+    original_write = shadow_run.write
+
+    def record(self, rel_path, text):
+        if mutation.EPHEMERAL_HEADER in text:
+            patched.append(rel_path)
+        return original_write(self, rel_path, text)
+
+    monkeypatch.setattr(shadow_run, "write", record)
+
+    result = transform_commands.test_mutations(_engine(project), "fct")
+
+    # The first header is the one the lookup placed; every write after it is a
+    # mutant or the baseline twin, filed beside the model it found.
+    assert patched[0] == "src/models/staging/fct.sql"
+    assert {path.rsplit("/", 1)[0] for path in patched} == {"src/models/staging"}
+    assert result.model == "fct"
+    assert any(c["argv"][1] == "test" for c in calls)
 
 
 def test_a_cap_above_the_ceiling_is_refused_without_touching_dbt(project, recorded_dbt):

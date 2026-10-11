@@ -24,6 +24,7 @@ from exmergo_dex_core import (
     PlanDigestMismatchError,
     PlanDocumentError,
 )
+from exmergo_dex_core.cli import main
 from exmergo_dex_core.edits import EditOp, content_hash
 from exmergo_dex_core.storage import FilesystemStore
 from exmergo_dex_core.transform.plans import EditKind, PlanEdit
@@ -69,12 +70,17 @@ def authored(dbt_project_dir: Path) -> tuple[Path, str, dict, str]:
     return repo, stored.plan_id, exported.plan, exported.digest
 
 
-def _second_checkout(repo: Path, tmp_path: Path, name: str) -> Path:
-    """A copy of the repo's git-tracked half: no `.dex/`, so no plan store."""
+def _second_checkout(
+    repo: Path, tmp_path: Path, name: str, top: str = "analytics"
+) -> Path:
+    """A copy of the repo's git-tracked half: no `.dex/`, so no plan store.
+
+    ``top`` is the directory under the repository root that holds the project.
+    """
 
     target = tmp_path / name
     target.mkdir()
-    shutil.copytree(repo / "analytics", target / "analytics")
+    shutil.copytree(repo / top, target / top)
     return target
 
 
@@ -413,3 +419,206 @@ def test_the_store_is_never_read_on_the_document_path(authored, tmp_path):
     ) as engine:
         result = engine.apply_plan_document(document, expect_digest=digest)
     assert "models/staging/mart.sql" in result.written
+
+
+# --- a project below the repository root --------------------------------------
+#
+# The reproduction on issue #527: a project pinned two directories down with
+# `dbt_project_dir`, one model, and a plan that adds a second. Every field the
+# digest covers is deterministic, so the plan id and both digests below are the
+# same on any machine. The reporter measured the Windows digest on Windows, where
+# `project_dir` used to be recorded as `wh\dbt`. Reproducing it here from the
+# same plan is what lets these tests stand in for a Windows run on a POSIX one.
+
+NESTED_INTENT = "add stg_two"
+NESTED_PATH = "models/staging/stg_two.sql"
+NESTED_SQL = "select id from {{ ref('stg_one') }}\n"
+NESTED_PLAN_ID = "p3c7aee5fd9"
+NESTED_DIGEST = (
+    "sha256:de9e8e4322df2c954cd4b2c876a67827d7a5545d0d3f59fda410e8d5117811b6"
+)
+WINDOWS_DIGEST = (
+    "sha256:2886d0133c336590012c93b5c15727622bf82ad355e054679a7d6f51a742b0ad"
+)
+
+
+def _nested_repo(root: Path) -> Path:
+    project = root / "wh" / "dbt"
+    (project / "models" / "staging").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text(
+        "name: shop\nversion: '1.0.0'\nprofile: shop\nmodel-paths: ['models']\n",
+        encoding="utf-8",
+    )
+    (project / "models" / "staging" / "stg_one.sql").write_text(
+        "select 1 as id\n", encoding="utf-8"
+    )
+    (root / ".dex").mkdir()
+    (root / ".dex" / "config.yml").write_text(
+        "dbt_project_dir: wh/dbt\n", encoding="utf-8"
+    )
+    return root
+
+
+@pytest.fixture
+def nested(tmp_path: Path) -> tuple[Path, dict]:
+    """A nested-project repo with one stored plan, plus its exported document."""
+
+    repo = _nested_repo(tmp_path / "repo")
+    with _engine(repo) as engine:
+        stored = engine.plan(
+            NESTED_INTENT,
+            edits=[
+                PlanEdit(
+                    path=NESTED_PATH,
+                    new_content=NESTED_SQL,
+                    op=EditOp.UPSERT,
+                    kind=EditKind.MODEL_SQL,
+                )
+            ],
+        )
+        exported = engine.export_plan(stored.plan_id)
+    return repo, exported.plan
+
+
+def _as_exported_on_windows(document: dict) -> dict:
+    """The same document as an engine that recorded `wh\\dbt` exported it.
+
+    The digest is recomputed over the backslash, because that is the string the
+    Windows export digested.
+    """
+
+    doc = json.loads(json.dumps(document))
+    doc["project_dir"] = "wh\\dbt"
+    doc["digest"] = plan_digest(PortablePlan.model_validate(doc))
+    return doc
+
+
+def _run(argv: list[str], capsys) -> tuple[int, dict]:
+    rc = main(argv)
+    out = capsys.readouterr().out
+    assert out.count("\n") == 1, "exactly one line on stdout"
+    return rc, json.loads(out)
+
+
+def test_a_nested_project_is_recorded_with_forward_slashes(nested):
+    repo, document = nested
+
+    assert FilesystemStore(repo).load_plan(NESTED_PLAN_ID).project_dir == "wh/dbt"
+    assert document["project_dir"] == "wh/dbt"
+
+
+def test_a_nested_plan_has_the_same_digest_on_every_platform(nested):
+    """The plan id hashes only the intent and the edits, whose paths were already
+    POSIX, so it agreed across platforms all along. The digest also covers
+    `project_dir`, so it agrees only when that is spelled the same everywhere,
+    and a host pinning `--expect-digest` from one platform refused the plan
+    exported on the other."""
+
+    _repo, document = nested
+
+    assert document["plan_id"] == NESTED_PLAN_ID
+    assert document["digest"] == NESTED_DIGEST
+    # The backslash spelling reproduces the reporter's Windows measurement, so
+    # the document the next test applies is the one Windows exported.
+    assert _as_exported_on_windows(document)["digest"] == WINDOWS_DIGEST
+
+
+def test_a_document_exported_on_windows_applies_in_a_posix_checkout(nested, tmp_path):
+    """A document exported before `project_dir` was recorded with forward slashes
+    still carries `wh\\dbt`. On POSIX that is one directory name, so the apply
+    looked for a project that does not exist.
+
+    The digest is still taken over the backslash as written: the document
+    verifies against the digest a host pinned from it, and only the path it is
+    joined into reads the backslash as a separator.
+    """
+
+    repo, document = nested
+    legacy = _as_exported_on_windows(document)
+    target = _second_checkout(repo, tmp_path, "posix", top="wh")
+
+    with _engine(target) as engine:
+        result = engine.apply_plan_document(legacy, expect_digest=WINDOWS_DIGEST)
+
+    assert result.written == [NESTED_PATH]
+    written = target / "wh" / "dbt" / "models" / "staging" / "stg_two.sql"
+    assert written.read_text(encoding="utf-8") == NESTED_SQL
+    assert [p.name for p in target.iterdir()] == ["wh"]
+
+
+def test_a_nested_plan_applies_in_the_checkout_that_stored_it(nested):
+    repo, _document = nested
+
+    with _engine(repo) as engine:
+        result = engine.apply(NESTED_PLAN_ID)
+
+    assert result.written == [NESTED_PATH]
+    assert (repo / "wh" / "dbt" / NESTED_PATH).read_text(encoding="utf-8") == (
+        NESTED_SQL
+    )
+
+
+def test_export_and_apply_plan_file_carry_a_nested_project_to_a_second_checkout(
+    tmp_path, capsys
+):
+    """The command-line round trip a host runs: plan and export in one checkout,
+    then `transform apply --plan-file` in another that has no `.dex/` at all."""
+
+    repo = _nested_repo(tmp_path / "repo")
+    edits_file = tmp_path / "edits.json"
+    edits_file.write_text(
+        json.dumps(
+            {
+                "edits": [
+                    {
+                        "path": NESTED_PATH,
+                        "kind": "model_sql",
+                        "op": "upsert",
+                        "content": NESTED_SQL,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc, planned = _run(
+        [
+            "--repo-root",
+            str(repo),
+            "transform",
+            "plan",
+            NESTED_INTENT,
+            "--edits-file",
+            str(edits_file),
+        ],
+        capsys,
+    )
+    assert rc == 0, planned
+
+    rc, exported = _run(["--repo-root", str(repo), "transform", "export"], capsys)
+    assert rc == 0, exported
+    assert exported["data"]["plan"]["project_dir"] == "wh/dbt"
+    assert exported["data"]["digest"] == NESTED_DIGEST
+
+    document_file = tmp_path / "plan.json"
+    document_file.write_text(json.dumps(exported["data"]["plan"]), encoding="utf-8")
+    target = _second_checkout(repo, tmp_path, "applying", top="wh")
+
+    rc, applied = _run(
+        [
+            "--repo-root",
+            str(target),
+            "transform",
+            "apply",
+            "--plan-file",
+            str(document_file),
+            "--expect-digest",
+            NESTED_DIGEST,
+        ],
+        capsys,
+    )
+    assert rc == 0, applied
+    assert applied["data"]["written"] == [NESTED_PATH]
+    assert (target / "wh" / "dbt" / NESTED_PATH).read_text(encoding="utf-8") == (
+        NESTED_SQL
+    )

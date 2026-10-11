@@ -21,9 +21,11 @@ from exmergo_dex_core.dbt_project import (
     jinja_calls,
     jinja_regions,
     load,
+    model_file,
     resolve_target,
     write_edits,
 )
+from exmergo_dex_core.errors import RequestError
 
 
 def test_load_parses_project_and_files(dbt_project_dir: Path):
@@ -938,3 +940,106 @@ def test_a_semantic_model_s_grain_lands_on_the_version_it_reads(dbt_project_dir:
     defs = definitions(dbt_project_dir)
     assert "dim_customers_v2" not in defs.model_relations
     assert defs.primary_entities == {"dim_customers.v2": "id"}
+
+
+# --- which file builds a model ------------------------------------------------
+
+
+def _layout(root: Path, files: list[str], **paths: list[str]):
+    """A project on disk with the given path keys, read back through `load()`, so
+    the keys under test are the ones the engine itself builds."""
+
+    lines = ["name: p", "profile: p"]
+    lines += [
+        f"{key.replace('_', '-')}: {json.dumps(value)}" for key, value in paths.items()
+    ]
+    (root / "dbt_project.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for rel in files:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("select 1 as id\n", encoding="utf-8")
+    return load(root)
+
+
+@pytest.mark.parametrize(
+    "model_paths,path",
+    [
+        (["models"], "models/staging/stg_one.sql"),
+        # Two segments in one entry: stringified with the platform separator it
+        # was `src\models` on Windows, which no POSIX key starts with.
+        (["src/models"], "src/models/staging/stg_one.sql"),
+        # dbt reads both as `models`, and `load()` keys never carry the `./` or
+        # the trailing slash.
+        (["./models"], "models/staging/stg_one.sql"),
+        (["models/"], "models/staging/stg_one.sql"),
+        (["lib", "models"], "models/stg_one.sql"),
+    ],
+)
+def test_model_file_finds_the_model_however_its_model_path_is_spelled(
+    tmp_path: Path, model_paths: list[str], path: str
+):
+    view = _layout(tmp_path, [path], model_paths=model_paths)
+    assert model_file(view, "stg_one") == path
+
+
+def test_model_file_does_not_take_a_sibling_directory_for_the_model_path(
+    tmp_path: Path,
+):
+    """`models_analysis` begins with the characters `models` and is not under it."""
+
+    view = _layout(
+        tmp_path,
+        ["models/stg_one.sql", "models_analysis/stg_ghost.sql"],
+        model_paths=["models"],
+        analysis_paths=["models_analysis"],
+    )
+    assert "models_analysis/stg_ghost.sql" in view.files
+    with pytest.raises(
+        RequestError, match="no model named 'stg_ghost' found under models"
+    ):
+        model_file(view, "stg_ghost")
+
+
+def test_model_file_takes_the_model_over_an_analysis_of_the_same_name(tmp_path: Path):
+    view = _layout(
+        tmp_path,
+        ["models/stg_one.sql", "models_analysis/stg_one.sql"],
+        model_paths=["models"],
+        analysis_paths=["models_analysis"],
+    )
+    assert model_file(view, "stg_one") == "models/stg_one.sql"
+
+
+def test_model_file_refuses_a_name_two_model_files_share(tmp_path: Path):
+    """dbt refuses two models of one name at parse, so naming both is the answer
+    rather than picking whichever the scan reached first."""
+
+    view = _layout(
+        tmp_path,
+        ["lib/stg_one.sql", "models/staging/stg_one.sql"],
+        model_paths=["lib", "models"],
+    )
+    with pytest.raises(RequestError, match="ambiguous") as caught:
+        model_file(view, "stg_one")
+    assert "lib/stg_one.sql" in str(caught.value)
+    assert "models/staging/stg_one.sql" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "path", ["snapshots/stg_one.sql", "models/stg_one.yml", "macros/stg_one.sql"]
+)
+def test_model_file_ignores_a_file_of_that_name_that_is_not_a_model(
+    tmp_path: Path, path: str
+):
+    view = _layout(tmp_path, [path], model_paths=["models"])
+    assert path in view.files
+    with pytest.raises(RequestError, match="no model named 'stg_one'"):
+        model_file(view, "stg_one")
+
+
+def test_model_file_matches_the_name_with_its_case(tmp_path: Path):
+    """`ref()` matches case, so a model is found by the name its file spells."""
+
+    view = _layout(tmp_path, ["models/Stg_One.sql"], model_paths=["models"])
+    assert model_file(view, "Stg_One") == "models/Stg_One.sql"
+    with pytest.raises(RequestError):
+        model_file(view, "stg_one")

@@ -25,7 +25,7 @@ import sqlglot
 from sqlglot import exp
 
 from ..cache import DexCache, match_identifier
-from ..dbt_project import REF_PATTERN, SOURCE_PATTERN, DbtProjectView
+from ..dbt_project import REF_PATTERN, SOURCE_PATTERN, DbtProjectView, model_file
 from ..errors import DexError
 from .plans import EditKind, PlanEdit
 from .row_attribution import UnattributableError, naming_resolver, render_model_sql
@@ -59,7 +59,7 @@ def unit_test_scaffold_edits(
     the model.
     """
 
-    path = _find_model_path(view, model_name)
+    path = model_file(view, model_name)
     sql = view.files[path].content
 
     inputs = _find_inputs(sql)
@@ -109,24 +109,6 @@ def unit_test_scaffold_edits(
 
 
 # --- model + input discovery ---------------------------------------------------
-
-
-def _find_model_path(view: DbtProjectView, model_name: str) -> str:
-    prefixes = tuple(f"{mp}/" for mp in view.model_paths)
-    matches = sorted(
-        path
-        for path in view.files
-        if path.endswith(".sql")
-        and path.startswith(prefixes)
-        and path.rsplit("/", 1)[-1][: -len(".sql")] == model_name
-    )
-    if not matches:
-        raise TestScaffoldError(
-            f"no model named '{model_name}' found under {', '.join(view.model_paths)}"
-        )
-    if len(matches) > 1:
-        raise TestScaffoldError(f"'{model_name}' is ambiguous: {', '.join(matches)}")
-    return matches[0]
 
 
 def _find_inputs(sql: str) -> list[ModelInput]:

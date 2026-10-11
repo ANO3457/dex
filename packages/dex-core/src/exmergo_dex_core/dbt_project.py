@@ -44,7 +44,7 @@ from .dbt_semantic import (
 )
 from .diffs import file_diff
 from .edits import ApplyResult, Conflict, Edit, EditOp, content_hash
-from .errors import ProjectError
+from .errors import ProjectError, RequestError
 from .metricflow_dialect import METRIC_TIME
 from .project_definitions import (
     DeclaredCompositeKey,
@@ -704,6 +704,40 @@ def node_name(path: str) -> str:
     """
 
     return path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+
+
+def model_file(view: DbtProjectView, name: str) -> str:
+    """The key in ``view.files`` of the one ``.sql`` file that builds model ``name``.
+
+    Every command that takes a model by name finds its file here, so two of them
+    cannot disagree about which file is the model. Membership is decided by
+    :func:`path_family`, the traversal containment uses, never by comparing the
+    configured string against the key: the keys are POSIX on every platform and a
+    configured ``src/models``, ``./models`` or ``models/`` is not spelled the way
+    the keys are, and a string prefix would put ``models_analysis/`` under
+    ``models``. A snapshot of the same name is not a model.
+
+    Raises ``RequestError`` when no model has the name, or when more than one file
+    does, which dbt would refuse at parse anyway.
+    """
+
+    root = Path(view.root)
+    # Name first: the family check resolves paths on disk, so it runs only on
+    # the candidates.
+    matches = sorted(
+        path
+        for path in view.files
+        if path.endswith(".sql")
+        and node_name(path) == name
+        and path_family(root, path, view) == "model"
+    )
+    if not matches:
+        raise RequestError(
+            f"no model named '{name}' found under {', '.join(view.model_paths)}"
+        )
+    if len(matches) > 1:
+        raise RequestError(f"'{name}' is ambiguous: {', '.join(matches)}")
+    return matches[0]
 
 
 # --- Jinja: what a template calls ---------------------------------------------
