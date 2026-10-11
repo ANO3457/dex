@@ -13,7 +13,12 @@ subcommand> ...`.
 absent this wrapper refuses with an error envelope naming the install command,
 rather than letting the exec fail with a traceback. Invoked through `uv run` the
 shell fails first (`uv: command not found`), which is why each SKILL.md also tells
-the agent what that message means.
+the agent what that message means. Either way the install is the user's to run:
+the message leads with package-manager commands rather than a piped installer, so
+an agent relaying it has nothing to execute on the user's behalf.
+
+The engine inherits this process's environment, minus what it must not see: see
+_child_env.
 
 Two execution modes, chosen automatically:
   - Monorepo checkout (this repo): `packages/dex-core` is found above the skill,
@@ -81,6 +86,25 @@ _KNOWN_CONNECTORS = (
     "clickhouse",
 )
 _DEFAULT_CONNECTOR = "duckdb"
+
+# Credentials that turn up in a developer's or a CI runner's environment and that
+# the engine never reads. They are dropped from the engine's environment so
+# nothing it loads, dbt and package code included, can pick them up. A denylist
+# rather than an allowlist on purpose: connector discovery reads open-ended
+# families (DATABASE_URL, PG*, SNOWFLAKE_*, DATABRICKS_*, AWS_*, GOOGLE_*,
+# CLICKHOUSE_PASSWORD, DBT_SL_*) and dbt reads whatever env_var() a project names,
+# so an allowlist would break a working setup every time it missed one. A private
+# dbt package that authenticated through GITHUB_TOKEN should switch to dbt's own
+# DBT_ENV_SECRET_GIT_CREDENTIAL, which passes through.
+_WITHHELD_FROM_ENGINE = (
+    "CLICKHOUSE_CLOUD_API_KEY",
+    "CLICKHOUSE_CLOUD_API_SECRET",
+    "DEX_TEST_CH_CLOUD_API_KEY",
+    "DEX_TEST_CH_CLOUD_API_SECRET",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GHRS_TOKEN",
+)
 
 # The one flag the wrapper answers itself. It is stripped before anything else
 # reads the argv, so it never reaches the engine and never lands in the positionals
@@ -223,9 +247,12 @@ def _feature_extras(argv: list[str]) -> list[str]:
 
 
 def _engine_spec(extras: str, skill_dir: Path | None = None) -> list[str]:
-    skill_dir = skill_dir or Path(
-        os.environ.get("CLAUDE_SKILL_DIR", Path(__file__).resolve().parent.parent)
-    )
+    # The skill directory is where this file lives, never an environment variable:
+    # the harness already ran `${CLAUDE_SKILL_DIR}/scripts/run.py`, and honoring
+    # the variable a second time would let whoever controls the environment point
+    # uv at a different `packages/dex-core` to install and run. `skill_dir` exists
+    # for tests.
+    skill_dir = skill_dir or Path(__file__).resolve().parent.parent
     local_pkg = (skill_dir / ".." / ".." / "packages" / "dex-core").resolve()
     if local_pkg.is_dir():
         # Resolve the local package WITH the resolved extras (a plain path drops
@@ -253,6 +280,20 @@ def _uv_run(engine_spec: list[str], tail: list[str]) -> list[str]:
     than resolving the engine."""
 
     return ["uv", "run", "--no-project", *engine_spec, *tail]
+
+
+def _child_env() -> dict[str, str]:
+    """The environment the engine (and the warm-up's uv) runs with.
+
+    This process's environment minus the credentials listed in
+    _WITHHELD_FROM_ENGINE and minus `VIRTUAL_ENV`: the engine runs in uv's own
+    ephemeral environment, so an inherited one (the user's activated venv) is
+    irrelevant there and only makes uv print a mismatch warning on every call.
+    A copy, so this process's own environment is left as it was found.
+    """
+
+    withheld = {*_WITHHELD_FROM_ENGINE, "VIRTUAL_ENV"}
+    return {key: value for key, value in os.environ.items() if key not in withheld}
 
 
 def _envelope(
@@ -313,6 +354,7 @@ def _warm(argv: list[str]) -> int:
         _uv_run(spec, ["python", "-c", "import exmergo_dex_core"]),
         capture_output=True,
         text=True,
+        env=_child_env(),
     )
     elapsed = round(time.monotonic() - started, 3)
     if completed.returncode != 0:
@@ -355,18 +397,16 @@ def main() -> int:
                 "error",
                 errors=[
                     "dex runs its engine through uv, which was not found on "
-                    "PATH. Install it with: "
-                    "curl -LsSf https://astral.sh/uv/install.sh | sh "
-                    "(or `brew install uv`, or `pipx install uv`), then re-run."
+                    "PATH. Install it with `brew install uv` or `pipx install uv` "
+                    "(other platforms: "
+                    "https://docs.astral.sh/uv/getting-started/installation/), "
+                    "then re-run. An agent relays this to the user rather than "
+                    "running an installer itself."
                 ],
                 reason="prerequisite",
             )
         )
         return 1
-    # The engine runs in uv's own ephemeral environment, so an inherited
-    # VIRTUAL_ENV (e.g. the user's activated venv) is irrelevant to both paths
-    # below and only makes uv print a mismatch warning on every call. Drop it.
-    os.environ.pop("VIRTUAL_ENV", None)
     if _WARM_FLAG in argv:
         return _warm([arg for arg in argv if arg != _WARM_FLAG])
     # The connector extra is always installed; `explore cluster` and
@@ -380,13 +420,13 @@ def main() -> int:
         # Windows keeps the spawn: exec there hands control back to the shell
         # before the child finishes, and the prompt would interleave with the one
         # envelope a caller is reading off stdout.
-        return subprocess.call(cmd)
+        return subprocess.call(cmd, env=_child_env())
     # Exec rather than spawn everywhere else: the wrapper has nothing left to do
     # once the engine starts, and replacing the process hands over the terminal,
     # the signals, and the exit code directly instead of relaying them through a
     # parent that is only waiting.
-    os.execvp(cmd[0], cmd)
-    return 0  # os.execvp does not return; this keeps the signature a plain int
+    os.execvpe(cmd[0], cmd, _child_env())
+    return 0  # os.execvpe does not return; this keeps the signature a plain int
 
 
 if __name__ == "__main__":

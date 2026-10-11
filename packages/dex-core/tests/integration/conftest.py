@@ -70,7 +70,9 @@ ClickHouse Cloud (bills the dedicated Scale service in AWS us-east-1; the
 repository workflow performs the hard daily-usage preflight before any SQL).
 scripts/setup_clickhouse_cloud_ci.sh provisions the two isolated databases,
 least-privilege users, server-side limits, scoped usage reader, and protected
-GitHub environment used by this suite:
+GitHub environment used by this suite. The scoped API key is read from two
+files in DEX_SECRETS_DIR, never from the environment (see
+scripts/clickhouse_cloud/README.md):
 
     scripts/clickhouse_cloud/run_integration.sh
 """
@@ -78,6 +80,7 @@ GitHub environment used by this suite:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -92,6 +95,22 @@ DBX_MAX_SECONDS = float(os.environ.get("DEX_TEST_DATABRICKS_MAX_SECONDS", "60"))
 RS_MAX_SECONDS = float(os.environ.get("DEX_TEST_REDSHIFT_MAX_SECONDS", "60"))
 
 CH_MAX_SECONDS = float(os.environ.get("DEX_TEST_CH_MAX_SECONDS", "60"))
+
+
+def cloud_api_key_files() -> tuple[Path, Path]:
+    """The scoped ClickHouse Cloud API key's two files, where
+    scripts/clickhouse_cloud/secrets.sh puts and reads them.
+
+    The key never rides in the test environment: CI writes it to these files in
+    a step of its own, and the one test that needs it hands it to the one
+    clickhousectl call that uses it. The directory default mirrors secrets.sh,
+    including treating an empty variable as unset.
+    """
+
+    # Only read: the files are written by CI or by the operator, never here.
+    base = os.environ.get("RUNNER_TEMP") or os.environ.get("TMPDIR") or "/tmp"  # noqa: S108
+    directory = Path(os.environ.get("DEX_SECRETS_DIR") or Path(base) / "dex-secrets")
+    return directory / "clickhouse_api_key", directory / "clickhouse_api_secret"
 
 
 def integration_budget(ceiling: float | None = None) -> dict[str, float | bool]:
@@ -191,10 +210,13 @@ def _require_cloud_env(request):
             "DEX_TEST_CH_CLOUD_MAX_SECONDS",
             "DEX_TEST_CH_CLOUD_DSN",
             "DEX_TEST_CH_CLOUD_DEV_PASSWORD",
-            "DEX_TEST_CH_CLOUD_API_KEY",
-            "DEX_TEST_CH_CLOUD_API_SECRET",
         )
         missing = [name for name in required if not os.environ.get(name)]
+        missing += [
+            str(path)
+            for path in cloud_api_key_files()
+            if not (path.is_file() and path.stat().st_size)
+        ]
         if missing:
             pytest.skip(
                 "ClickHouse Cloud integration disabled: required values are "

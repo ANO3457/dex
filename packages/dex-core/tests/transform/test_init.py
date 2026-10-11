@@ -4,6 +4,7 @@ connector never falls through to a default."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,26 @@ def test_init_bootstraps_a_project_end_to_end(
         "type": "duckdb",
         "path": str(duckdb_file),
     }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="mode bits are synthetic on Windows")
+def test_init_writes_profiles_owner_only(duckdb_file: Path, tmp_path: Path, capsys):
+    """The profile init renders holds no secret, but it is where a user later
+    pastes one, so it starts 0600 rather than whatever the umask gives. The rest
+    of the scaffold keeps the umask's mode."""
+
+    previous = os.umask(0o022)
+    try:
+        rc, envelope = _run(
+            _init_argv(tmp_path, "--connector", "duckdb", "--path", str(duckdb_file)),
+            capsys,
+        )
+    finally:
+        os.umask(previous)
+    assert rc == 0, envelope
+    project = tmp_path / "analytics"
+    assert (project / "profiles.yml").stat().st_mode & 0o777 == 0o600
+    assert (project / "dbt_project.yml").stat().st_mode & 0o777 == 0o644
 
 
 @pytest.mark.live_open_adapter

@@ -523,7 +523,9 @@ replace) inlines a literal credential, so no secret ever reaches the diff.
   bootstraps a dbt project when none exists: `dbt_project.yml`, `models/staging/`
   and `models/marts/`, and a project-local `profiles.yml` with a single `dev`
   target wired to the warehouse dex already knows (`--path`, or `duckdb.path` in
-  `.dex/config.yml`). It is strictly additive (any existing dbt project is a
+  `.dex/config.yml`). The profile is written owner-only (`0600`), as is any
+  `profiles.yml` a later apply rewrites: dex renders only `env_var()` references
+  and key paths into it, but it is the file a password gets pasted into. It is strictly additive (any existing dbt project is a
   refusal, so nothing is ever overwritten), and everything created is reported
   as `create` diffs. **Init never defaults the connector**: the DuckDB on-ramp a
   read-only command may take (an explicit `--path`, or a committed config that

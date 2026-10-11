@@ -21,7 +21,7 @@ import yaml
 
 from exmergo_dex_core.cli import main
 
-from .conftest import integration_budget
+from .conftest import cloud_api_key_files, integration_budget
 
 pytestmark = [pytest.mark.integration, pytest.mark.clickhouse_cloud]
 
@@ -63,17 +63,27 @@ def cloud_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+def _cloud_api_key() -> dict[str, str]:
+    """The scoped API key as the two variables clickhousectl reads. Built for the
+    one subprocess that needs them, never set on this process."""
+
+    key_file, secret_file = cloud_api_key_files()
+    return {
+        "CLICKHOUSE_CLOUD_API_KEY": key_file.read_text(encoding="utf-8").strip(),
+        "CLICKHOUSE_CLOUD_API_SECRET": secret_file.read_text(encoding="utf-8").strip(),
+    }
+
+
 def _assert_sanitized(envelope: dict) -> None:
     payload = json.dumps(envelope)
-    for env_name in (
-        "DEX_TEST_CH_CLOUD_DSN",
-        "DEX_TEST_CH_CLOUD_DEV_PASSWORD",
-        "DEX_TEST_CH_CLOUD_API_KEY",
-        "DEX_TEST_CH_CLOUD_API_SECRET",
-    ):
-        value = os.environ.get(env_name)
+    secrets = {
+        name: os.environ.get(name)
+        for name in ("DEX_TEST_CH_CLOUD_DSN", "DEX_TEST_CH_CLOUD_DEV_PASSWORD")
+    }
+    secrets.update(_cloud_api_key())
+    for name, value in secrets.items():
         if value and value in payload:
-            pytest.fail(f"envelope leaked {env_name}")
+            pytest.fail(f"envelope leaked {name}")
     if re.search(r"https?://[^/@\s:]+:[^/@\s]+@", payload):
         pytest.fail("envelope leaked URL userinfo")
     for key in ("password", "api_secret", "api_key", "dsn"):
@@ -110,11 +120,13 @@ def test_connect_reports_cloud_capacity_and_matches_control_plane(
     )
     assert compute["approximate"] is True
 
-    control_env = os.environ.copy()
-    control_env["CLICKHOUSE_CLOUD_API_KEY"] = os.environ["DEX_TEST_CH_CLOUD_API_KEY"]
-    control_env["CLICKHOUSE_CLOUD_API_SECRET"] = os.environ[
-        "DEX_TEST_CH_CLOUD_API_SECRET"
-    ]
+    # Only what clickhousectl needs: a copy of this process's environment would
+    # hand it the database credentials too.
+    control_env = {
+        "PATH": os.environ["PATH"],
+        "HOME": os.environ.get("HOME", ""),
+        **_cloud_api_key(),
+    }
     clickhousectl = shutil.which("clickhousectl")
     assert clickhousectl is not None
     result = subprocess.run(  # noqa: S603 - fixed executable, explicit argv

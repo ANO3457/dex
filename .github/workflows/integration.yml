@@ -5,6 +5,11 @@ name: Integration
 # job is the documented exception: a service-scoped read-only API key and two
 # database credentials live only in a main-protected environment and rotate
 # through scripts/setup_clickhouse_cloud_ci.sh.
+# Every stored credential reaches only what reads it, never a whole job: a key
+# is written to an owner-only file by one step and read by the one command that
+# needs it (scripts/clickhouse_cloud/secrets.sh for the Cloud API key), and a
+# password rides on the env of the single step whose tests use it. Anything
+# else a job runs (uv, pytest's plugins, dbt, the engine) never inherits them.
 # Deliberately NOT a merge or release gate: ci.yml stays deterministic and
 # fork-runnable; this workflow answers "does the connector still work against
 # the real service" on main and on a schedule. Each suite reads shared/public
@@ -52,6 +57,10 @@ on:
       - "packages/dex-core/**"
       - "scripts/clickhouse*"
       - "scripts/clickhouse_cloud/**"
+      - "scripts/setup_*_dev.sh"
+      - "scripts/setup_clickhouse_cloud_ci.sh"
+      - "scripts/postgres_seed.sql"
+      - "scripts/check_container_hardening.sh"
       - ".github/workflows/integration.yml"
   schedule:
     - cron: "17 5 * * 1"
@@ -159,31 +168,40 @@ jobs:
       # blast radius is unchanged (read the samples, write the transient
       # scratch database) and DEX_CI itself stays keyless. The secret is
       # readable only by this environment, whose deployments are pinned to
-      # main, so a pull request cannot reach it. Emptying SNOWFLAKE_TOKEN and
-      # the WIF provider is what makes discovery pick the key pair rather than
-      # the token the job already minted.
+      # main, so a pull request cannot reach it.
+      # The PEM is materialized by a step of its own so the step that runs
+      # pytest never holds it: a child can read its parent's initial
+      # environment from /proc, so unsetting it for the child alone would not
+      # be enough. The test step gets only the file's path, and the file is
+      # owner-only because dex refuses a key file other accounts can read.
+      - name: Materialize the dbt key pair for the transform suite
+        env:
+          SNOWFLAKE_DBT_USER: ${{ vars.DEX_TEST_SNOWFLAKE_DBT_USER }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.DEX_TEST_SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          # Without these the suite reads Snowflake as "not configured" and
+          # skips itself green, which is the one failure mode the transform
+          # step exists to prevent. Refuse instead: the credential comes from
+          # the setup script, so a missing one means it has not been re-run.
+          if [ -z "$SNOWFLAKE_DBT_USER" ] || [ -z "$SNOWFLAKE_PRIVATE_KEY" ]; then
+            echo "::error::DEX_TEST_SNOWFLAKE_DBT_USER or DEX_TEST_SNOWFLAKE_PRIVATE_KEY is missing from the snowflake-integration environment; re-run scripts/setup_snowflake_ci.sh"
+            exit 1
+          fi
+          install -m 600 /dev/null "$RUNNER_TEMP/snowflake_ci_dbt_key.p8"
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY" > "$RUNNER_TEMP/snowflake_ci_dbt_key.p8"
+      # Emptying SNOWFLAKE_TOKEN and the WIF provider is what makes discovery
+      # pick the key pair rather than the token the job already minted.
       - name: Live Snowflake transform suite (dbt, key pair)
         env:
           SNOWFLAKE_USER: ${{ vars.DEX_TEST_SNOWFLAKE_DBT_USER }}
           SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
           SNOWFLAKE_WORKLOAD_IDENTITY_PROVIDER: ""
           SNOWFLAKE_TOKEN: ""
-          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.DEX_TEST_SNOWFLAKE_PRIVATE_KEY }}
-        run: |
-          # Without these the suite reads Snowflake as "not configured" and
-          # skips itself green, which is the one failure mode this step exists
-          # to prevent. Refuse instead: the credential comes from the setup
-          # script, so a missing one means it has not been re-run.
-          if [ -z "$SNOWFLAKE_USER" ] || [ -z "$SNOWFLAKE_PRIVATE_KEY" ]; then
-            echo "::error::DEX_TEST_SNOWFLAKE_DBT_USER or DEX_TEST_SNOWFLAKE_PRIVATE_KEY is missing from the snowflake-integration environment; re-run scripts/setup_snowflake_ci.sh"
-            exit 1
-          fi
-          key="${RUNNER_TEMP}/snowflake_ci_dbt_key.p8"
-          install -m 600 /dev/null "$key"
-          printf '%s' "$SNOWFLAKE_PRIVATE_KEY" > "$key"
-          trap 'rm -f "$key"' EXIT
-          SNOWFLAKE_PRIVATE_KEY_FILE="$key" \
-            uv run pytest tests/integration/test_snowflake_transform.py -q -m snowflake
+          SNOWFLAKE_PRIVATE_KEY_FILE: ${{ runner.temp }}/snowflake_ci_dbt_key.p8
+        run: uv run pytest tests/integration/test_snowflake_transform.py -q -m snowflake
+      - name: Remove the dbt key pair
+        if: always()
+        run: rm -f "$RUNNER_TEMP/snowflake_ci_dbt_key.p8"
 
   databricks:
     if: github.repository == 'exmergo/dex'
@@ -264,11 +282,6 @@ jobs:
       DEX_TEST_REDSHIFT_DATABASE: ${{ vars.DEX_TEST_REDSHIFT_DATABASE }}
       DEX_TEST_REDSHIFT_HOST: ${{ vars.DEX_TEST_REDSHIFT_HOST }}
       DEX_TEST_REDSHIFT_MAX_SECONDS: "60"
-      # The transform suite's password path only; the engine itself stays
-      # keyless (IAM temporary credentials through the assumed role). The
-      # secret is readable only by this environment, whose deployments are
-      # pinned to main, so a pull request cannot reach it.
-      DEX_TEST_REDSHIFT_DEV_PASSWORD: ${{ secrets.DEX_TEST_REDSHIFT_DEV_PASSWORD }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Assume the OIDC-trusted role, exporting AWS_* credentials into the
@@ -285,7 +298,24 @@ jobs:
       - name: Sync (redshift + duckdb + dev extras)
         run: uv sync --extra redshift --extra duckdb --extra dev
       - name: Live Redshift integration suite
-        run: uv run pytest tests/integration -q -m redshift
+        run: >-
+          uv run pytest tests/integration -q -m redshift
+          --ignore=tests/integration/test_redshift_transform.py
+      # The dbt_dev password is the transform suite's alone; the engine itself
+      # stays keyless (IAM temporary credentials through the assumed role). So
+      # it rides on this step and no other. The secret is readable only by this
+      # environment, whose deployments are pinned to main, so a pull request
+      # cannot reach it.
+      - name: Live Redshift transform suite (dbt, dbt_dev password)
+        env:
+          DEX_TEST_REDSHIFT_DEV_PASSWORD: ${{ secrets.DEX_TEST_REDSHIFT_DEV_PASSWORD }}
+        run: |
+          # Without it the transform tests skip themselves green; refuse.
+          if [ -z "$DEX_TEST_REDSHIFT_DEV_PASSWORD" ]; then
+            echo "::error::DEX_TEST_REDSHIFT_DEV_PASSWORD is missing from the redshift-integration environment; re-run scripts/setup_redshift_ci.sh"
+            exit 1
+          fi
+          uv run pytest tests/integration/test_redshift_transform.py -q -m redshift
 
   postgres:
     # No repository gate and no environment: the target is a job-local service
@@ -296,9 +326,16 @@ jobs:
     defaults:
       run:
         working-directory: packages/dex-core
+    # Same image digest as scripts/setup_postgres_dev.sh; bump both together.
+    # Hardened like that container, with one difference: the entrypoint starts
+    # as root here and needs SETUID and SETGID, the only capabilities added
+    # back, to drop to the postgres user (it ignores its own failed chmods, and
+    # the data directory the image ships is already postgres's). Once it has
+    # dropped, the server holds no capabilities at all. The first step below
+    # refuses the job if any of this is missing.
     services:
       postgres:
-        image: postgres:16
+        image: postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d # 16
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -308,11 +345,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --cap-drop ALL
+          --cap-add SETUID
+          --cap-add SETGID
+          --security-opt no-new-privileges:true
+          --pids-limit 256
+          --memory 1g
     env:
       DEX_TEST_PG_DSN: postgresql://dex_ro:dex_ro@localhost:5432/dex_dogfood
       DEX_TEST_PG_DEV_PASSWORD: dbt_dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Refuse an unhardened service container
+        working-directory: .
+        run: >-
+          scripts/check_container_hardening.sh "${{ job.services.postgres.id }}"
+          sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+          SETUID SETGID
       # The same seed the local dogfood container uses; psql ships on
       # ubuntu-latest runners.
       - name: Seed the service container
@@ -379,10 +428,10 @@ jobs:
       DEX_TEST_CH_CLOUD_COMPUTE_UNIT_PRICE_USD: ${{ vars.DEX_TEST_CH_CLOUD_COMPUTE_UNIT_PRICE_USD }}
       DEX_TEST_CH_CLOUD_MAX_SECONDS: ${{ vars.DEX_TEST_CH_CLOUD_MAX_SECONDS }}
       DEX_TEST_CH_CLOUD_MAX_DAILY_CHC: ${{ vars.DEX_TEST_CH_CLOUD_MAX_DAILY_CHC }}
-      DEX_TEST_CH_CLOUD_DSN: ${{ secrets.DEX_TEST_CH_CLOUD_DSN }}
-      DEX_TEST_CH_CLOUD_DEV_PASSWORD: ${{ secrets.DEX_TEST_CH_CLOUD_DEV_PASSWORD }}
-      DEX_TEST_CH_CLOUD_API_KEY: ${{ secrets.DEX_TEST_CH_CLOUD_API_KEY }}
-      DEX_TEST_CH_CLOUD_API_SECRET: ${{ secrets.DEX_TEST_CH_CLOUD_API_SECRET }}
+      # Where the scoped API key's two files live (scripts/clickhouse_cloud/
+      # secrets.sh reads them). tmpfs, so the bytes never reach the runner's
+      # disk. A path, not a secret: the values themselves are in no job env.
+      DEX_SECRETS_DIR: /dev/shm/dex-secrets
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require the protected Cloud configuration
@@ -392,11 +441,29 @@ jobs:
             DEX_TEST_CH_CLOUD_HOST DEX_TEST_CH_CLOUD_PORT \
             DEX_TEST_CH_CLOUD_DATABASE DEX_TEST_CH_CLOUD_DEV_DATABASE \
             DEX_TEST_CH_CLOUD_COMPUTE_UNIT_PRICE_USD \
-            DEX_TEST_CH_CLOUD_MAX_SECONDS DEX_TEST_CH_CLOUD_MAX_DAILY_CHC \
-            DEX_TEST_CH_CLOUD_DSN DEX_TEST_CH_CLOUD_DEV_PASSWORD \
-            DEX_TEST_CH_CLOUD_API_KEY DEX_TEST_CH_CLOUD_API_SECRET; do
+            DEX_TEST_CH_CLOUD_MAX_SECONDS DEX_TEST_CH_CLOUD_MAX_DAILY_CHC; do
             test -n "${!name}" || { echo "$name is missing" >&2; exit 1; }
           done
+      # The only step whose environment holds the Cloud API key. It writes the
+      # key and secret to owner-only files; from here on, preflight.sh hands
+      # them to its two clickhousectl calls and the Cloud test to its one, and
+      # nothing else in the job (uv, pytest, dbt, the engine) ever has them.
+      - name: Materialize the Cloud API key for the commands that read it
+        env:
+          API_KEY: ${{ secrets.DEX_TEST_CH_CLOUD_API_KEY }}
+          API_SECRET: ${{ secrets.DEX_TEST_CH_CLOUD_API_SECRET }}
+        run: |
+          if [ -z "$API_KEY" ] || [ -z "$API_SECRET" ]; then
+            echo "::error::DEX_TEST_CH_CLOUD_API_KEY or DEX_TEST_CH_CLOUD_API_SECRET is missing from the clickhouse-cloud-integration environment; re-run scripts/setup_clickhouse_cloud_ci.sh"
+            exit 1
+          fi
+          install -d -m 700 "$DEX_SECRETS_DIR"
+          (
+            umask 077
+            printf '%s' "$API_KEY" > "$DEX_SECRETS_DIR/clickhouse_api_key"
+            printf '%s' "$API_SECRET" > "$DEX_SECRETS_DIR/clickhouse_api_secret"
+          )
+          chmod 400 "$DEX_SECRETS_DIR/clickhouse_api_key" "$DEX_SECRETS_DIR/clickhouse_api_secret"
       - name: Install clickhousectl
         working-directory: .
         env:
@@ -425,9 +492,23 @@ jobs:
           enable-cache: true
       - name: Sync (clickhouse + duckdb + dev extras)
         run: uv sync --extra clickhouse --extra duckdb --extra dev
+      # The two database credentials are the suite's alone, so they ride on this
+      # step and no other.
       - name: Narrow ClickHouse Cloud integration suite
-        run: uv run pytest tests/integration/test_clickhouse_cloud.py -q --tb=line -m clickhouse_cloud
+        env:
+          DEX_TEST_CH_CLOUD_DSN: ${{ secrets.DEX_TEST_CH_CLOUD_DSN }}
+          DEX_TEST_CH_CLOUD_DEV_PASSWORD: ${{ secrets.DEX_TEST_CH_CLOUD_DEV_PASSWORD }}
+        run: |
+          # Without them the suite skips itself green; refuse instead.
+          if [ -z "$DEX_TEST_CH_CLOUD_DSN" ] || [ -z "$DEX_TEST_CH_CLOUD_DEV_PASSWORD" ]; then
+            echo "::error::DEX_TEST_CH_CLOUD_DSN or DEX_TEST_CH_CLOUD_DEV_PASSWORD is missing from the clickhouse-cloud-integration environment; re-run scripts/setup_clickhouse_cloud_ci.sh"
+            exit 1
+          fi
+          uv run pytest tests/integration/test_clickhouse_cloud.py -q --tb=line -m clickhouse_cloud
       - name: Provisional post-run usage report
         if: always() && steps.preflight.outcome != 'skipped'
         working-directory: .
         run: scripts/clickhouse_cloud/preflight.sh --report-only
+      - name: Remove the Cloud API key files
+        if: always()
+        run: rm -rf "$DEX_SECRETS_DIR"

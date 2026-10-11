@@ -53,8 +53,9 @@ uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [
 
 - `uv` is a prerequisite that Claude Code does not install. If the shell reports
   `uv: command not found`, stop and tell the user to install it
-  (`curl -LsSf https://astral.sh/uv/install.sh | sh`, `brew install uv`, or
-  `pipx install uv`), then re-run. Never diff the warehouse against the project
+  (`brew install uv` or `pipx install uv`, or the installer for their platform
+  from the uv docs), then re-run. Tell them the command; never run an installer
+  yourself. Never diff the warehouse against the project
   by hand instead: the drift axes and the baseline comparison live in the
   engine, so any other path is guesswork.
 - The first command in a fresh environment installs the engine and can take tens

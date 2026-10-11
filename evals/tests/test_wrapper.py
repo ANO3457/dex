@@ -76,7 +76,11 @@ def _run_without_uv(skill, monkeypatch, argv):
 
     module = _load(skill)
     monkeypatch.setattr(module.shutil, "which", lambda _name: None)
-    for target, attr in ((module.subprocess, "call"), (module.os, "execvp")):
+    for target, attr in (
+        (module.subprocess, "call"),
+        (module.os, "execvp"),
+        (module.os, "execvpe"),
+    ):
         monkeypatch.setattr(
             target,
             attr,
@@ -112,31 +116,37 @@ def test_missing_uv_refuses_with_one_error_envelope(skill, monkeypatch, capsys):
 @pytest.mark.parametrize("skill", _SKILLS)
 def test_missing_uv_message_names_uv_and_how_to_install_it(skill, monkeypatch, capsys):
     # The whole point of the refusal: a user who is not a Python developer has to
-    # be able to act on it without reading our source.
+    # be able to act on it without reading our source. It leads with package
+    # managers and carries no piped installer, because the reader is usually an
+    # agent, and a `curl ... | sh` in front of an agent is a command it may run.
     _run_without_uv(skill, monkeypatch, ["connect", "test"])
     message = json.loads(capsys.readouterr().out)["errors"][0]
     assert "uv" in message
-    assert "astral.sh/uv/install.sh" in message
+    assert "brew install uv" in message and "pipx install uv" in message
+    assert "| sh" not in message and "install.sh" not in message
 
 
 def _exec_argv(module, monkeypatch, argv: list[str]) -> list[str]:
     """Drive `main()` on a machine that has uv, and return the argv it execs.
 
     The wrapper replaces itself with the engine rather than waiting on a child, so
-    the command under test is what reaches `os.execvp`. `subprocess.call` stays a
-    raiser: reaching it would mean the exec branch was skipped on a POSIX host.
+    the command under test is what reaches `os.execvpe`. `subprocess.call` and
+    `os.execvp` stay raisers: reaching the first would mean the exec branch was
+    skipped on a POSIX host, and the second would hand the engine this process's
+    whole environment.
     """
 
     monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/uv")
     monkeypatch.setattr(module.os, "name", "posix")
-    monkeypatch.setattr(
-        module.subprocess,
-        "call",
-        lambda *a, **k: pytest.fail("the engine was spawned instead of exec'd"),
-    )
+    for target, attr in ((module.subprocess, "call"), (module.os, "execvp")):
+        monkeypatch.setattr(
+            target,
+            attr,
+            lambda *a, **k: pytest.fail("the engine was not exec'd with its own env"),
+        )
     execed: list[list[str]] = []
     monkeypatch.setattr(
-        module.os, "execvp", lambda _file, cmd: execed.append(cmd) or None
+        module.os, "execvpe", lambda _file, cmd, _env: execed.append(cmd) or None
     )
     monkeypatch.setattr(module.sys, "argv", ["run.py", *argv])
 
@@ -306,7 +316,11 @@ def _run_warm(module, monkeypatch, argv, *, returncode=0, stderr=""):
         return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr)
 
     monkeypatch.setattr(module.subprocess, "run", _fake_run)
-    for target, attr in ((module.os, "execvp"), (module.subprocess, "call")):
+    for target, attr in (
+        (module.os, "execvp"),
+        (module.os, "execvpe"),
+        (module.subprocess, "call"),
+    ):
         monkeypatch.setattr(
             target, attr, lambda *a, **k: pytest.fail("warm-up ran a dex command")
         )

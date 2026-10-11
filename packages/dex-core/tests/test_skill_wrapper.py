@@ -1,4 +1,4 @@
-"""The skill wrapper's extra resolution.
+"""The skill wrapper's extra resolution, and what it hands the engine.
 
 `skills/<skill>/scripts/run.py` runs before the engine is installed, so it decides
 which packaging extras `uv` resolves. That decision is invisible from inside the
@@ -17,6 +17,8 @@ path rather than imported.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -179,3 +181,87 @@ def _semantic_subparser(parser):
             if "semantic" in inner.choices:
                 return inner.choices["semantic"]
     raise AssertionError("no `explore semantic` subparser found")
+
+
+# --- what the wrapper hands the engine -----------------------------------------
+#
+# The wrapper is the one process that sits between the agent's environment and
+# the engine, so it is where the engine's inputs get narrowed: the package it
+# installs comes from where the wrapper lives, and the environment it passes on
+# leaves out credentials the engine never reads.
+
+
+def test_a_skill_dir_from_the_environment_cannot_redirect_the_engine(
+    wrapper, tmp_path, monkeypatch
+):
+    """`CLAUDE_SKILL_DIR` pointing at another tree with a `packages/dex-core` two
+    levels up changes nothing: the harness already used it to find this file, and
+    reading it again would let the environment choose which code uv installs."""
+
+    decoy_skill = tmp_path / "decoy" / "skills" / "explore"
+    decoy_skill.mkdir(parents=True)
+    (tmp_path / "decoy" / "packages" / "dex-core").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_SKILL_DIR", str(decoy_skill))
+
+    spec = wrapper._engine_spec("duckdb")
+
+    real = (SKILLS.parent / "packages" / "dex-core").resolve()
+    assert spec == ["--with", f"exmergo-dex-core[duckdb] @ {real.as_uri()}"]
+
+
+def test_the_child_env_withholds_unread_credentials_and_keeps_discovery(
+    wrapper, monkeypatch
+):
+    for name, value in {
+        "CLICKHOUSE_CLOUD_API_KEY": "control-plane-key",
+        "GITHUB_TOKEN": "ghp_not_real",
+        "VIRTUAL_ENV": "/somewhere/.venv",
+        "DATABASE_URL": "postgresql://dex_ro@localhost/app",
+        "SNOWFLAKE_PRIVATE_KEY_FILE": "/keys/k.p8",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    env = wrapper._child_env()
+
+    for withheld in ("CLICKHOUSE_CLOUD_API_KEY", "GITHUB_TOKEN", "VIRTUAL_ENV"):
+        assert withheld not in env
+    assert env["DATABASE_URL"] == "postgresql://dex_ro@localhost/app"
+    assert env["SNOWFLAKE_PRIVATE_KEY_FILE"] == "/keys/k.p8"
+    assert env["PATH"] == os.environ["PATH"]
+    # A copy: the wrapper's own environment is left as it was found.
+    assert os.environ["GITHUB_TOKEN"] == "ghp_not_real"  # noqa: S105 (a dummy)
+    assert os.environ["VIRTUAL_ENV"] == "/somewhere/.venv"
+
+
+@pytest.mark.parametrize("argv", [["explore", "inventory"], ["--warm"]])
+def test_both_ways_into_uv_carry_the_child_env(argv, monkeypatch):
+    """The exec that runs a command and the warm-up's subprocess both get the
+    narrowed environment. A path that fell back to inheriting would hand the
+    engine, or the uv resolving it, everything the agent's shell holds."""
+
+    module = _wrapper()
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_not_real")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dex_ro@localhost/app")
+    monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/uv")
+    monkeypatch.setattr(module.os, "name", "posix")
+    envs: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        module.os, "execvp", lambda *_a: pytest.fail("exec bypassed the child env")
+    )
+    monkeypatch.setattr(
+        module.os, "execvpe", lambda _file, _cmd, env: envs.append(env) or None
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda cmd, **kwargs: (
+            envs.append(kwargs.get("env"))
+            or subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(module.sys, "argv", ["run.py", *argv])
+
+    assert module.main() == 0
+    assert len(envs) == 1 and envs[0] is not None
+    assert "GITHUB_TOKEN" not in envs[0]
+    assert envs[0]["DATABASE_URL"] == "postgresql://dex_ro@localhost/app"
