@@ -110,7 +110,9 @@ class PortablePlan(BaseModel):
     not the repository root, and a checkout that puts the project somewhere else
     is a different checkout of a different source state. It is a declaration the
     applying side checks against its own layout rather than an instruction to
-    write there.
+    write there. It uses forward slashes, like every edit path, so one plan has
+    one digest whichever platform exported it; a backslash in a document written
+    before that is read as a separator when the document is applied.
     """
 
     schema_version: int = PLAN_DOCUMENT_SCHEMA_VERSION
@@ -320,7 +322,11 @@ def apply_document(
     from .plans import assert_kind_placement
 
     plan = verify_plan_document(document, expect_digest=expect_digest)
-    project = Path(repo_root) / (project_dir or plan.project_dir)
+    # A document exported on Windows before `project_dir` was recorded with
+    # forward slashes carries `wh\dbt`, which POSIX reads as one directory name.
+    # Its digest covers that spelling, so the backslash is normalized only here,
+    # where the path is joined, the same rule `contained_key` applies to edits.
+    project = Path(repo_root) / (project_dir or plan.project_dir).replace("\\", "/")
     edits: list[Edit] = [edit.as_edit() for edit in plan.edits]
 
     if plan.edit_target == "semantic":

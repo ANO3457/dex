@@ -9,6 +9,38 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plan for a nested dbt project has one digest on every platform and applies
+  on any of them** ([#527], reported by @catincloudlabs). A plan records where
+  the dbt project sits relative to the repository root, and `transform export`
+  carries it into the portable document as `project_dir`. It was written with
+  the platform separator, so a project pinned with `dbt_project_dir: wh/dbt` was
+  recorded as `wh\dbt` on Windows. The digest covers `project_dir`, so the same
+  plan digested differently on Windows and Linux, and a host that pinned
+  `--expect-digest` on one refused the plan exported on the other. A document
+  exported on Windows also did not apply on Linux or macOS, where `wh\dbt` is a
+  single directory name. `project_dir` is now recorded with forward slashes on
+  every platform, like every edit path. A document exported on Windows before
+  this still verifies against the digest taken over its backslash, and
+  `transform apply --plan-file` reads the backslash as a separator, so it
+  applies too. A plan already stored on Windows keeps the backslash until it is
+  planned again; it still applies in the checkout that stored it.
+
+- **`transform test --mutate` and `--scaffold` find a model the same way**
+  ([#528], reported by @catincloudlabs). `--mutate` matched the model's path
+  against the configured `model-paths` entry stringified with the platform
+  separator, so on Windows a nested entry such as `src/models` never matched and
+  `--mutate` refused a model that `--scaffold` found. On every platform it had
+  no segment boundary, so with `model-paths: ['models']` an analysis under
+  `models_analysis/` could be taken for a model: `--mutate` gave it the
+  ephemeral header and ran `dbt compile` before refusing. `--scaffold` had the
+  boundary but refused `./models` and `models/`, which dbt reads as `models`.
+  Both now read one lookup, which decides membership by directory the way
+  containment does. A name that is not a model, or that two model files share,
+  is refused before any dbt run, with the same message and `reason: request`
+  from both flags.
+
 ## [1.12.7] - 2026-10-08
 
 ### Changed

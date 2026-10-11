@@ -999,14 +999,11 @@ def _mutable_model(engine, shadow, model: str, mutation_mod):
     """
 
     from ..dbt_project import load as load_project
+    from ..dbt_project import model_file
 
     view = load_project(shadow.project)
-    original = _model_file(view, model)
-    if original is None:
-        raise mutation_mod.MutationError(
-            f"no model named '{model}' in this project's model paths"
-        )
-    path, content = original
+    path = model_file(view, model)
+    content = view.files[path].content
     # The header is appended rather than prepended: dbt gives a scalar config key
     # to the last `config()` call in a file, so a model declaring its own
     # `materialized` would otherwise win and the mutant would build a relation.
@@ -1082,19 +1079,6 @@ def _attached_tests(manifest: dict, node: dict) -> list[str]:
         or unit.get("model") == node.get("name")
     ]
     return attached
-
-
-def _model_file(view, model: str):
-    """The model's path and content, read off the project view."""
-
-    for path, file in view.files.items():
-        if not path.endswith(".sql"):
-            continue
-        if Path(path).stem == model and any(
-            path.startswith(str(Path(root))) for root in view.model_paths
-        ):
-            return path, file.content
-    return None
 
 
 def _plan_mutants(shadow, node, model_path, cap, dialect, mutation_mod):

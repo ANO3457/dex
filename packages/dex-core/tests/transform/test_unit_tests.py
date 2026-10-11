@@ -113,6 +113,39 @@ def test_scaffold_produces_a_given_block_per_input_with_only_columns_read(
     assert not (dbt_project_dir / "models/marts/test_customer_orders.yml").exists()
 
 
+@pytest.mark.parametrize("model_path", ["./models", "models/"])
+def test_scaffold_finds_the_model_however_the_model_path_is_spelled(
+    dbt_project_dir: Path, duckdb_file: Path, tmp_path: Path, capsys, model_path: str
+):
+    """dbt reads `./models` and `models/` as `models`. The keys `load()` builds
+    never carry the `./` or the trailing slash, so a lookup that glued `/` onto
+    the configured string refused a model dbt itself would build."""
+
+    project_yml = dbt_project_dir / "dbt_project.yml"
+    project_yml.write_text(
+        project_yml.read_text(encoding="utf-8").replace(
+            'model-paths: ["models"]', f'model-paths: ["{model_path}"]'
+        ),
+        encoding="utf-8",
+    )
+    _write_customer_orders_model(dbt_project_dir, _TWO_INPUT_MODEL)
+    _seed_cache(tmp_path, duckdb_file, capsys)
+
+    rc, envelope = _run(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "transform",
+            "test",
+            "--scaffold",
+            "customer_orders",
+        ],
+        capsys,
+    )
+    assert rc == 0, envelope
+    assert envelope["data"]["paths"] == ["models/marts/test_customer_orders.yml"]
+
+
 def test_scaffold_warns_the_stub_expectation_fails_until_filled_in(
     dbt_project_dir: Path, duckdb_file: Path, tmp_path: Path, capsys
 ):
