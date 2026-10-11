@@ -8,6 +8,9 @@ The engine version is derived from the git tag and follows
 tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
+
+## [1.12.8] - 2026-10-11
+
 ### Fixed
 
 - **`dex demo` names its paths with forward slashes on Windows too** ([#487]).
