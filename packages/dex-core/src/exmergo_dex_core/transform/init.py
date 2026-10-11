@@ -39,7 +39,12 @@ from ..config import (
     load_config,
     save_config,
 )
-from ..dbt_project import PROFILES_FILE, PROJECT_FILE, discover_projects
+from ..dbt_project import (
+    PROFILES_FILE,
+    PROJECT_FILE,
+    discover_projects,
+    write_project_file,
+)
 from ..diffs import file_diff
 from ..errors import DexError
 from ..storage import DEX_DIR
@@ -173,9 +178,7 @@ def init_project(
 
     diffs = [file_diff(rel, None, content) for rel, content in files.items()]
     for rel, content in files.items():
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        write_project_file(root / rel, content)
     save_config(config, root)
     diffs.append(
         file_diff(config_rel, old_config, config_path.read_text(encoding="utf-8"))

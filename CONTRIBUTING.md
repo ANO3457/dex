@@ -213,6 +213,16 @@ fork-runnable, kept in the integration workflow for pattern parity with the
 cloud connectors rather than as a cost decision. There is no
 `setup_postgres_ci.sh`; there is nothing to provision.
 
+Both dogfood containers (this one and the ClickHouse one below) and the CI
+service container run hardened: the image pinned by digest, every Linux
+capability dropped (the CI container keeps only `SETUID` and `SETGID`, which
+its entrypoint needs to drop to the `postgres` user), no-new-privileges, and pid
+and memory limits. `scripts/check_container_hardening.sh` refuses a container
+missing any of these, so one left over from an older setup script is refused
+rather than reused: remove it with the script's `--down` and run it again. To
+bump an image, re-read its digest with the command in the setup script and
+change it there (and, for Postgres, in the workflow's service container too).
+
 ## Live ClickHouse integration tests
 
 The same `tests/integration/` directory carries the ClickHouse suite:
@@ -253,8 +263,12 @@ One-time setup and subsequent atomic credential rotation use
 prices live in that script; flags are reserved for deliberate migration/testing.
 `scripts/clickhouse_cloud/preflight.sh` reads the exact
 service's UTC-day usage before any SQL connection can wake it and refuses at the
-protected 2-CHC limit. See `scripts/clickhouse_cloud/README.md` for setup, local
-execution, rotation, and bounded teardown.
+protected 2-CHC limit. Long-lived credentials never sit in a job's or a
+script's environment: the Cloud API key and the admin password are owner-only
+files in `DEX_SECRETS_DIR`, each handed to the one command that needs it, and
+the database passwords ride only on the step that runs the suite. See
+`scripts/clickhouse_cloud/README.md` for setup, local execution, rotation, and
+bounded teardown.
 
 Two assertions in that suite are load-bearing and worth understanding before
 changing the seed. The seed puts exactly 40 of 5,000 `order_items` rows on

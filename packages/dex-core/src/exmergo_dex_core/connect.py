@@ -866,6 +866,16 @@ def resolve_snowflake_connection(
 
 
 def _normalize_connection(params: dict, target: SnowflakeTarget) -> dict:
+    """Apply the config's account pin and refuse a connection dex should not use.
+
+    Every discovery path ends here, so this is where a private key file that
+    other accounts can read is refused, the way ``ssh`` refuses one: using it
+    silently would lend dex's authority to a key that is already exposed. Only an
+    existing file is checked; a path that does not resolve is left for the
+    connector to report in its own words. ``private_key`` is skipped because it
+    holds key material, not a path.
+    """
+
     normalized = dict(params)
     if target.account:
         normalized["account"] = target.account
@@ -874,6 +884,22 @@ def _normalize_connection(params: dict, target: SnowflakeTarget) -> dict:
             "the discovered Snowflake connection has no account identifier; "
             "set snowflake.account in .dex/config.yml or fix the connection"
         )
+    key_path = normalized.get("private_key_file") or normalized.get("private_key_path")
+    # Windows reports mode bits synthesized from the read-only flag, so every key
+    # would look world-readable there; its ACLs, which this cannot see, are what
+    # actually govern access.
+    if key_path and os.name == "posix":
+        path = Path(str(key_path)).expanduser()
+        try:
+            mode = path.stat().st_mode
+        except OSError:
+            mode = 0
+        if mode & 0o077:
+            raise CredentialDiscoveryError(
+                f"the Snowflake private key file {path} is readable by other "
+                f"accounts (mode {mode & 0o777:04o}); restrict it with "
+                f"`chmod 600 {path}` and re-run"
+            )
     return normalized
 
 

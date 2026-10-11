@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Provision or rotate the dedicated ClickHouse Cloud integration target.
 # Account coordinates and policy are committed non-secret constants; no
-# arbitrary service is ever discovered or mutated. Bootstrap credentials stay
-# in the process environment.
+# arbitrary service is ever discovered or mutated. The bootstrap admin key and
+# password are files in DEX_SECRETS_DIR, and each reaches only the command that
+# uses it (see clickhouse_cloud/secrets.sh); nothing else this script starts,
+# gh, openssl, uv, pytest or dbt included, inherits them.
 
 set -euo pipefail
 
@@ -59,6 +61,18 @@ done
   echo "--max-seconds must be a positive integer" >&2; exit 2; }
 MAX_BYTES=$((MAX_SECONDS * SCAN_BYTES_PER_SECOND))
 
+# Sourced before the first tool runs (gh is next), so a key or password the
+# calling shell still exports is unset before gh, curl, uv, or anything later
+# could inherit it.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=scripts/clickhouse_cloud/secrets.sh
+source "$ROOT/scripts/clickhouse_cloud/secrets.sh"
+[[ -n "${CLICKHOUSE_USER:-}" ]] || {
+  echo "CLICKHOUSE_USER (the service's admin user) is required in the environment" >&2
+  exit 2
+}
+use_cloud_credentials admin
+
 for tool in clickhousectl clickhouse jq openssl curl gh; do
   command -v "$tool" >/dev/null || { echo "$tool is required on PATH" >&2; exit 2; }
 done
@@ -67,23 +81,8 @@ if [[ "$RUN_DOGFOOD" == true ]]; then
   command -v uv >/dev/null || { echo "uv is required for --dogfood" >&2; exit 2; }
 fi
 
-for name in CLICKHOUSE_CLOUD_API_KEY CLICKHOUSE_CLOUD_API_SECRET CLICKHOUSE_USER CLICKHOUSE_PASSWORD; do
-  [[ -n "${!name:-}" ]] || { echo "$name is required in the environment" >&2; exit 2; }
-done
-
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SEED="$ROOT/scripts/clickhouse_seed.sql"
 API_ROOT="https://api.clickhouse.cloud/v1/organizations/$ORGANIZATION"
-
-cloud_api_curl_config() {
-  # Feed Basic credentials on a private pipe. `curl --user key:secret` would
-  # expose them briefly in the process list even though neither script nor curl
-  # prints them.
-  local credentials="$CLICKHOUSE_CLOUD_API_KEY:$CLICKHOUSE_CLOUD_API_SECRET"
-  credentials=${credentials//\\/\\\\}
-  credentials=${credentials//\"/\\\"}
-  printf 'user = "%s"\n' "$credentials"
-}
 
 cloud_api() {
   local method=$1 path=$2 data=${3:-}
@@ -99,11 +98,11 @@ cloud_api() {
 }
 
 echo "==> validating the exact organization and service"
-clickhousectl cloud auth status >/dev/null
-ORG_JSON=$(clickhousectl cloud org get "$ORGANIZATION" --json)
+cloudctl cloud auth status >/dev/null
+ORG_JSON=$(cloudctl cloud org get "$ORGANIZATION" --json)
 [[ "$(jq -er '.id' <<<"$ORG_JSON")" == "$ORGANIZATION" ]] || {
   echo "organization ID mismatch" >&2; exit 1; }
-SERVICE_JSON=$(clickhousectl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
+SERVICE_JSON=$(cloudctl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
 [[ "$(jq -er '.id' <<<"$SERVICE_JSON")" == "$SERVICE" ]] || {
   echo "service ID mismatch" >&2; exit 1; }
 [[ "$(jq -er '.provider' <<<"$SERVICE_JSON")" == "aws" ]] || {
@@ -123,10 +122,10 @@ if ! has_ownership_tag "$SERVICE_JSON"; then
     exit 1
   fi
   echo "==> adopting the explicitly named dedicated service"
-  clickhousectl cloud service update "$SERVICE" --org-id "$ORGANIZATION" \
+  cloudctl cloud service update "$SERVICE" --org-id "$ORGANIZATION" \
     --add-tag "$OWNERSHIP_TAG=$OWNERSHIP_TAG_VALUE" \
     --add-tag "dex-ci-environment=$ENVIRONMENT" --json >/dev/null
-  SERVICE_JSON=$(clickhousectl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
+  SERVICE_JSON=$(cloudctl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
 fi
 has_ownership_tag "$SERVICE_JSON" || { echo "ownership tag verification failed" >&2; exit 1; }
 
@@ -140,13 +139,13 @@ else
 fi
 
 echo "==> enforcing fixed minimum capacity and five-minute idling"
-clickhousectl cloud service scale "$SERVICE" --org-id "$ORGANIZATION" \
+cloudctl cloud service scale "$SERVICE" --org-id "$ORGANIZATION" \
   --autoscaling-mode vertical --min-replica-memory-gb 8 \
   --max-replica-memory-gb 8 --num-replicas "$MIN_REPLICAS" \
   --idle-scaling true --idle-timeout-minutes 5 --json >/dev/null
 
 for _ in $(seq 1 60); do
-  SERVICE_JSON=$(clickhousectl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
+  SERVICE_JSON=$(cloudctl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
   if jq -e --argjson replicas "$MIN_REPLICAS" '
       .currentScaling.effectiveAutoscalingMode == "vertical" and
       .currentScaling.effectiveMinReplicaMemoryGb == 8 and
@@ -175,13 +174,13 @@ HTTP_PORT=$(jq -er '.endpoints[] | select(.protocol == "https") | .port' <<<"$SE
 
 echo "==> waking the service and validating database administrator access"
 for _ in $(seq 1 30); do
-  if clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
+  if with_admin_password clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
       --user "$CLICKHOUSE_USER" --query "SELECT 1" >/dev/null 2>&1; then
     break
   fi
   sleep 10
 done
-clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
+with_admin_password clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
   --user "$CLICKHOUSE_USER" --query "SELECT 1" >/dev/null
 
 READER_PASSWORD="Aa1!$(openssl rand -hex 24)"
@@ -190,7 +189,7 @@ DBT_PASSWORD="Aa1!$(openssl rand -hex 24)"
 run_admin_multiquery() {
   local error_file line
   error_file=$(mktemp)
-  if clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
+  if with_admin_password clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
       --user "$CLICKHOUSE_USER" --multiquery 2>"$error_file"; then
     rm -f "$error_file"
     return 0
@@ -205,7 +204,7 @@ run_admin_multiquery() {
 }
 
 echo "==> reseeding only $APP_DATABASE and $DEV_DATABASE from the shared fixture"
-clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
+with_admin_password clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
   --user "$CLICKHOUSE_USER" --multiquery \
   --param_app_database="$APP_DATABASE" --param_dev_database="$DEV_DATABASE" <"$SEED"
 
@@ -215,10 +214,10 @@ echo "==> rotating dex-owned database users and durable constraints"
 # be retried without breaking a running workflow. Generated values are
 # generated and sent over stdin; they never appear in command arguments,
 # output, or repository files.
-READER_EXISTS=$(clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
+READER_EXISTS=$(with_admin_password clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
   --user "$CLICKHOUSE_USER" --format TSVRaw \
   --query "SELECT count() FROM system.users WHERE name = '$READER_USER'")
-DBT_EXISTS=$(clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
+DBT_EXISTS=$(with_admin_password clickhouse client --secure --host "$HOST" --port "$NATIVE_PORT" \
   --user "$CLICKHOUSE_USER" --format TSVRaw \
   --query "SELECT count() FROM system.users WHERE name = '$DBT_USER'")
 if [[ "$READER_EXISTS" == 1 ]]; then
@@ -317,23 +316,33 @@ else
 fi
 
 echo "==> creating a new scoped API key before retiring older keys"
-OLD_KEYS=$(clickhousectl cloud key list --org-id "$ORGANIZATION" --json)
+OLD_KEYS=$(cloudctl cloud key list --org-id "$ORGANIZATION" --json)
 KEY_NAME="${KEY_PREFIX}$(date -u +%Y%m%dT%H%M%SZ)"
 # GitHub-hosted runners have no stable single egress address. This network
 # portability applies only to the read-only control-plane key; the service's
 # SQL ipAccessList is never changed here, and the role cannot mutate service or
 # billing configuration.
-NEW_KEY_JSON=$(clickhousectl cloud key create --org-id "$ORGANIZATION" \
+NEW_KEY_JSON=$(cloudctl cloud key create --org-id "$ORGANIZATION" \
   --name "$KEY_NAME" --role-id "$ROLE_ID" --state enabled \
   --ip-allow 0.0.0.0/0 --json)
 NEW_KEY_RESOURCE_ID=$(jq -er '.id // .key.id' <<<"$NEW_KEY_JSON")
 NEW_KEY_ID=$(jq -er '.keyId' <<<"$NEW_KEY_JSON")
 NEW_KEY_SECRET=$(jq -er '.keySecret' <<<"$NEW_KEY_JSON")
 
+# The new key goes into a secrets directory of its own. preflight.sh and the
+# --dogfood run read the scoped file names, so pointing them here proves the
+# key that was just minted, never the admin key this script runs with.
+SCOPED_SECRETS=$(mktemp -d)
+trap 'rm -rf "$SCOPED_SECRETS"' EXIT
+(
+  umask 077
+  printf '%s' "$NEW_KEY_ID" >"$SCOPED_SECRETS/clickhouse_api_key"
+  printf '%s' "$NEW_KEY_SECRET" >"$SCOPED_SECRETS/clickhouse_api_secret"
+)
+
 SCOPED_KEY_READY=false
 for _ in $(seq 1 12); do
-  if DEX_TEST_CH_CLOUD_API_KEY="$NEW_KEY_ID" \
-      DEX_TEST_CH_CLOUD_API_SECRET="$NEW_KEY_SECRET" \
+  if DEX_SECRETS_DIR="$SCOPED_SECRETS" \
       DEX_TEST_CH_CLOUD_ORG_ID="$ORGANIZATION" \
       DEX_TEST_CH_CLOUD_SERVICE_ID="$SERVICE" \
       DEX_TEST_CH_CLOUD_MAX_DAILY_CHC="$DAILY_CHC_LIMIT" \
@@ -345,7 +354,7 @@ for _ in $(seq 1 12); do
   sleep 5
 done
 if [[ "$SCOPED_KEY_READY" != true ]]; then
-  clickhousectl cloud key delete "$NEW_KEY_RESOURCE_ID" \
+  cloudctl cloud key delete "$NEW_KEY_RESOURCE_ID" \
     --org-id "$ORGANIZATION" --json >/dev/null
   echo "scoped API key did not become readable within 60 seconds" >&2
   exit 1
@@ -421,7 +430,7 @@ printf '%s;\n' \
 echo "==> retiring older dex CI usage keys after new credentials verified"
 while IFS= read -r old_id; do
   [[ -n "$old_id" && "$old_id" != "$NEW_KEY_ID" ]] || continue
-  clickhousectl cloud key delete "$old_id" --org-id "$ORGANIZATION" --json >/dev/null
+  cloudctl cloud key delete "$old_id" --org-id "$ORGANIZATION" --json >/dev/null
 done < <(jq -r --arg prefix "$KEY_PREFIX" '.[]? | select(.name | startswith($prefix)) | .id' <<<"$OLD_KEYS")
 
 if [[ "$RUN_DOGFOOD" == true ]]; then
@@ -437,8 +446,7 @@ if [[ "$RUN_DOGFOOD" == true ]]; then
   DEX_TEST_CH_CLOUD_MAX_DAILY_CHC="$DAILY_CHC_LIMIT" \
   DEX_TEST_CH_CLOUD_DSN="$READER_DSN" \
   DEX_TEST_CH_CLOUD_DEV_PASSWORD="$DBT_PASSWORD" \
-  DEX_TEST_CH_CLOUD_API_KEY="$NEW_KEY_ID" \
-  DEX_TEST_CH_CLOUD_API_SECRET="$NEW_KEY_SECRET" \
+  DEX_SECRETS_DIR="$SCOPED_SECRETS" \
     "$ROOT/scripts/clickhouse_cloud/run_integration.sh"
 fi
 

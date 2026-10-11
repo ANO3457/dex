@@ -25,6 +25,13 @@ credentials all work; only the coarse method (for example
 `named_connection:key_pair`) is ever surfaced. Identities, passwords, and key
 material never cross the envelope. Every discovery failure names the fix.
 
+A key-pair connection's private key file must be readable by its owner alone,
+the rule `ssh` applies to its keys: a file with any group or other permission
+bit is refused, with its path and the `chmod 600` that fixes it, before any
+connection is attempted. Windows is not checked, because its mode bits are
+synthesized and its ACLs, which govern access there, are not visible to this
+check.
+
 One caveat: workload identity covers the engine (explore, maintain, query)
 but not dbt builds, because stable dbt-snowflake does not support it yet.
 `transform init` refuses a workload-identity connection and names the

@@ -3718,7 +3718,10 @@ def test_the_skill_wrapper_never_installs_into_the_repo_it_is_pointed_at(
     # than forcing one by setting `os.name`, which `wrapper.os` shares with the
     # whole process and pathlib reads to choose its path class.
     monkeypatch.setattr(
-        wrapper.os, "execvp", lambda _file, cmd: issued.append(cmd) or None
+        wrapper.os, "execvp", lambda *_a: pytest.fail("exec bypassed the child env")
+    )
+    monkeypatch.setattr(
+        wrapper.os, "execvpe", lambda _file, cmd, _env: issued.append(cmd) or None
     )
     monkeypatch.setattr(
         wrapper.subprocess, "call", lambda cmd, **_kw: issued.append(cmd) or 0

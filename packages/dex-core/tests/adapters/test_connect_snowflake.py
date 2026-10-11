@@ -5,6 +5,7 @@ and the simulated server (statement timeout)."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -734,6 +735,80 @@ def test_discovery_failure_names_the_fixes(tmp_path: Path, monkeypatch):
             SnowflakeTarget(connection_name="missing"), {}, tmp_path
         )
     assert "missing" in str(exc_info.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="mode bits are synthetic on Windows")
+@pytest.mark.parametrize("source", ["named_connection", "environment"])
+def test_a_key_file_other_accounts_can_read_is_refused_with_the_fix(
+    tmp_path: Path, monkeypatch, source: str
+):
+    """A group- or world-readable private key is refused, the way ssh refuses one.
+
+    Using it silently lends dex's authority to a key anyone on the machine can
+    already copy. The message has to carry the path and the `chmod` that fixes
+    it, because the person reading it is the one who can run that command. The
+    same file at 0600 passes, so the check is the mode and nothing else.
+    """
+
+    from exmergo_dex_core import connect as connect_mod
+    from exmergo_dex_core.connect import (
+        CredentialDiscoveryError,
+        resolve_snowflake_connection,
+    )
+
+    key = tmp_path / "rsa_key.p8"
+    key.write_text("not a real key", encoding="utf-8")
+    key.chmod(0o644)
+    if source == "named_connection":
+        connections = {
+            "dex-ci": {"account": "A", "user": "U", "private_key_file": str(key)}
+        }
+        target, env = SnowflakeTarget(connection_name="dex-ci"), {}
+    else:
+        connections = {}
+        target = SnowflakeTarget()
+        env = {
+            "SNOWFLAKE_ACCOUNT": "A",
+            "SNOWFLAKE_USER": "U",
+            "SNOWFLAKE_PRIVATE_KEY_FILE": str(key),
+        }
+    monkeypatch.setattr(connect_mod, "_snowflake_connections", lambda env: connections)
+
+    with pytest.raises(CredentialDiscoveryError) as exc_info:
+        resolve_snowflake_connection(target, env, tmp_path)
+    message = str(exc_info.value)
+    assert str(key) in message
+    assert "0644" in message
+    assert f"chmod 600 {key}" in message
+
+    key.chmod(0o600)
+    params, method = resolve_snowflake_connection(target, env, tmp_path)
+    assert params["private_key_file"] == str(key)
+    assert method.endswith(":key_pair")
+
+
+def test_a_key_path_that_does_not_resolve_is_left_to_the_connector(
+    tmp_path: Path, monkeypatch
+):
+    """Only an existing file is checked. A path that does not resolve (a typo, an
+    unrendered dbt `env_var()`) is not a permissions problem, and the connector's
+    own error names it better than a mode check could."""
+
+    from exmergo_dex_core import connect as connect_mod
+    from exmergo_dex_core.connect import resolve_snowflake_connection
+
+    connections = {
+        "dex-ci": {
+            "account": "A",
+            "user": "U",
+            "private_key_file": str(tmp_path / "absent.p8"),
+        }
+    }
+    monkeypatch.setattr(connect_mod, "_snowflake_connections", lambda env: connections)
+    params, _method = resolve_snowflake_connection(
+        SnowflakeTarget(connection_name="dex-ci"), {}, tmp_path
+    )
+    assert params["private_key_file"] == str(tmp_path / "absent.p8")
 
 
 def test_discovery_falls_back_to_dbt_profiles(dbt_project_dir: Path, monkeypatch):
