@@ -2,7 +2,7 @@ name: Release
 
 # A semver tag drives the whole chain: a test gate, a coupling check, build, then
 # PyPI publish via Trusted Publishing (OIDC, no stored tokens) and the anti-squat
-# dex-core stub. The wrapper pins are bumped before tagging (scripts/
+# name stubs. The wrapper pins are bumped before tagging (scripts/
 # prepare_release.sh), so this workflow never writes back; it only verifies the
 # tagged commit is self-consistent before it publishes.
 on:
@@ -96,39 +96,59 @@ jobs:
         run: uv publish
       # Optionally emit PEP 740 / Sigstore attestations for provenance.
 
-  # Anti-squat: claim and hold the short name `dex-core`, which redirects users to
-  # exmergo-dex-core. This is a one-time reservation, so it must be idempotent
-  # across releases. `uv publish --check-url` does NOT achieve that: it skips a
-  # file only when the remote copy is byte-identical, and a rebuilt static-version
-  # (0.0.0) stub wheel is not reproducible, so its hash differs from the copy
-  # published on the first release and uv errors ("Local file and index file do
-  # not match") instead of skipping. So we gate on whether the project already
-  # exists on PyPI and no-op if it does. Needs its own PyPI Trusted Publisher for
-  # the `dex-core` project, with a DISTINCT environment (pypi-stub): PyPI rejects
-  # two pending publishers that share an identical owner/repo/workflow/environment,
-  # so the engine job uses `pypi` and this one uses `pypi-stub`.
-  reserve-dex-core:
+  # Anti-squat: claim and hold names people would guess for the engine, each a
+  # placeholder that redirects users to exmergo-dex-core. This is a one-time
+  # reservation per name, so it must be idempotent across releases.
+  # `uv publish --check-url` does NOT achieve that: it skips a file only when the
+  # remote copy is byte-identical, and a rebuilt static-version (0.0.0) stub wheel
+  # is not reproducible, so its hash differs from the copy published on the first
+  # release and uv errors ("Local file and index file do not match") instead of
+  # skipping.
+  # So we gate on whether the project already exists on PyPI and no-op if it does.
+  #
+  # Each name needs its own PyPI Trusted Publisher with its own environment, never
+  # one shared with another job. PyPI rejects two pending publishers with an
+  # identical owner/repo/workflow/environment, and when minting a token it matches
+  # a pending publisher before a live one, so a pending publisher on a shared
+  # environment would be claimed by whichever job mints first. One environment per
+  # project also keeps each minted token scoped to that one project. Adding a name
+  # means a stub package under packages/, a matrix entry, and a pending publisher
+  # on PyPI for that project and environment.
+  reserve-names:
     needs: publish
     runs-on: ubuntu-latest
-    environment: pypi-stub
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: dex-core
+            path: packages/dex-core-stub
+            environment: pypi-stub
+          - project: exmergo-dex
+            path: packages/exmergo-dex-stub
+            environment: pypi-stub-exmergo-dex
+    name: reserve ${{ matrix.project }}
+    environment: ${{ matrix.environment }}
     permissions:
       contents: read  # see the publish job: job-level permissions replace, not merge.
       id-token: write
     defaults:
       run:
-        working-directory: packages/dex-core-stub
+        working-directory: ${{ matrix.path }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - name: Reserve dex-core on PyPI (once; no-op if the name already exists)
+      - name: Reserve the name on PyPI (once; no-op if it already exists)
+        env:
+          PROJECT: ${{ matrix.project }}
         run: |
           # Publish only on a definite 404 (name not yet reserved). On 200 the
           # name is already held, so skip. On any other response (network/5xx)
           # skip too, rather than risk the non-idempotent publish path above.
-          code=$(curl -s -o /dev/null -w '%{http_code}' https://pypi.org/pypi/dex-core/json)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${PROJECT}/json")
           case "$code" in
-            200) echo "dex-core is already reserved on PyPI; nothing to do."; exit 0 ;;
-            404) echo "dex-core not found on PyPI; building and publishing the stub." ;;
+            200) echo "${PROJECT} is already reserved on PyPI; nothing to do."; exit 0 ;;
+            404) echo "${PROJECT} not found on PyPI; building and publishing the stub." ;;
             *)   echo "Unexpected HTTP ${code} from PyPI; skipping to avoid a bad publish."; exit 0 ;;
           esac
           uv build

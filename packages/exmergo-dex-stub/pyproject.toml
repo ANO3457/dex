@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Anti-squat placeholder that reserves `exmergo-dex` on PyPI and points users at
+# the real distribution, `exmergo-dex-core`. It is the name people guess from the
+# brand, so an unclaimed copy would catch installs meant for the engine. It ships
+# no working code on purpose. The version is independent of the engine and rarely
+# changes; the release workflow reserves the name once, gating on whether the
+# project already exists on PyPI and building and publishing the stub only if it
+# does not.
+[project]
+name = "exmergo-dex"
+version = "0.0.0"
+description = "Reserved by Exmergo. The dex engine is published as 'exmergo-dex-core'."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Exmergo, Inc.", email = "support@exmergo.com" }]
+keywords = ["dex", "exmergo", "exmergo-dex-core", "analytics-engineering", "placeholder"]
+
+[project.urls]
+Homepage = "https://www.exmergo.com/dex"
+Repository = "https://github.com/exmergo/dex"
+
+[tool.hatch.build.targets.wheel]
+packages = ["exmergo_dex"]

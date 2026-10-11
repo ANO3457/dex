@@ -608,17 +608,28 @@ credentials:
   `schema-drift`, `data-contracts`. This is where discovery lives, not the slug.
 - **TestPyPI dry-run:** `scripts/testpypi_dry_run.sh` proves the publish-and-pin
   loop before automation.
-- **PyPI Trusted Publishing (both projects):** configure a pending publisher for
-  `exmergo-dex-core` (owner `exmergo`, repo `dex`, workflow `release.yml`,
-  environment `pypi`) and a second for `dex-core` with the **same values except
-  environment `pypi-stub`**. The environments must differ: PyPI rejects two
-  pending publishers that share an identical config. Create both environments in
-  the repo's GitHub settings. No API tokens are stored.
-- **Anti-squat `dex-core` stub:** published automatically by the
-  `reserve-dex-core` job in `release.yml` from `packages/dex-core-stub/`,
-  idempotently via `uv publish --check-url`. It claims the name on the first
-  tagged release and is a no-op after. For protection before that release, you
-  can publish the stub once by hand; the CI job then simply skips it.
+- **PyPI Trusted Publishing (one publisher per project):** every project the
+  release workflow publishes has its own publisher with owner `exmergo`, repo
+  `dex`, workflow `release.yml`, and its own environment:
+
+  | PyPI project | Environment |
+  | --- | --- |
+  | `exmergo-dex-core` | `pypi` |
+  | `dex-core` | `pypi-stub` |
+  | `exmergo-dex` | `pypi-stub-exmergo-dex` |
+
+  The environments must differ: PyPI rejects two pending publishers that share an
+  identical config, and a pending publisher on an environment another job already
+  uses would be claimed by that job's first token. For a project that does not
+  exist yet, add a *pending* publisher from your PyPI account's Publishing page.
+  Create each environment in the repo's GitHub settings. No API tokens are stored.
+- **Anti-squat name stubs:** `dex-core` and `exmergo-dex` are placeholders that
+  point users at `exmergo-dex-core`. The `reserve-names` matrix job in
+  `release.yml` publishes each from its directory under `packages/` on the first
+  tagged release after it is added, and is a no-op after that: it publishes only
+  when PyPI answers 404 for the name. For protection before that release, you can
+  publish a stub once by hand; the CI job then simply skips it. To reserve another
+  name, add a stub package, a matrix entry, and a pending publisher.
 - **ADE-bench spike:** stand up ADE-bench locally on DuckDB against the no-plugin
   baseline to confirm the runner before depending on it (the exact command is in
   `benchmarks/ade_bench/README.md`).
