@@ -99,7 +99,7 @@ from .results import (
     RankedObject,
     RelationshipsResult,
 )
-from .summary import summarize_map
+from .summary import summarize_map, summarize_skipped
 
 if TYPE_CHECKING:
     from ..engine import DexEngine
@@ -2278,13 +2278,41 @@ def map(
     # It is decoupled from len(profiled), which no longer equals len(selected)
     # once some selected objects are served from cache.
     skipped = len(metas) - len(selected)
+    # Named, not only counted (#540): in the first-pass rank order that chose
+    # what to profile, so the head of the list is what only just missed the cut
+    # and is the first worth a targeted `explore profile`.
+    chosen = {m.identifier for m in selected}
+    skipped_ranked = [
+        m.identifier
+        for m in sorted(
+            metas, key=lambda m: (-first_pass.get(m.identifier, 0.0), m.identifier)
+        )
+        if m.identifier not in chosen
+    ]
+    skipped_block = summarize_skipped(skipped_ranked)
     if skipped > 0:
+        lead = ", ".join(skipped_ranked[:3])
         notes.append(
             f"profiled top {len(selected)} of {len(metas)} objects by rank "
             f"(profile_top_n={config.profile_top_n}; all objects are profiled "
-            f"automatically at {_AUTO_PROFILE_ALL} or fewer); pass --full to "
-            "profile everything"
+            f"automatically at {_AUTO_PROFILE_ALL} or fewer); data.skipped names "
+            f"the {skipped} not profiled. Profile the ones you need with "
+            f"`explore profile {lead}`, or pass --full to profile everything"
         )
+        if skipped_block.elided:
+            notes.append(
+                f"data.skipped.objects names the top {len(skipped_block.objects)} "
+                f"of {skipped} skipped objects by rank; {skipped_block.elided} "
+                "more are counted in data.skipped.elided and grouped in "
+                "data.skipped.by_namespace"
+            )
+        if skipped_block.elided_namespaces:
+            notes.append(
+                f"data.skipped.by_namespace lists the "
+                f"{len(skipped_block.by_namespace)} namespaces holding the most "
+                f"skipped objects; {skipped_block.elided_namespaces} more are "
+                "counted in data.skipped.elided_namespaces"
+            )
     if fresh_reused:
         window = config.profile_freshness_hours
         notes.append(
@@ -2362,6 +2390,7 @@ def map(
         profiled_count=len(profiled),
         cache_hit_count=len(fresh_reused),
         skipped_count=skipped,
+        skipped=skipped_block,
         carried_forward_count=carried,
         out_of_scope_carried_count=out_of_scope,
         dropped_count=len(dropped),

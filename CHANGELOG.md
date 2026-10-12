@@ -9,6 +9,22 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+### Added
+
+- **`explore map` names the objects its rank cutoff did not profile** ([#540]).
+  Past 50 objects the map profiles the top 25 by rank, and it said how many it
+  skipped but not which. On a 63-object map the 38 it skipped included staging
+  views the next probes needed, and each cost a round trip: the query refused as
+  unprofiled, then `explore profile`, then the retry. `data.skipped` now carries
+  `count`, `by_namespace` (records of `namespace` and `count`, largest first) and
+  `objects` in rank order, highest first, each list capped at 25 with the rest
+  counted in `elided_namespaces` and `elided`. The cutoff note names
+  `explore profile` with the highest-ranked skipped objects. The block is always
+  present, so a `--full` run reports `count: 0`, and nothing changes about which
+  objects are profiled or what the run is estimated at. Namespaces are records
+  rather than keys, because a warehouse name never becomes a JSON key in the
+  envelope.
+
 ## [1.13.0] - 2026-10-12
 
 ### Changed
