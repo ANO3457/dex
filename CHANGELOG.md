@@ -9,6 +9,8 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-12
+
 ### Changed
 
 - **`maintain`'s description claims the diagnostic intent, and states its two
