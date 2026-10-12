@@ -39,10 +39,10 @@ from that envelope.
    applied with `transform apply`. Take `maintain snapshot` after a known-good
    build.
 
-At every step: a `needs_confirmation` envelope waits on the user's spend
-decision, never on yours; only a human clears a PII flag; and you never edit the
-dbt project, `.dex/cache.json`, or `.dex/plans/` by hand in place of the command
-that guards them.
+At every step: a `needs_confirmation` envelope waits on the user's decision (a
+spend, or a `dex config set` diff), never on yours; only a human clears a PII
+flag; and you never edit the dbt project, `.dex/config.yml`, `.dex/cache.json`,
+or `.dex/plans/` by hand in place of the command that guards them.
 <!-- dex:procedure:end -->
 
 ## Running the engine
