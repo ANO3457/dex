@@ -9,8 +9,6 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
-### Fixed
-
 - **`maintain verify` resolves a declared grain column against the relation's
   own spelling before quoting it** ([#483]). `schema.yml` spells a column the
   way dbt wrote it, ordinarily lowercase, and the built relation spells it the
@@ -44,6 +42,19 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   sets `core.autocrlf false` before checkout: Git for Windows converts text
   files to CRLF by default, which moves the bundled Ossie schema's recorded
   hash, and the wheel ships LF. Nothing about the engine or the tests changes.
+  
+- **`maintain check` and `maintain schema` say so when the warehouse read and
+  the baseline cover different datasets** ([#543]). Every object in a dataset
+  the baseline never covered was reported as `table_added`, and every object in
+  a dataset the read no longer lists as `table_dropped`, with nothing saying the
+  block was a difference of scope rather than the warehouse moving: a baseline
+  pinned when the map covered one environment's datasets, then a read that
+  lists another's, diluted the real drift in the same report. Both commands now
+  compare the dataset sets before reporting and carry one warning per
+  direction, naming the datasets and the number of findings they account for,
+  with the re-pin to make if the datasets belong in the baseline. The findings
+  themselves are unchanged, and the count the warning quotes honours the same
+  `<objects>` scope the findings do. Matching scopes add no warning.
 
 ## [1.12.8] - 2026-10-11
 
