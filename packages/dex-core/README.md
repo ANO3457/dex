@@ -248,10 +248,11 @@ true everywhere else.
 `config`: reads, checks, and changes `.dex/config.yml` without running anything
 else. `config validate` names every problem by setting and line, a mistyped key
 with the key it was meant to be; `config get` shows each setting's effective value
-and where it came from; and `config set` edits the file in place, keeping its
-comments and key order, as a diff written only on `--confirm`. It runs before the
-engine is built, so it works on an install with no connector extra and on a
-config broken enough that every other command refuses to start.
+and where it came from; and `config set` and `config unset` edit the file in
+place, keeping its comments and key order, as a diff written only on `--confirm`.
+`unset` takes a key dex does not read, which is how a mistyped one is removed. It
+runs before the engine is built, so it works on an install with no connector
+extra and on a config broken enough that every other command refuses to start.
 
 `explore`: ranks what matters in an unfamiliar warehouse, profiles columns
 selectively, flags PII, surfaces grain and data-quality warnings with the ranked

@@ -173,6 +173,8 @@ answer is an in-place edit of the budget lines, so the file's comments and key
 order survive it, and it is reported as an `update` diff. To set or change the
 ceiling outside the ask, `dex config set budget.session_ceiling <value>` proposes
 the same edit as a diff and writes it on `--confirm`.
+`dex config unset budget.session_ceiling` removes it the same way, and the next
+billed command asks again.
 
 The ask is the last check before spend, so an unanswered one has run nothing,
 booked no headroom, and never reached the ledger. The unconfirmed cost ask that

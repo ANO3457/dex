@@ -117,6 +117,7 @@ _NOT_ENGINE_METHODS = {
     ("config", "get"),
     ("config", "validate"),
     ("config", "set"),
+    ("config", "unset"),
 }
 
 #: Where a subcommand's method is spelled differently from the subcommand.

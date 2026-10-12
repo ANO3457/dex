@@ -9,6 +9,8 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-12
+
 ### Changed
 
 - **`maintain`'s description claims the diagnostic intent, and states its two
@@ -111,6 +113,25 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   connection, no store, no connector extra, which is what lets them work on a
   config every other command refuses to start on. Per-run flags such as
   `--connector` or `--budget` are refused by name rather than ignored.
+
+- **`dex config unset KEY [KEY ...]` removes a setting, including one dex does
+  not read** ([#556]). `config validate` and every command's warnings name a
+  mistyped key, and `config set` can write the right one, but nothing removed
+  the wrong one, so fixing a typo still ended in a hand edit; setting it to
+  `null` is a value, not an absence. `unset` makes the same in-place edit
+  behind the same handshake as `set`: `needs_confirmation` with the diff,
+  written on `--confirm`. It takes a key the schema does not know and a whole
+  block, removes a block left with no keys rather than leaving a null, and
+  takes one of the blank lines that separated a removed block with it. A key
+  the file does not write is `ok` with a note naming the nearest key it does
+  write. A key inside one list item is refused, since a list changes as a whole
+  through `set`, and a removal that would add a problem stopping commands is
+  refused as a `set` is. The same change hardens every config diff: a value
+  under a credential-like name reads `<withheld>` in a `set`, `unset` or
+  ceiling-answer diff, context lines included. `set` refuses a credential-like
+  key inside a value as it already refused one in the key, and `data.changes`
+  reports one row per value, so a block holding a committed credential is
+  withheld rather than tripping the boundary scan after the file was written.
 
 - **A weekly run of the tier-1 unit tests on Windows** ([#487], part 4). A new
   workflow, `.github/workflows/windows.yml`, runs `uv run pytest -q` on

@@ -59,6 +59,8 @@ def _all_commands() -> list[list[str]]:
                     # and `set` has nothing it could write to.
                     if sub == "set":
                         argv += ["connector", "duckdb"]
+                    if sub == "unset":
+                        argv.append("budget.session_celing")
                     argv += ["--repo-root", "missing-dex-fixture-dir"]
                 argvs.append(argv)
         elif group == "demo":
@@ -749,7 +751,7 @@ _SUBCOMMAND_PARITY: dict[tuple[str, str | None], dict] = {
                 "(config_commands.py); a host holding a DexConfig owns its config"
             ),
         }
-        for sub in ("get", "validate", "set")
+        for sub in ("get", "validate", "set", "unset")
     },
 }
 

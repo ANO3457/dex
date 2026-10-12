@@ -315,6 +315,266 @@ def test_without_an_absent_key_is_the_same_document():
     assert document.without("budget.session_ceiling") is document
 
 
+_UNSET_CASES = [
+    pytest.param(
+        COMMENTED,
+        "budget.session_celing",
+        COMMENTED.replace(
+            "  session_celing: 5     # a typo the loader used to drop without a word\n",
+            "",
+        ),
+        id="unknown-key-goes-with-its-comment-and-nothing-else",
+    ),
+    pytest.param(
+        "a:\n  x: 1\n\nbudget:\n  y: 1\n\nquery:\n  z: 1\n",
+        "budget.y",
+        "a:\n  x: 1\n\nquery:\n  z: 1\n",
+        id="emptied-block-between-separators-keeps-one",
+    ),
+    pytest.param(
+        "budget:\n  y: 1\n\nquery:\n  z: 1\n",
+        "budget",
+        "query:\n  z: 1\n",
+        id="first-block-leaves-no-blank-at-the-top",
+    ),
+    pytest.param(
+        "a:\n  x: 1\n\nbudget:\n  y: 1\n",
+        "budget",
+        "a:\n  x: 1\n",
+        id="last-block-leaves-no-blank-at-the-end",
+    ),
+    pytest.param(
+        "# settings\n\nbudget:\n  y: 1\n\nquery:\n  z: 1\n",
+        "budget",
+        "# settings\n\nquery:\n  z: 1\n",
+        id="header-comment-keeps-its-separator",
+    ),
+    pytest.param(
+        "a:\n  x: 1\n\nbudget:\n  y: 1\n# end of settings\n",
+        "budget",
+        "a:\n  x: 1\n\n# end of settings\n",
+        id="footer-comment-stays",
+    ),
+    pytest.param(
+        "connector: duckdb\nbudget:\n  y: 1\n\nquery:\n  z: 1\n",
+        "budget",
+        "connector: duckdb\n\nquery:\n  z: 1\n",
+        id="separator-below-only-stays",
+    ),
+    pytest.param(
+        "semantic:\n  ossie:\n    files: [a.yaml]\nquery:\n  z: 1\n",
+        "semantic.ossie.files",
+        "query:\n  z: 1\n",
+        id="climbs-two-levels",
+    ),
+    pytest.param(
+        "connector: duckdb\n\nbigqeury:   # a copy-paste\n  project: p   # old\n"
+        "  datasets:\n    - raw   # the only one\n\nquery:\n  z: 1\n",
+        "bigqeury",
+        "connector: duckdb\n\nquery:\n  z: 1\n",
+        id="unknown-section-with-comments-inside",
+    ),
+    pytest.param(
+        "budget:\n  # the cap finance agreed\n  ceiling: 5\n  paradigm: free_local\n",
+        "budget.ceiling",
+        "budget:\n  # the cap finance agreed\n  paradigm: free_local\n",
+        id="comment-above-the-key-stays",
+    ),
+    pytest.param(
+        "budget: {ceiling: 4, session_ceiling: 5, paradigm: free_local}\n",
+        "budget.ceiling",
+        "budget: {session_ceiling: 5, paradigm: free_local}\n",
+        id="first-flow-entry",
+    ),
+    pytest.param(
+        "budget: {ceiling: 4, session_ceiling: 5, paradigm: free_local}\n",
+        "budget.session_ceiling",
+        "budget: {ceiling: 4, paradigm: free_local}\n",
+        id="middle-flow-entry",
+    ),
+    pytest.param(
+        "budget: {ceiling: 4, session_ceiling: 5}\n",
+        "budget.session_ceiling",
+        "budget: {ceiling: 4}\n",
+        id="last-flow-entry",
+    ),
+    pytest.param(
+        "connector: duckdb\nbudget: {ceiling: 4}\n",
+        "budget.ceiling",
+        "connector: duckdb\n",
+        id="only-flow-entry-removes-its-key",
+    ),
+    pytest.param("connector: duckdb\n", "connector", "", id="only-key-in-the-file"),
+    pytest.param(
+        "a:\r\n  x: 1\r\n\r\nbudget:\r\n  y: 1\r\n\r\nquery:\r\n  z: 1\r\n",
+        "budget",
+        "a:\r\n  x: 1\r\n\r\nquery:\r\n  z: 1\r\n",
+        id="crlf",
+    ),
+    pytest.param(
+        "connector: duckdb\ndbt_target: dev",
+        "dbt_target",
+        "connector: duckdb\n",
+        id="no-trailing-newline",
+    ),
+]
+
+
+@pytest.mark.parametrize(("before", "key", "after"), _UNSET_CASES)
+def test_an_unset_removes_only_the_bytes_the_setting_occupies(before, key, after):
+    assert ConfigDocument(before).without(key).text == after
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        pytest.param(
+            "budget: &b\n  ceiling: 5\nother: *b\n", "budget.ceiling", id="anchor"
+        ),
+        pytest.param("budget:\n\tceiling: 5\n", "budget.ceiling", id="tabs"),
+        pytest.param("connector: a\nconnector: b\n", "connector", id="duplicated-key"),
+        pytest.param("budget: [\n", "budget", id="does-not-parse"),
+    ],
+)
+def test_a_removal_dex_cannot_span_is_refused_rather_than_rewritten(text, key):
+    with pytest.raises(ConfigEditError, match="by hand"):
+        ConfigDocument(text).without(key)
+
+
+def test_the_nearest_written_key_is_named_for_one_the_file_does_not_write():
+    document = ConfigDocument(COMMENTED)
+    assert document.closest_written("budget.session_celling") == (
+        "budget.session_celing"
+    )
+    assert document.closest_written("nothing.like.it") is None
+
+
+# --- what a reviewer is shown -----------------------------------------------------
+
+_COMMITTED_CREDENTIAL = (
+    "connector: duckdb\ncache:\n  options:\n    api_token: hunter2   # oops\n"
+    "query:\n  max_rows: 50\n"
+)
+
+
+def test_a_diff_withholds_a_credential_in_its_context_lines():
+    before = ConfigDocument(_COMMITTED_CREDENTIAL)
+    diff = before.with_value("query.max_rows", 5).diff_from(before)
+    assert "hunter2" not in diff["unified"]
+    assert "    api_token: <withheld>   # oops\n" in diff["unified"]
+    assert (diff["additions"], diff["deletions"]) == (1, 1)
+
+
+def test_a_diff_withholds_a_credential_it_removes():
+    before = ConfigDocument(_COMMITTED_CREDENTIAL)
+    diff = before.without("cache.options.api_token").diff_from(before)
+    assert "hunter2" not in diff["unified"]
+    assert "-    api_token: <withheld>   # oops\n" in diff["unified"]
+    assert (diff["additions"], diff["deletions"]) == (0, 3)
+
+
+def test_a_credential_block_hides_its_values_and_keeps_its_keys_and_lines():
+    text = (
+        "snowflake:\n  warehouse: wh\n  credentials:\n    user: a\n"
+        "    hosts: [h1, 'h2']\n    password: |\n      x-line\n      y-line\n"
+    )
+    before = ConfigDocument(text)
+    context = before.with_value("snowflake.warehouse", "other").diff_from(before)
+    assert "@@ -1,5 +1,5 @@" in context["unified"]
+    assert "     user: <withheld>\n" in context["unified"]
+    assert "     hosts: [<withheld>, <withheld>]\n" in context["unified"]
+    removed = before.without("snowflake.credentials").diff_from(before)
+    # A value spanning lines keeps them, so the counts are the file's own.
+    assert removed["deletions"] == 6
+    assert "-    password: <withheld>\n" in removed["unified"]
+    for hidden in ("user: a", "h1", "h2", "x-line", "y-line"):
+        assert hidden not in context["unified"] + removed["unified"]
+
+
+def test_a_diff_with_no_credential_is_the_plain_diff():
+    from exmergo_dex_core.diffs import file_diff
+
+    before = ConfigDocument(COMMENTED)
+    after = before.with_value("query.max_rows", 5)
+    assert after.diff_from(before) == file_diff(
+        ".dex/config.yml", before.text, after.text
+    )
+
+
+# --- what a change reports --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "key", "rows"),
+    [
+        pytest.param(
+            "query:\n  max_rows: 50\n",
+            "query:\n  max_rows: 5\n",
+            "query.max_rows",
+            [{"key": "query.max_rows", "before": 50, "after": 5}],
+            id="scalar",
+        ),
+        pytest.param(
+            "connector: duckdb\n",
+            "connector: duckdb\nquery:\n  max_rows: 5\n",
+            "query.max_rows",
+            [{"key": "query.max_rows", "after": 5}],
+            id="added",
+        ),
+        pytest.param(
+            "bigqeury:\n  project: p\n  rows: [{a: 1}]\n",
+            "",
+            "bigqeury",
+            [
+                {"key": "bigqeury.project", "before": "p"},
+                {"key": "bigqeury.rows[0].a", "before": 1},
+            ],
+            id="removed-block-flattened",
+        ),
+        pytest.param(
+            "cache:\n  options:\n    api_token: hunter2\n    region: eu\n",
+            "cache:\n  options:\n    region: us\n",
+            "cache.options",
+            [
+                {"key": "cache.options.api_token", "withheld": True},
+                {"key": "cache.options.region", "before": "eu", "after": "us"},
+            ],
+            id="credential-withheld",
+        ),
+        pytest.param(
+            "bigquery:\n  datasets: [a]\n",
+            "bigquery:\n  datasets: [a, b]\n",
+            "bigquery.datasets",
+            [{"key": "bigquery.datasets", "before": ["a"], "after": ["a", "b"]}],
+            id="list-of-scalars-is-one-value",
+        ),
+        pytest.param(
+            "pii_overrides:\n  - column: a.b.c\n",
+            "pii_overrides:\n  - column: a.b.c\n  - column: x.y.z\n",
+            "pii_overrides",
+            [{"key": "pii_overrides[1].column", "after": "x.y.z"}],
+            id="list-of-mappings-by-item",
+        ),
+        pytest.param(
+            "auto_profile: 1\n",
+            "auto_profile: true\n",
+            "auto_profile",
+            [{"key": "auto_profile", "before": 1, "after": True}],
+            id="one-is-not-true",
+        ),
+        pytest.param(
+            "cluster:\n  sample_seed: null\n",
+            "",
+            "cluster.sample_seed",
+            [{"key": "cluster.sample_seed", "before": None}],
+            id="explicit-null-removed",
+        ),
+    ],
+)
+def test_a_change_reports_one_row_per_value(before, after, key, rows):
+    assert ConfigDocument(after).changes_from(ConfigDocument(before), [key]) == rows
+
+
 def test_read_and_write_keep_line_endings_and_permissions(tmp_path: Path):
     path = tmp_path / "config.yml"
     path.write_bytes(b"connector: duckdb\r\nquery:\r\n  max_rows: 1\r\n")
@@ -364,6 +624,23 @@ def test_a_value_is_read_the_way_its_field_reads_it(key, text, expected):
 def test_a_key_dex_cannot_set_is_refused_by_name(key, match):
     with pytest.raises(RequestError, match=match):
         parse_value(key, "1")
+
+
+@pytest.mark.parametrize(
+    ("key", "text", "named"),
+    [
+        ("cache.options", "{api_token: hunter2}", "api_token"),
+        ("cache.options", "{auth: {client_secret: hunter2}}", "client_secret"),
+        ("pii_overrides", "[{column: a.b.c, secret_note: hunter2}]", "secret_note"),
+    ],
+)
+def test_a_value_carrying_a_credential_is_refused_without_repeating_it(
+    key, text, named
+):
+    with pytest.raises(RequestError, match="reads as a credential") as refused:
+        parse_value(key, text)
+    assert named in str(refused.value)
+    assert "hunter2" not in str(refused.value)
 
 
 # --- problems ---------------------------------------------------------------------

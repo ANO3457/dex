@@ -234,7 +234,8 @@ def parse_value(key: str, text: str) -> Any:
     PyYAML and would otherwise land in the file quoted.
 
     Refuses a section (its keys are set one at a time, which also keeps the
-    comments inside it) and any key whose name reads as a credential, because
+    comments inside it), and a credential-like name either in the key or
+    anywhere inside the value (``cache.options '{api_token: ...}'``), because
     this file is committed.
     """
 
@@ -244,16 +245,25 @@ def parse_value(key: str, text: str) -> Any:
         raise RequestError(
             f"'{key}' is a block of settings; set its keys one at a time: {listed}"
         )
-    credential = next((p for p in key.split(".") if secret_like(p)), None)
+    committed = (
+        f"{CONFIG_RELPATH} is committed: credentials are read at run time, never "
+        "written here"
+    )
+    credential = _credential_in(key, None)
     if credential is not None:
         raise RequestError(
-            f"'{key}' reads as a credential ('{credential}'), and {CONFIG_RELPATH} "
-            "is committed: credentials are read at run time, never written here"
+            f"'{key}' reads as a credential ('{credential}'), and {committed}"
         )
     try:
         parsed = yaml.safe_load(text)
     except yaml.YAMLError:
         parsed = text
+    credential = _credential_in(key, parsed)
+    if credential is not None:
+        raise RequestError(
+            f"the value for '{key}' sets '{credential}', which reads as a "
+            f"credential, and {committed}"
+        )
     if target.free_form or target.annotation is Any:
         return parsed
     adapter = TypeAdapter(target.annotation)
@@ -433,8 +443,55 @@ class ConfigDocument:
             found = found[part]
         return found
 
+    def closest_written(self, key: str) -> str | None:
+        """The key this file writes that ``key`` was probably meant to be."""
+
+        written = [path for path in self._lines if "[" not in path]
+        close = difflib.get_close_matches(key, written, n=1, cutoff=0.6)
+        return close[0] if close else None
+
     def diff_from(self, before: ConfigDocument) -> dict[str, Any]:
-        return file_diff(CONFIG_RELPATH, before.text, self.text)
+        """The change from ``before`` as a reviewable diff, credentials withheld.
+
+        A diff carries the lines around a change as well as the change, and the
+        envelope's ``diffs`` are not scanned at the boundary the way ``data`` is,
+        so a credential committed near any edit would otherwise cross with it.
+        """
+
+        return file_diff(CONFIG_RELPATH, before._shown(), self._shown())
+
+    def changes_from(
+        self, before: ConfigDocument, keys: list[str]
+    ) -> list[dict[str, Any]]:
+        """What changed under ``keys`` since ``before``, one row per value.
+
+        A row has ``before`` and ``after``, each left out where the value is
+        absent on that side, or only ``withheld`` where either side sits under or
+        holds a credential-like name. Flat rows, as ``settings`` gives, so no key
+        a user wrote in a block being replaced or removed ever becomes a dict key
+        in a payload the boundary scan reads.
+        """
+
+        rows: list[dict[str, Any]] = []
+        for key in keys:
+            old = dict(_leaves(key, before.written(key)))
+            new = dict(_leaves(key, self.written(key)))
+            for path in [*old, *(path for path in new if path not in old)]:
+                was, now = old.get(path, ABSENT), new.get(path, ABSENT)
+                # By type as well, since `True == 1` in Python and a file that
+                # changes one for the other has changed.
+                if type(was) is type(now) and was == now:
+                    continue
+                row: dict[str, Any] = {"key": path}
+                if _withheld(path, was) or _withheld(path, now):
+                    row["withheld"] = True
+                else:
+                    if was is not ABSENT:
+                        row["before"] = was
+                    if now is not ABSENT:
+                        row["after"] = now
+                rows.append(row)
+        return rows
 
     # --- edits ----------------------------------------------------------------
 
@@ -459,8 +516,13 @@ class ConfigDocument:
     def without(self, key: str) -> ConfigDocument:
         """A new document with ``key`` removed, or this one when it is absent.
 
-        A block left with no keys goes too, rather than staying as an empty key
-        that reads as null and fails validation.
+        Removes the key's own lines, its value and any comment written inside
+        it; a comment on the line above stays, since nothing says which key it
+        was written for. A block left with no keys goes too, rather than staying
+        as an empty key that reads as null and fails validation. In a file that
+        separates its blocks with blank lines, one separator goes with the
+        entry, so the file keeps one blank line between the blocks that remain
+        and gains none at its top or end.
         """
 
         self._require_editable()
@@ -520,6 +582,41 @@ class ConfigDocument:
             cut = max(key.rfind("."), key.rfind("["))
             key = key[:cut] if cut > 0 else ""
         return None
+
+    def _shown(self) -> str:
+        """The text as a reviewer is shown it, with every value under a
+        credential-like name replaced by ``<withheld>``.
+
+        Each value keeps its own line breaks, so a diff of two shown texts has
+        the file's line numbers and the file's addition and deletion counts. Key
+        names stay, as ``config get`` names a withheld setting. A text with no
+        settings has nothing to withhold, and one that does not parse is never
+        edited, so either is shown as it is.
+        """
+
+        if self._root is None:
+            return self.text
+        spans: set[tuple[int, int]] = set()
+
+        def walk(node: yaml.Node, hidden: bool) -> None:
+            if isinstance(node, yaml.MappingNode):
+                for key_node, value_node in node.value:
+                    name = (
+                        key_node.value if isinstance(key_node, yaml.ScalarNode) else ""
+                    )
+                    walk(value_node, hidden or secret_like(str(name)))
+            elif isinstance(node, yaml.SequenceNode):
+                for item in node.value:
+                    walk(item, hidden)
+            elif hidden and node.end_mark.index > node.start_mark.index:
+                spans.add((node.start_mark.index, node.end_mark.index))
+
+        walk(self._root, False)
+        shown = self.text
+        for start, end in sorted(spans, reverse=True):
+            breaks = "".join(char for char in shown[start:end] if char in "\r\n")
+            shown = shown[:start] + "<withheld>" + breaks + shown[end:]
+        return shown
 
     def _find_problems(self) -> list[ConfigProblem]:
         if self._syntax is not None:
@@ -1009,7 +1106,26 @@ class ConfigDocument:
                 f"{CONFIG_RELPATH}; edit it by hand"
             )
         end = before_trailing_blanks(self.text, self._entry_end(key_node, value_node))
+        top = before_trailing_blanks(self.text, start)
+        below = self._past_blank_lines(end)
+        if below == len(self.text) and top < start:
+            # The last entry in the file: the separator above it would be left
+            # trailing.
+            start = top
+        elif below > end and (top < start or not self.text[:start].strip()):
+            # Between two separators, keep one; at the top of the file, keep none.
+            end = below
         return [(start, end, "")]
+
+    def _past_blank_lines(self, index: int) -> int:
+        """``index`` moved forward over the blank lines that start there."""
+
+        while index < len(self.text):
+            line_end = self._line_end(index)
+            if self.text[index:line_end].strip():
+                break
+            index = line_end
+        return index
 
 
 class _BlockDumper(yaml.SafeDumper):
@@ -1123,21 +1239,59 @@ def _dotted(location: tuple[Any, ...]) -> str:
     return key
 
 
+def _credential_in(key: str, value: Any) -> str | None:
+    """The first credential-like name on ``key``'s path or anywhere inside
+    ``value``, or None. The one rule for what the editor will not write and
+    what a reader must not be shown."""
+
+    for part in re.split(r"[.\[\]]", key):
+        if part and secret_like(part):
+            return part
+
+    def inside(found: Any) -> str | None:
+        children: list[Any] = []
+        if isinstance(found, dict):
+            for name, sub in found.items():
+                if secret_like(str(name)):
+                    return str(name)
+                children.append(sub)
+        elif isinstance(found, list):
+            children = found
+        for child in children:
+            if (hit := inside(child)) is not None:
+                return hit
+        return None
+
+    return inside(value)
+
+
 def _withheld(key: str, value: Any) -> bool:
     """Whether a value must not be carried: a credential-like name on its path,
     or a credential-like key anywhere inside it."""
 
-    if any(secret_like(part) for part in re.split(r"[.\[\]]", key) if part):
-        return True
+    return _credential_in(key, value) is not None
 
-    def carries(found: Any) -> bool:
-        if isinstance(found, dict):
-            return any(secret_like(str(k)) or carries(v) for k, v in found.items())
-        if isinstance(found, list):
-            return any(carries(item) for item in found)
-        return False
 
-    return carries(value)
+def _leaves(key: str, value: Any) -> list[tuple[str, Any]]:
+    """``value`` as ``(key, value)`` pairs down to its scalars, the shape a row
+    takes. A list of scalars and an empty collection are one value each, as
+    ``config get`` reports them; ``ABSENT`` has none."""
+
+    if value is ABSENT:
+        return []
+    if isinstance(value, dict) and value:
+        return [
+            leaf
+            for name, sub in value.items()
+            for leaf in _leaves(f"{key}.{name}", sub)
+        ]
+    if isinstance(value, list) and any(isinstance(item, dict | list) for item in value):
+        return [
+            leaf
+            for position, sub in enumerate(value)
+            for leaf in _leaves(f"{key}[{position}]", sub)
+        ]
+    return [(key, value)]
 
 
 def _suggest(parent: str, name: str, siblings: Any) -> str | None:

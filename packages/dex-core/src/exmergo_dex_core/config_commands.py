@@ -1,4 +1,4 @@
-"""``dex config get|validate|set``: read, check and change ``.dex/config.yml``.
+"""``dex config get|validate|set|unset``: read, check and change ``.dex/config.yml``.
 
 These verbs run before any engine exists, and that is the point of them. Every
 other command builds its engine from this file, so a file that cannot build one
@@ -7,11 +7,11 @@ it. They touch only the file: no connection, no store, no dialect engine. That
 keeps them working on the lightest install, and on a config whose ``cache:``
 block is the very thing that is broken.
 
-``set`` proposes before it writes, through the same handshake a billed command
-uses. Without ``--confirm`` it answers ``needs_confirmation`` with the diff and
-writes nothing; the same command with ``--confirm`` writes. The file is committed
-and carries its reasoning in comments, so a change to it is something a person
-reviews first, the way they review a plan.
+``set`` and ``unset`` propose before they write, through the same handshake a
+billed command uses. Without ``--confirm`` they answer ``needs_confirmation`` with
+the diff and write nothing; the same command with ``--confirm`` writes. The file
+is committed and carries its reasoning in comments, so a change to it is
+something a person reviews first, the way they review a plan.
 """
 
 from __future__ import annotations
@@ -57,7 +57,8 @@ _RUN_OVERRIDES = (
 
 
 class ConfigChangeRefusedError(RequestError):
-    """A ``set`` that would leave the file unusable, refused before any write."""
+    """A ``set`` or ``unset`` that would leave the file unusable, refused before
+    any write."""
 
     def __init__(self, problems: list[ConfigProblem]) -> None:
         self.problems = list(problems)
@@ -94,7 +95,8 @@ class ConfigValidationResult(Result):
 
 
 class ConfigChangeResult(Result):
-    """What a ``set`` changes, and whether it has been written yet."""
+    """What a ``set`` or ``unset`` changes, one row per value, and whether it has
+    been written yet."""
 
     path: str
     changes: list[dict[str, Any]] = Field(default_factory=list)
@@ -148,8 +150,8 @@ def config_set(
 
     Refuses a change that adds a problem stopping commands. A problem already in
     the file is reported and does not block, so a broken file can be repaired one
-    key at a time; this is the only verb that can repair one at all, since every
-    other command refuses to start on it.
+    key at a time; with ``unset``, these are the only verbs that can repair one
+    at all, since every other command refuses to start on it.
 
     Unconfirmed, nothing is written and the result waits on the confirmation.
     Confirmed, the file is re-read and the change re-made against what it holds
@@ -167,23 +169,122 @@ def config_set(
     path = _committed_config(root)
     before = ConfigDocument.read(path)
     after = before
-    changes: list[dict[str, Any]] = []
+    changed: list[str] = []
     for key, text in zip(keys, pairs[1::2], strict=True):
         value = parse_value(key, text)
         current = after.written(key)
         if current is not ABSENT and current == value:
             continue
         after = after.with_value(key, value)
-        change: dict[str, Any] = {"key": key, "after": value}
-        if current is not ABSENT:
-            change["before"] = current
-        changes.append(change)
-    if not changes:
+        changed.append(key)
+    if not changed:
         return ConfigChangeResult(
             path=str(path),
             notes=["every key already has that value; nothing to change"],
             warnings=before.warnings(),
         )
+    return _propose(path, before, after, changed, confirmed=confirmed)
+
+
+def config_unset(
+    root: Path | str, keys: list[str], *, confirmed: bool
+) -> ConfigChangeResult:
+    """Remove one or more keys, as a diff to confirm and then as a write.
+
+    Takes any key the file writes, including one the schema does not know:
+    removing a mistyped or retired key is the main use, and those are exactly the
+    keys the schema cannot vouch for. A block left with no keys goes with its
+    last one. Several keys are one change, validated once, as with ``set``, and a
+    removal that would add a problem stopping commands is refused the same way.
+
+    A key the file does not write is a note rather than a refusal, since the file
+    already says what was asked. The note names the nearest key the file does
+    write, because the likeliest reason is a typo in the key being removed.
+
+    A key inside one item of a list is refused: a list changes as a whole, which
+    is how ``set`` writes one too.
+    """
+
+    if not keys:
+        raise RequestError(
+            "dex config unset takes one or more keys, e.g. dex config unset "
+            "budget.session_celing (several keys make one change)"
+        )
+    if repeated := sorted({key for key in keys if keys.count(key) > 1}):
+        raise RequestError(f"{', '.join(repeated)} is named more than once in one call")
+    for key in keys:
+        if any(not part for part in key.split(".")):
+            raise RequestError(
+                f"'{key}' is not a setting key; keys are dotted paths such as "
+                "budget.session_ceiling"
+            )
+        if "[" in key:
+            listed = key.split("[", 1)[0]
+            raise RequestError(
+                f"'{key}' names a key inside one item of a list, and a list changes "
+                f"as a whole: dex config get {listed} shows the list without any key "
+                f"dex does not read, and dex config set {listed} '<list>' writes it "
+                "back"
+            )
+    if nested := sorted(
+        {inner for inner in keys for outer in keys if inner.startswith(outer + ".")}
+    ):
+        raise RequestError(
+            f"{', '.join(nested)} is inside another key this call removes; name only "
+            "the outer one"
+        )
+    path = _committed_config(root)
+    before = ConfigDocument.read(path)
+    after = before
+    removed: list[str] = []
+    notes: list[str] = []
+    for key in keys:
+        # Through `without` even for a key that may be absent, so a file the
+        # editor refuses (one that does not parse, say) is refused rather than
+        # answered "not there".
+        edited = after.without(key)
+        if edited is after:
+            nearest = before.closest_written(key)
+            hint = f"; did you mean {nearest}?" if nearest else ""
+            notes.append(
+                f"{key} is not in {CONFIG_RELPATH}, so there is nothing to remove{hint}"
+            )
+            continue
+        after = edited
+        removed.append(key)
+    for key in removed:
+        parts = key.split(".")
+        for depth in range(1, len(parts)):
+            parent = ".".join(parts[:depth])
+            if before.written(parent) is not ABSENT and after.written(parent) is ABSENT:
+                notes.append(f"{parent} had no other settings, so it is removed too")
+                break
+    notes = list(dict.fromkeys(notes))
+    if not removed:
+        return ConfigChangeResult(
+            path=str(path), notes=notes, warnings=before.warnings()
+        )
+    return _propose(path, before, after, removed, confirmed=confirmed, notes=notes)
+
+
+def _propose(
+    path: Path,
+    before: ConfigDocument,
+    after: ConfigDocument,
+    keys: list[str],
+    *,
+    confirmed: bool,
+    notes: list[str] | None = None,
+) -> ConfigChangeResult:
+    """A change to the file: refused, proposed as a diff, or written.
+
+    Refuses a change that adds a problem stopping commands. A problem already in
+    the file is reported and does not block, so a broken file can be repaired one
+    key at a time. Unconfirmed, nothing is written and the result waits on the
+    confirmation. Confirmed, it is written; the caller made ``after`` from the
+    file as this command read it, so an edit made between the proposal and the
+    confirmation survives.
+    """
 
     already = {problem.identity for problem in before.problems()}
     introduced = [
@@ -193,17 +294,19 @@ def config_set(
     ]
     if introduced:
         raise ConfigChangeRefusedError(introduced)
-    warnings = [
-        *after.edit_warnings,
-        *(f"{CONFIG_RELPATH} {problem.describe()}" for problem in after.problems()),
-    ]
-    diff = after.diff_from(before)
+    proposal: dict[str, Any] = {
+        "path": str(path),
+        "changes": after.changes_from(before, keys),
+        "diffs": [after.diff_from(before)],
+        "warnings": [
+            *after.edit_warnings,
+            *(f"{CONFIG_RELPATH} {problem.describe()}" for problem in after.problems()),
+        ],
+        "notes": list(notes or []),
+    }
     if not confirmed:
         return ConfigChangeResult(
-            path=str(path),
-            changes=changes,
-            diffs=[diff],
-            warnings=warnings,
+            **proposal,
             pending_confirmation=ConfirmationRequest(
                 data={
                     "hint": (
@@ -215,13 +318,7 @@ def config_set(
             ),
         )
     after.write(path)
-    return ConfigChangeResult(
-        path=str(path),
-        changes=changes,
-        written=True,
-        diffs=[diff],
-        warnings=warnings,
-    )
+    return ConfigChangeResult(**proposal, written=True)
 
 
 def cmd_config(args: argparse.Namespace) -> env.Envelope:
@@ -257,11 +354,16 @@ def cmd_config(args: argparse.Namespace) -> env.Envelope:
                 errors=[problem.describe() for problem in result.problems],
                 data=result.data(),
             )
+        confirmed = bool(getattr(args, "confirm", False))
+        if args.subcommand == "unset":
+            return to_envelope(
+                config_unset(
+                    root, list(getattr(args, "keys", None) or []), confirmed=confirmed
+                )
+            )
         return to_envelope(
             config_set(
-                root,
-                list(getattr(args, "pairs", None) or []),
-                confirmed=bool(getattr(args, "confirm", False)),
+                root, list(getattr(args, "pairs", None) or []), confirmed=confirmed
             )
         )
     except (InvalidConfigError, ConfigChangeRefusedError) as exc:
