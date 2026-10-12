@@ -25,6 +25,15 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ### Fixed
 
+- **Answering the one-time ceiling ask no longer rewrites `.dex/config.yml`**
+  ([#547]). `--session-ceiling` and `--no-session-ceiling` went through a full
+  YAML re-dump of the file, which dropped every comment, reordered the keys to
+  the schema's order, deleted any key the release did not read, rewrote `5` as
+  `5.0`, and dropped an explicit null, so `cluster.sample_seed` written as null
+  (a fresh draw per run) silently became the default `0`. The answer is now an
+  in-place edit of the budget lines alone, reported as the same `update` diff,
+  and the rest of the file is byte-for-byte what it was.
+
 - **The skill wrapper installs the `ossie` extra for every command that can
   read a native Ossie semantic layer** ([#536]). `_feature_extras` in
   `skills/*/scripts/run.py` chose extras from the command and had branches for
@@ -60,6 +69,29 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ### Added
 
+- **`dex config get|validate|set` reads, checks and changes `.dex/config.yml`**
+  ([#547]). Every change to the file was a hand edit, and nothing could check a
+  value or show the effective config without running a data command.
+  `config validate` lists every problem by setting and line: syntax, a value
+  the schema refuses, a key dex does not read (with the key it was probably
+  meant to be), a key written twice, a key that reads as a credential. Any
+  problem makes it an error, so it gates CI on its own. `config get [key]`
+  reports each setting's effective value and where it came from (`file`,
+  `default`, `derived` by a validator, or `environment`), with the line it is
+  written on, and withholds a value under a credential-like name.
+  `config set KEY VALUE [KEY VALUE ...]` is an in-place edit that keeps every
+  comment, the key order and every other line, verified by reloading the
+  result before anything is written. It answers `needs_confirmation` with the
+  diff and writes nothing; the same command with `--confirm` writes it, the
+  handshake a billed command already uses, so a change to a committed file is
+  reviewed before it lands. Several pairs make one change, for settings only
+  valid together. A change that would add a problem stopping commands is
+  refused; a problem already in the file is a warning, so a broken file can be
+  repaired one key at a time. The verbs run before any engine is built: no
+  connection, no store, no connector extra, which is what lets them work on a
+  config every other command refuses to start on. Per-run flags such as
+  `--connector` or `--budget` are refused by name rather than ignored.
+
 - **A weekly run of the tier-1 unit tests on Windows** ([#487], part 4). A new
   workflow, `.github/workflows/windows.yml`, runs `uv run pytest -q` on
   `windows-latest` every Monday and on `workflow_dispatch`, with the same
@@ -86,6 +118,25 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   with the re-pin to make if the datasets belong in the baseline. The findings
   themselves are unchanged, and the count the warning quotes honours the same
   `<objects>` scope the findings do. Matching scopes add no warning.
+
+### Changed
+
+- **An invalid `.dex/config.yml` is `reason: configuration`, by setting and
+  line** ([#547]). A value the schema refused surfaced as pydantic's own
+  multi-line text with `reason: request`, which reads as the caller's input
+  being wrong, and a file that did not parse escaped as `reason: internal`.
+  Both now refuse every command with `reason: configuration` and one line per
+  problem (`line 12: query.max_rows: ...`), pointing at `dex config validate`.
+  For a host on the Python API, `DexEngine.from_repo` raises
+  `InvalidConfigError`, a `ConfigurationError` exported from the package root,
+  instead of pydantic's `ValidationError`; both are `ValueError`s.
+- **A key dex does not read now warns on every command** ([#547]). The loader
+  dropped unknown keys without a word, so a mistyped
+  `budget.session_celing` was a cumulative ceiling that silently did not
+  exist. Every envelope now carries a warning naming the key, its line, and
+  the key it was probably meant to be, and a key written twice warns the same
+  way. Neither refuses anything: a project carrying a key a later release
+  retired keeps working.
 
 ## [1.12.8] - 2026-10-11
 
