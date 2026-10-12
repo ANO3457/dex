@@ -40,7 +40,7 @@ from that envelope.
    build.
 
 At every step: a `needs_confirmation` envelope waits on the user's decision (a
-spend, or a `dex config set` diff), never on yours; only a human clears a PII
+spend, or a `dex config` diff), never on yours; only a human clears a PII
 flag; and you never edit the dbt project, `.dex/config.yml`, `.dex/cache.json`,
 or `.dex/plans/` by hand in place of the command that guards them.
 <!-- dex:procedure:end -->

@@ -8208,6 +8208,66 @@ def test_the_ceiling_answer_keeps_every_comment_in_the_config(
     )
 
 
+def test_an_unconfirmed_config_unset_changes_nothing_on_disk(tmp_path, capsys):
+    """Family 4: removing a setting is a change like any other, proposed first."""
+
+    _config_repo(tmp_path)
+    before = _tree(tmp_path)
+    payload = _run(
+        ["--repo-root", str(tmp_path), "config", "unset", "query.max_rows"], capsys
+    )
+    assert payload["status"] == "needs_confirmation"
+    assert payload["data"]["changes"] == [{"key": "query.max_rows", "before": 50}]
+    assert _tree(tmp_path) == before
+
+
+def test_a_confirmed_config_unset_removes_only_its_own_line(tmp_path, capsys):
+    """Family 4: the reviewed diff is the whole write."""
+
+    path = _config_repo(tmp_path)
+    payload = _run(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "config",
+            "unset",
+            "budget.ceiling",
+            "--confirm",
+        ],
+        capsys,
+    )
+    (diff,) = payload["diffs"]
+    assert (diff["additions"], diff["deletions"]) == (0, 3)
+    assert path.read_text(encoding="utf-8") == _COMMENTED_CONFIG.replace(
+        "budget:\n  ceiling: 5   # per command\n\n", ""
+    )
+
+
+def test_config_unset_cannot_leave_a_config_that_stops_every_command(tmp_path, capsys):
+    """Family 4: a removal that would brick the repo is refused, not proposed."""
+
+    from exmergo_dex_core.config import load_config
+
+    text = (
+        "connector: duckdb\nsemantic:\n  vendor: ossie\n  ossie:\n"
+        "    files: [semantics/commerce.ossie.yaml]\n"
+    )
+    _config_repo(tmp_path, text)
+    payload = _run(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "config",
+            "unset",
+            "semantic.ossie.files",
+            "--confirm",
+        ],
+        capsys,
+    )
+    assert payload["status"] == "error"
+    assert load_config(tmp_path).semantic.vendor == "ossie"
+
+
 def test_config_get_withholds_a_credential_like_setting(tmp_path, capsys):
     """Family 5: a credential that was committed anyway is flagged, never echoed."""
 
@@ -8250,6 +8310,76 @@ def test_config_set_refuses_to_write_a_credential_like_key(tmp_path, capsys):
     assert path.read_bytes() == before
 
 
+def test_config_unset_removes_a_committed_credential_without_showing_it(
+    tmp_path, capsys
+):
+    """Family 5: removing a credential is the fix the warning asks for, and the
+    diff that proposes it must not carry the credential to the agent."""
+
+    path = _config_repo(
+        tmp_path,
+        _COMMENTED_CONFIG + "duckdb:\n  access_token: hunter2-not-a-real-one\n",
+    )
+    from exmergo_dex_core.cli import main
+
+    for confirm in ([], ["--confirm"]):
+        main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "config",
+                "unset",
+                "duckdb.access_token",
+                *confirm,
+            ]
+        )
+        out = capsys.readouterr().out
+        assert "hunter2" not in out
+        assert "access_token" in out, "the setting is named even though withheld"
+    assert "hunter2" not in path.read_text(encoding="utf-8")
+
+
+def test_a_config_diff_never_carries_a_credential_from_its_context(tmp_path, capsys):
+    """Family 5: a diff shows the lines around a change too, and a committed
+    credential beside the setting being changed is one of them."""
+
+    _config_repo(
+        tmp_path,
+        "connector: duckdb\ncache:\n  options:\n    api_token: hunter2-not-a-real-one\n"
+        "query:\n  max_rows: 50\n",
+    )
+    payload = _run(
+        ["--repo-root", str(tmp_path), "config", "set", "query.max_rows", "5"], capsys
+    )
+    (diff,) = payload["diffs"]
+    assert "api_token: <withheld>" in diff["unified"]
+    assert "hunter2" not in diff["unified"]
+
+
+def test_config_set_refuses_a_value_that_carries_a_credential(tmp_path, capsys):
+    """Family 5: a credential inside a value is as committed as one in the key."""
+
+    path = _config_repo(tmp_path)
+    before = path.read_bytes()
+    from exmergo_dex_core.cli import main
+
+    rc = main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "config",
+            "set",
+            "cache.options",
+            "{api_token: hunter2-not-a-real-one}",
+            "--confirm",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "hunter2" not in out
+    assert path.read_bytes() == before
+
+
 def test_the_config_verbs_build_no_engine_and_open_no_connection(
     tmp_path, capsys, monkeypatch
 ):
@@ -8269,4 +8399,7 @@ def test_the_config_verbs_build_no_engine_and_open_no_connection(
     assert (
         _run([*root, "set", "query.max_rows", "5", "--confirm"], capsys)["status"]
         == "ok"
+    )
+    assert (
+        _run([*root, "unset", "query.max_rows", "--confirm"], capsys)["status"] == "ok"
     )

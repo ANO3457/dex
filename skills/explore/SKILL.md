@@ -38,7 +38,7 @@ from that envelope.
    build.
 
 At every step: a `needs_confirmation` envelope waits on the user's decision (a
-spend, or a `dex config set` diff), never on yours; only a human clears a PII
+spend, or a `dex config` diff), never on yours; only a human clears a PII
 flag; and you never edit the dbt project, `.dex/config.yml`, `.dex/cache.json`,
 or `.dex/plans/` by hand in place of the command that guards them.
 <!-- dex:procedure:end -->
@@ -68,7 +68,8 @@ uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [
   else. Change a setting with `config set <key> <value>`, not by hand: it returns
   the diff as `needs_confirmation`, and the same command with `--confirm` writes
   it once the user agrees. A warning naming an unknown key is a typo in a setting
-  that is doing nothing; fix it. Fields are in
+  that is doing nothing; remove it with `config unset <key>` and set the key it
+  meant with `config set`. Fields are in
   `${CLAUDE_SKILL_DIR}/references/commands.md`.
 
 ## Exploring, step by step

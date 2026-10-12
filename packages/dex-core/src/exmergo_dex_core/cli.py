@@ -104,7 +104,7 @@ COMMAND_SURFACE: dict[str, list[str]] = {
     # config: read, check and change `.dex/config.yml` itself. Routed in `main`
     # before an engine is built, because every engine is built from that file
     # and a file that cannot build one is exactly when these are needed.
-    "config": ["get", "validate", "set"],
+    "config": ["get", "validate", "set", "unset"],
     # demo: the on-ramp. No subcommands, because there is exactly one thing to
     # do and it is the first command a new user runs. It is also the only verb
     # that creates a data file, which is why it lives on its own path (see
@@ -298,6 +298,10 @@ def _build_parser() -> argparse.ArgumentParser:
                     # only valid together. Counted in the handler, not by
                     # argparse, so a malformed call still gets an envelope.
                     sp.add_argument("pairs", nargs="*", default=None)
+                if group == "config" and name == "unset":
+                    # Counted in the handler too, so a call naming no key still
+                    # gets an envelope.
+                    sp.add_argument("keys", nargs="*", default=None)
                 if group == "maintain" and name == "snapshot":
                     sp.add_argument(
                         "--project-only", action="store_true", default=False

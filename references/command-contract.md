@@ -100,7 +100,19 @@ dex config set <key> <value>      -> an in-place edit that keeps every comment, 
                                      change, for keys only valid together. Refuses a
                                      change that adds a problem stopping commands; one
                                      already in the file is a warning, so a broken file
-                                     is repaired one key at a time
+                                     is repaired one key at a time. Refuses a
+                                     credential-like name in the key or inside the
+                                     value. data.changes is one row per value (key,
+                                     before, after, or withheld)
+dex config unset <key> [<key>...] -> removes settings with the same in-place edit and
+                                     handshake as set. Takes a key dex does not read and
+                                     a whole block; a block left empty goes too, with
+                                     one blank-line separator. A key the file does not
+                                     write is ok, changed false, with a note naming the
+                                     nearest key it does. A key inside one list item is
+                                     refused: the list changes whole, through set.
+                                     Refuses a removal that adds a problem stopping
+                                     commands
 dex explore inventory [--rank]    -> ranked object summary (counts, sizes; no rows). --rank caps at 30
   [--limit N] [--all]                objects by default (kept by rank); --limit widens it, --all lifts
                                      it; both no-ops without --rank
@@ -1367,13 +1379,16 @@ Rules the envelope enforces, all of them Tier-2 eval targets:
   and its line rather than repeating the validator's own text. A key dex does not
   read, a key written twice, or a credential-like key does not refuse anything:
   each rides the envelope's `warnings`, so a typo in a setting is never a setting
-  that silently does nothing. `dex config validate` reports all of them at once.
+  that silently does nothing. `dex config validate` reports all of them at once,
+  and `dex config unset <key>` removes one.
 - **No secrets, no uncleared values.** `data` is scanned before printing
   (`envelope.sanitize`): a secret-like key or a record-shaped raw-row payload is
   a hard failure, never a silent scrub. Result values appear only in `explore
   query`'s columnar payload, and only after the query firewall has proven they
-  come from profiled, PII-cleared columns. This is a release-blocking safety
-  guarantee.
+  come from profiled, PII-cleared columns. `diffs` is not scanned the way `data`
+  is, so a `config` diff withholds its own: any value under a credential-like
+  name, including one on a context line, reads `<withheld>`. This is a
+  release-blocking safety guarantee.
 
 ## Why this is the first artifact
 

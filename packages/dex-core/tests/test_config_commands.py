@@ -1,5 +1,5 @@
-"""`dex config get|validate|set` through the CLI: one envelope each, and a file
-that changes only when a person has seen the diff and confirmed it."""
+"""`dex config get|validate|set|unset` through the CLI: one envelope each, and a
+file that changes only when a person has seen the diff and confirmed it."""
 
 from __future__ import annotations
 
@@ -129,8 +129,13 @@ def test_get_refuses_a_file_no_command_could_load_and_names_why(tmp_path, capsys
 
 @pytest.mark.parametrize(
     "argv",
-    [["get"], ["validate"], ["set", "connector", "duckdb", "--confirm"]],
-    ids=["get", "validate", "set"],
+    [
+        ["get"],
+        ["validate"],
+        ["set", "connector", "duckdb", "--confirm"],
+        ["unset", "connector", "--confirm"],
+    ],
+    ids=["get", "validate", "set", "unset"],
 )
 def test_every_verb_refuses_where_there_is_no_config_and_creates_none(
     tmp_path, capsys, argv
@@ -279,6 +284,175 @@ def test_a_run_override_is_refused_rather_than_silently_dropped(tmp_path, capsys
     assert path.read_bytes() == before
 
 
+def test_a_set_replacing_a_committed_credential_withholds_it_and_still_answers(
+    tmp_path, capsys
+):
+    # The old value is a block holding a credential: reported as a dict, it
+    # would trip the boundary scan after the write and end in a traceback.
+    path = _repo(
+        tmp_path,
+        "connector: duckdb\ncache:\n  options:\n    api_token: hunter2\n"
+        "    region: eu\n",
+    )
+    main(
+        ["--repo-root", str(tmp_path), "config", "set", "cache.options", "{region: us}"]
+    )
+    out = capsys.readouterr().out
+    envelope = json.loads(out)
+    assert "hunter2" not in out
+    assert envelope["status"] == "needs_confirmation"
+    assert envelope["data"]["changes"] == [
+        {"key": "cache.options.api_token", "withheld": True},
+        {"key": "cache.options.region", "before": "eu", "after": "us"},
+    ]
+    assert "hunter2" in path.read_text(encoding="utf-8")
+
+
+# --- unset ------------------------------------------------------------------------
+
+
+def test_an_unconfirmed_unset_shows_the_diff_and_writes_nothing(tmp_path, capsys):
+    path = _repo(tmp_path)
+    before = path.read_bytes()
+    rc, envelope = _run(capsys, tmp_path, "config", "unset", "budget.session_celing")
+    assert (rc, envelope["status"]) == (0, "needs_confirmation")
+    assert envelope["data"]["written"] is False
+    assert envelope["data"]["changes"] == [
+        {"key": "budget.session_celing", "before": 5}
+    ]
+    (diff,) = envelope["diffs"]
+    assert (diff["additions"], diff["deletions"]) == (0, 1)
+    assert "--confirm" in envelope["data"]["hint"]
+    assert path.read_bytes() == before
+
+
+def test_a_confirmed_unset_removes_that_line_and_the_warning_stops(tmp_path, capsys):
+    path = _repo(tmp_path)
+    rc, envelope = _run(
+        capsys, tmp_path, "config", "unset", "budget.session_celing", "--confirm"
+    )
+    assert (rc, envelope["status"], envelope["data"]["written"]) == (0, "ok", True)
+    assert envelope["warnings"] == []
+    assert path.read_text(encoding="utf-8") == CONFIG.replace(
+        "  session_celing: 5     # a typo the loader used to drop without a word\n", ""
+    )
+    rc, envelope = _run(capsys, tmp_path, "config", "validate")
+    assert (rc, envelope["data"]["valid"]) == (0, True)
+
+
+def test_unsetting_the_last_key_of_a_block_removes_the_block(tmp_path, capsys):
+    path = _repo(tmp_path)
+    rc, envelope = _run(
+        capsys, tmp_path, "config", "unset", "cluster.sample_seed", "--confirm"
+    )
+    assert rc == 0
+    assert envelope["data"]["notes"] == [
+        "cluster had no other settings, so it is removed too"
+    ]
+    assert path.read_text(encoding="utf-8") == CONFIG.replace(
+        "\ncluster:\n  sample_seed: null     # a fresh draw per run, on purpose\n", ""
+    )
+
+
+def test_several_keys_and_whole_blocks_are_one_change(tmp_path, capsys):
+    path = _repo(tmp_path)
+    rc, envelope = _run(
+        capsys, tmp_path, "config", "unset", "budget", "query.max_rows", "--confirm"
+    )
+    assert rc == 0
+    assert [c["key"] for c in envelope["data"]["changes"]] == [
+        "budget.ceiling",
+        "budget.session_celing",
+        "query.max_rows",
+    ]
+    assert path.read_text(encoding="utf-8") == (
+        "# dex settings for this repo. Comments carry the reasoning.\n"
+        "connector: duckdb\n\nduckdb:\n  path: demo.duckdb\n\n"
+        "cluster:\n  sample_seed: null     # a fresh draw per run, on purpose\n"
+    )
+
+
+def test_unsetting_a_key_the_file_does_not_write_names_the_nearest(tmp_path, capsys):
+    path = _repo(tmp_path)
+    before = path.read_bytes()
+    rc, envelope = _run(capsys, tmp_path, "config", "unset", "budget.session_celling")
+    assert (rc, envelope["status"], envelope["data"]["changed"]) == (0, "ok", False)
+    assert envelope["data"]["notes"] == [
+        "budget.session_celling is not in .dex/config.yml, so there is nothing to "
+        "remove; did you mean budget.session_celing?"
+    ]
+    assert envelope["diffs"] == []
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("keys", "match"),
+    [
+        ([], "one or more keys"),
+        (["query.max_rows", "query.max_rows"], "more than once"),
+        (["budget", "budget.ceiling"], "inside another key"),
+        (["budget..ceiling"], "not a setting key"),
+        (["pii_overrides[0].reasn"], "dex config set pii_overrides"),
+    ],
+    ids=["none", "repeated", "nested", "empty-segment", "list-item"],
+)
+def test_unset_refuses_keys_it_cannot_remove_as_named(tmp_path, capsys, keys, match):
+    path = _repo(tmp_path)
+    before = path.read_bytes()
+    rc, envelope = _run(capsys, tmp_path, "config", "unset", *keys, "--confirm")
+    assert (rc, envelope["reason"]) == (1, "request")
+    assert match in envelope["errors"][0]
+    assert path.read_bytes() == before
+
+
+def test_an_unset_that_would_break_the_file_is_refused(tmp_path, capsys):
+    text = (
+        "connector: duckdb\nsemantic:\n  vendor: ossie\n  ossie:\n"
+        "    files: [semantics/commerce.ossie.yaml]\n"
+    )
+    path = _repo(tmp_path, text)
+    rc, envelope = _run(
+        capsys, tmp_path, "config", "unset", "semantic.ossie.files", "--confirm"
+    )
+    assert (rc, envelope["reason"]) == (1, "request")
+    assert "nothing was changed" in envelope["errors"][0]
+    assert envelope["data"]["problems"][0]["key"] == "semantic"
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_unset_repairs_a_file_every_other_command_refuses(tmp_path, capsys):
+    path = _repo(tmp_path, "connector: duckdb\nquery:\n  max_rows: lots\n")
+    rc, envelope = _run(
+        capsys, tmp_path, "config", "unset", "query.max_rows", "--confirm"
+    )
+    assert (rc, envelope["status"]) == (0, "ok")
+    assert path.read_text(encoding="utf-8") == "connector: duckdb\n"
+
+
+def test_a_run_override_is_refused_on_unset_too(tmp_path, capsys):
+    path = _repo(tmp_path)
+    before = path.read_bytes()
+    rc, envelope = _run(
+        capsys,
+        tmp_path,
+        "--budget",
+        "5",
+        "config",
+        "unset",
+        "budget.session_celing",
+        "--confirm",
+    )
+    assert (rc, envelope["reason"]) == (1, "request")
+    assert "--budget" in envelope["errors"][0]
+    assert path.read_bytes() == before
+
+
+def test_a_bare_unset_is_the_config_verb(tmp_path, capsys):
+    _repo(tmp_path)
+    rc, envelope = _run(capsys, tmp_path, "unset", "budget.session_celing")
+    assert (rc, envelope["status"]) == (0, "needs_confirmation")
+
+
 def test_a_bare_validate_is_the_config_verb(tmp_path, capsys):
     _repo(tmp_path, "connector: duckdb\n")
     rc, envelope = _run(capsys, tmp_path, "validate")
@@ -299,7 +473,8 @@ def test_the_config_verbs_need_no_dialect_engine_or_connector(tmp_path):
         "root = sys.argv[1]; "
         "codes = [main(['--repo-root', root, 'config', *a]) for a in "
         "(['validate'], ['get', 'query.max_rows'], "
-        "['set', 'query.max_rows', '5', '--confirm'])]; "
+        "['set', 'query.max_rows', '5', '--confirm'], "
+        "['unset', 'budget.session_celing', '--confirm'])]; "
         "print(json.dumps(codes))"
     )
     completed = subprocess.run(  # noqa: S603 (fixed interpreter and authored args)
@@ -311,7 +486,9 @@ def test_the_config_verbs_need_no_dialect_engine_or_connector(tmp_path):
     assert completed.returncode == 0, completed.stderr
     lines = completed.stdout.strip().splitlines()
     envelopes = [json.loads(line) for line in lines[:-1]]
-    assert [e["status"] for e in envelopes] == ["error", "ok", "ok"]
+    assert [e["status"] for e in envelopes] == ["error", "ok", "ok", "ok"]
     assert envelopes[0]["data"]["problems"][0]["kind"] == "unknown_key"
-    assert json.loads(lines[-1]) == [1, 0, 0]
-    assert "max_rows: 5" in path.read_text(encoding="utf-8")
+    assert json.loads(lines[-1]) == [1, 0, 0, 0]
+    written = path.read_text(encoding="utf-8")
+    assert "max_rows: 5" in written
+    assert "session_celing" not in written

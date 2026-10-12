@@ -4,7 +4,7 @@ Lookup detail for each subcommand the explore skill drives. What you must and
 must not do is in `SKILL.md`; this file says what a field means and what a flag
 changes.
 
-## `config get|validate|set`
+## `config get|validate|set|unset`
 
 These read and change `.dex/config.yml` itself. They run before the engine is
 built, so they open no connection, need no connector extra, and still work when
@@ -31,11 +31,25 @@ found the way every command finds it, by walking up to the git root.
   and `no` stays a string for a string field. A list is set whole. Several pairs
   are one change, for settings only valid together
   (`semantic.vendor ossie semantic.ossie.files '[semantics/x.ossie.yaml]'`).
-- `set` refuses a change that would add a problem stopping commands, and a key
-  that reads as a credential. A problem already in the file is a warning, not a
-  refusal, so a broken file can be repaired one key at a time. Per-run flags
-  (`--connector`, `--budget`, `--scope`, ...) are refused, because they would
-  change nothing in the file.
+- `set` refuses a change that would add a problem stopping commands, and a
+  credential-like name in the key or anywhere inside the value. A problem already
+  in the file is a warning, not a refusal, so a broken file can be repaired one
+  key at a time. Per-run flags (`--connector`, `--budget`, `--scope`, ...) are
+  refused, because they would change nothing in the file.
+- `config unset <key> [<key>...]` removes settings with the same edit and the
+  same `--confirm` handshake. It takes a key dex does not read, which is what a
+  warning naming an unknown key asks you to remove, and a whole block (`bigqeury`
+  left from a copy-paste). A block left with no keys goes too, with one of the
+  blank lines that separated it. A key the file does not write is `ok` with
+  `changed: false` and a note naming the nearest key it does write, which is
+  usually the key you meant. A key inside one list item
+  (`pii_overrides[0].reasn`) is refused, because a list changes as a whole: read
+  it with `config get pii_overrides`, which leaves out keys dex does not read, and
+  write it back with `config set`.
+- Both report `data.changes`, one row per value: `key`, `before` (absent for a
+  new key), `after` (absent for a removed one), or only `withheld` for a value
+  under a credential-like name. The diff shows such a value as `<withheld>`, on a
+  context line as on a changed one.
 
 ## `explore profile <objects>`
 
