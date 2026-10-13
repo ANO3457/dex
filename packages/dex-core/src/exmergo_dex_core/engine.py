@@ -1045,6 +1045,22 @@ class DexEngine:
 
         return explore.query_batch(self, list(sql), auto_profile=auto_profile)
 
+    def query_across(
+        self,
+        *sql: str,
+        targets: list[str],
+        auto_profile: bool | None = None,
+    ) -> QueryBatchResult:
+        """Each statement once per target dataset, in one call (#545).
+
+        Each statement names its dataset as ``{ds}``; every result carries the
+        ``target`` it ran against. See :func:`.explore.commands.query_across`.
+        """
+
+        from .explore import commands as explore
+
+        return explore.query_across(self, list(sql), targets, auto_profile=auto_profile)
+
     def cluster(
         self,
         obj: str,

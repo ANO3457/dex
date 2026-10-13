@@ -149,6 +149,14 @@ first and the statement then runs. The envelope names it under
 into the same confirmation as the statements. `--no-auto-profile` restores the
 strict prerequisite.
 
+`--across dev_raw,qa_raw,prod_raw` asks one question of mirrored environments
+(the "is this a dev fixture artefact or real in prod?" check): write the dataset
+as `{ds}` in each statement, and each runs once per target in one call and one
+handshake. Every entry in `data.results` carries its `target` and `template`, and
+a refusal names the target that failed while the others still answer. Targets
+are plain dataset names; statements times targets counts against
+`query.max_statements`.
+
 ## `explore cluster <object> [--features a,b,c] [-k N]`
 
 Runs k-means over a bounded sample of the object's numeric columns and returns

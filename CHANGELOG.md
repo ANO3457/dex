@@ -9,6 +9,28 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+### Added
+
+- **`explore query --across`: one probe over mirrored environments** ([#545]).
+  Projects keep dev, qa and prod copies of the same datasets, and the question
+  asked most often during analysis is whether a pattern is a dev fixture artefact
+  or real in prod. Answering it meant writing the same probe once per dataset and
+  aligning the result sets by hand. Now each statement names its dataset as
+  `{ds}`, and `--across dev_raw,qa_raw,prod_raw` (comma-separated, repeatable)
+  runs it once per target in one call.
+
+  - The variants are ordinary statements to the firewall and the cost guard:
+    each is adjudicated against its own relation's profile and PII flags, and the
+    whole call is priced in one handshake and profiled once.
+  - Each entry in `data.results` carries `target` and `template`, the variants of
+    one probe sit together, and `data.across` lists the targets. A refusal names
+    its target, and the other targets still answer.
+  - A target must be a plain dataset name, since it is substituted into the SQL.
+    A statement with no `{ds}`, a repeated target, and statements times targets
+    over `query.max_statements` are refused before anything runs.
+  - `DexEngine.query_across(*sql, targets=[...])` is the library equivalent. A
+    call without `--across` returns exactly the payload it did before.
+
 ## [1.13.0] - 2026-10-12
 
 ### Changed

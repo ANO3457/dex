@@ -327,6 +327,13 @@ def _build_parser() -> argparse.ArgumentParser:
                 if group == "explore" and name == "query":
                     sp.add_argument("sql", nargs="*")
                     sp.add_argument("--sql-file", default=argparse.SUPPRESS)
+                    # One probe across mirrored datasets (#545): each statement
+                    # names its dataset as `{ds}` and runs once per target, in
+                    # one handshake. Comma-separated and repeatable, like
+                    # `transform place --targets`.
+                    sp.add_argument(
+                        "--across", action="append", default=argparse.SUPPRESS
+                    )
                 if group == "explore" and name == "cluster":
                     sp.add_argument("object")
                 # An off switch only. Profiling an object the connection has but
