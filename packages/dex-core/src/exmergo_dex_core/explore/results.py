@@ -22,7 +22,7 @@ from ..cache import Dataset, DexCache, Relationship
 from ..errors import StatementStage
 from ..results import Result
 from .semantic import SemanticCatalog
-from .summary import MapObject
+from .summary import MapObject, SkippedObjects
 
 
 class InventoryEntry(BaseModel):
@@ -290,6 +290,10 @@ class MapResult(Result):
     profiled_count: int = 0
     cache_hit_count: int = 0
     skipped_count: int = 0
+    # Which objects the rank cutoff did not profile, not only how many (#540).
+    # Always reported: `count: 0` is the positive statement that nothing was
+    # skipped, the same way an empty `notes` is.
+    skipped: SkippedObjects = Field(default_factory=SkippedObjects)
     carried_forward_count: int = 0
     out_of_scope_carried_count: int = 0
     dropped_count: int = 0
@@ -319,6 +323,7 @@ class MapResult(Result):
             "profiled_count": self.profiled_count,
             "cache_hit_count": self.cache_hit_count,
             "skipped_count": self.skipped_count,
+            "skipped": self.skipped.model_dump(mode="json"),
             "carried_forward_count": self.carried_forward_count,
             "out_of_scope_carried_count": self.out_of_scope_carried_count,
             "dropped_count": self.dropped_count,

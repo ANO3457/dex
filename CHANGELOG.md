@@ -31,6 +31,37 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   - `DexEngine.query_across(*sql, targets=[...])` is the library equivalent. A
     call without `--across` returns exactly the payload it did before.
 
+- **`explore map` names the objects its rank cutoff did not profile** ([#540]).
+  Past 50 objects the map profiles the top 25 by rank, and it said how many it
+  skipped but not which. On a 63-object map the 38 it skipped included staging
+  views the next probes needed, and each cost a round trip: the query refused as
+  unprofiled, then `explore profile`, then the retry. `data.skipped` now carries
+  `count`, `by_namespace` (records of `namespace` and `count`, largest first) and
+  `objects` in rank order, highest first, each list capped at 25 with the rest
+  counted in `elided_namespaces` and `elided`. The cutoff note names
+  `explore profile` with the highest-ranked skipped objects. The block is always
+  present, so a `--full` run reports `count: 0`, and nothing changes about which
+  objects are profiled or what the run is estimated at. Namespaces are records
+  rather than keys, because a warehouse name never becomes a JSON key in the
+  envelope.
+
+### Fixed
+
+- **An uncompiled project's composite keys and foreign keys are read when their
+  inputs sit under `arguments:`** ([#565]). dbt has asked for a generic test's
+  inputs under `arguments:` since dbt Core 1.10.8, and dbt-utils documents
+  `unique_combination_of_columns` that way, but the schema-YAML reader dex
+  falls back to without a compiled `target/manifest.json` looked for
+  `combination_of_columns`, `to` and `field` only beside the test's name. A
+  test written the current way declared no key and no join, and nothing said
+  so. The compiled read was unaffected, because dbt merges `arguments:` into
+  the manifest's kwargs. The YAML reader now merges it the same way, with
+  `arguments` winning over a key beside it as in dbt, and also reads the
+  `test_name:` spelling (`- name: ...` with `test_name: unique`), which
+  declared nothing either. Checked against `dbt parse` on dbt-core 1.11.11:
+  across all four spellings, the compiled and uncompiled reads now agree on
+  every composite key, foreign key, and `unique`/`not_null` key.
+
 ## [1.13.0] - 2026-10-12
 
 ### Changed
@@ -110,6 +141,14 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   `status: error`. It is now caught per model: that model's grain is reported
   as unmeasured in `notes`, with the server's own words, and every other
   model's grain and every other finding class still run.
+
+- **Nested MetricFlow schema errors identify the offending entity or measure**
+  ([#537](https://github.com/exmergo/dex/issues/537),
+  [#553](https://github.com/exmergo/dex/pull/553)). An invalid property previously
+  named only the semantic model, leaving the user to locate the element in the
+  YAML. The message now includes its index and name when available, for example
+  `semantic model 'orders' > entities[1] ('customer')`. Validation rules and
+  model-level error messages are unchanged.
 
 ### Added
 

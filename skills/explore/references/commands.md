@@ -117,7 +117,12 @@ and in an `elided_*` field. `--detail` widens the selection to every column and
 to objects that were inventoried but never profiled, and lifts no cap.
 
 Past 50 objects, `map` profiles only the top 25 by rank and says so in `notes`
-(with `skipped_count`); `--full` profiles everything. On a re-map, objects
+(with `skipped_count`); `--full` profiles everything. `data.skipped` names the
+skipped objects in rank order (`objects`, highest first) and groups them by
+namespace (`by_namespace`), each list capped at 25 with the rest counted in
+`elided` and `elided_namespaces`. When the next step needs a skipped object, run
+`explore profile` on the ones you need rather than probing each in turn. On a
+re-map, objects
 skipped this run keep their prior profiles (`carried_forward_count`), each
 stamped with its own `profiled_at`, so staleness is visible. Fresh cached
 profiles are reused the same way `profile` reuses them (`cache_hit_count`,
