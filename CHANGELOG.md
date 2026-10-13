@@ -106,6 +106,14 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   as unmeasured in `notes`, with the server's own words, and every other
   model's grain and every other finding class still run.
 
+- **Nested MetricFlow schema errors identify the offending entity or measure**
+  ([#537](https://github.com/exmergo/dex/issues/537),
+  [#553](https://github.com/exmergo/dex/pull/553)). An invalid property previously
+  named only the semantic model, leaving the user to locate the element in the
+  YAML. The message now includes its index and name when available, for example
+  `semantic model 'orders' > entities[1] ('customer')`. Validation rules and
+  model-level error messages are unchanged.
+
 ### Added
 
 - **`dex config get|validate|set` reads, checks and changes `.dex/config.yml`**
