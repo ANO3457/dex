@@ -830,6 +830,35 @@ def test_map_announces_profile_cutoff(many_tables_duckdb: Path, tmp_path: Path, 
     assert "--full" in note
 
 
+def test_map_names_the_objects_its_cutoff_skipped(
+    many_tables_duckdb: Path, tmp_path: Path, capsys
+):
+    """#540: the cutoff says which objects it skipped, not only how many, so one
+    targeted `explore profile` replaces a refused probe per object."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = _run(
+        ["explore", "map", "--path", str(many_tables_duckdb), "--repo-root", str(repo)],
+        capsys,
+    )["data"]
+    skipped = data["skipped"]
+
+    assert skipped["count"] == data["skipped_count"] == 35
+    # Capped like the rest of the payload, with the cut counted.
+    assert len(skipped["objects"]) == summary.MAX_SKIPPED_OBJECTS
+    assert skipped["elided"] == 35 - summary.MAX_SKIPPED_OBJECTS
+    assert sum(g["count"] for g in skipped["by_namespace"]) == 35
+    assert skipped["elided_namespaces"] == 0
+    # The named objects are the ones not profiled, never the ones that were.
+    profiled = {o["identifier"] for o in data["objects"]}
+    assert not profiled & set(skipped["objects"])
+    # The note names a concrete next step, led by the highest-ranked skipped.
+    note = next(n for n in data["notes"] if "profile_top_n" in n)
+    assert f"explore profile {skipped['objects'][0]}" in note
+    assert any("data.skipped.elided" in n for n in data["notes"])
+
+
 def test_map_full_has_no_cutoff(many_tables_duckdb: Path, tmp_path: Path, capsys):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -847,7 +876,47 @@ def test_map_full_has_no_cutoff(many_tables_duckdb: Path, tmp_path: Path, capsys
     )
     assert payload["data"]["profiled_count"] == 60
     assert payload["data"]["skipped_count"] == 0
+    assert payload["data"]["skipped"] == {
+        "count": 0,
+        "by_namespace": [],
+        "objects": [],
+        "elided": 0,
+        "elided_namespaces": 0,
+    }
     assert not any("profile_top_n" in n for n in payload["data"]["notes"])
+
+
+def test_skipped_objects_keep_rank_order_and_group_by_namespace():
+    block = summary.summarize_skipped(
+        [
+            "db.staging.orders",
+            "db.raw.events",
+            "db.staging.customers",
+            "other.staging.orders",
+        ]
+    )
+
+    assert block.count == 4
+    # Rank order is the caller's, unchanged: the head is what only just missed.
+    assert block.objects[0] == "db.staging.orders"
+    # Largest group first; a schema name shared by two databases stays two groups.
+    assert [(g.namespace, g.count) for g in block.by_namespace] == [
+        ("db.staging", 2),
+        ("db.raw", 1),
+        ("other.staging", 1),
+    ]
+    assert block.elided == block.elided_namespaces == 0
+
+
+def test_skipped_objects_count_every_cut():
+    ranked = [f"db.s{i % 3}.t{i}" for i in range(10)]
+
+    block = summary.summarize_skipped(ranked, max_objects=4, max_namespaces=2)
+
+    assert block.objects == ranked[:4]
+    assert block.elided == 6
+    assert len(block.by_namespace) == 2
+    assert block.elided_namespaces == 1
 
 
 def test_map_carries_forward_prior_profiles(

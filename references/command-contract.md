@@ -1104,7 +1104,13 @@ everywhere.
 
 `explore map` never caps silently: past 50 objects it profiles the top
 `profile_top_n` (default 25) by rank and announces the cutoff in `notes`
-alongside `skipped_count` (`--full` profiles everything). Objects skipped on a
+alongside `skipped_count` (`--full` profiles everything). `data.skipped` names
+what it skipped: `count`, `by_namespace` (records of `namespace` and `count`,
+largest first, each namespace being everything before an identifier's last dot),
+and `objects` in rank order, highest first, each list capped at 25 with the rest
+counted in `elided_namespaces` and `elided`. It is always present, so `count: 0`
+on a `--full` run is the positive statement that nothing was skipped, and it
+changes neither which objects are profiled nor the estimate. Objects skipped on a
 re-map carry their prior profiles forward (`carried_forward_count`), each
 stamped with its own `profiled_at`. A selected object whose cached profile is
 still fresh (same connector, schema unchanged, profiled within
