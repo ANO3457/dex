@@ -1,4 +1,5 @@
-<img width="1280" height="563" alt="exmergo-dex-showcase" src="https://github.com/user-attachments/assets/9dd574c2-8598-47bc-ae90-7d5a3a4d2e18" />
+<img width="1920" height="1080" alt="Video 2" src="https://github.com/user-attachments/assets/f9c8c052-32fb-4b2f-8b89-a6f484b55035" />
+
 
 **Built by [Exmergo](https://exmergo.com)** · The AI Stack for Your Data Stack.
 
