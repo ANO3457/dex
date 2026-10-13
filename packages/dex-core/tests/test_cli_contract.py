@@ -541,11 +541,13 @@ _SUBCOMMAND_PARITY: dict[tuple[str, str | None], dict] = {
     },
     ("explore", "diagram"): {"method": "diagram", "args": {"full": "full"}},
     ("explore", "query"): {
-        "method": ("query", "query_batch"),
+        "method": ("query", "query_batch", "query_across"),
         "args": {
             "sql": _TRANSLATED,
             "sql_file": _TRANSLATED,
             "no_auto_profile": _TRANSLATED,
+            # Comma-separated and repeatable on the CLI, a list on the engine.
+            "across": "targets",
         },
     },
     ("explore", "cluster"): {
