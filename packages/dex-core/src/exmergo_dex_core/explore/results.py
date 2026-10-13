@@ -22,7 +22,7 @@ from ..cache import Dataset, DexCache, Relationship
 from ..errors import StatementStage
 from ..results import Result
 from .semantic import SemanticCatalog
-from .summary import MapObject
+from .summary import MapObject, SkippedObjects
 
 
 class InventoryEntry(BaseModel):
@@ -290,6 +290,10 @@ class MapResult(Result):
     profiled_count: int = 0
     cache_hit_count: int = 0
     skipped_count: int = 0
+    # Which objects the rank cutoff did not profile, not only how many (#540).
+    # Always reported: `count: 0` is the positive statement that nothing was
+    # skipped, the same way an empty `notes` is.
+    skipped: SkippedObjects = Field(default_factory=SkippedObjects)
     carried_forward_count: int = 0
     out_of_scope_carried_count: int = 0
     dropped_count: int = 0
@@ -319,6 +323,7 @@ class MapResult(Result):
             "profiled_count": self.profiled_count,
             "cache_hit_count": self.cache_hit_count,
             "skipped_count": self.skipped_count,
+            "skipped": self.skipped.model_dump(mode="json"),
             "carried_forward_count": self.carried_forward_count,
             "out_of_scope_carried_count": self.out_of_scope_carried_count,
             "dropped_count": self.dropped_count,
@@ -464,6 +469,11 @@ class QueryStatementResult(BaseModel):
     error: str | None = None
     reason: str | None = None
     stage: StatementStage | None = None
+    # Set only on a call run `--across` mirrored datasets (#545): which target
+    # this variant ran against, and which of the caller's templates it was
+    # expanded from (0-based), so variants of one probe line up across targets.
+    target: str | None = None
+    template: int | None = None
 
 
 class QueryBatchResult(Result):
@@ -480,17 +490,19 @@ class QueryBatchResult(Result):
 
     results: list[QueryStatementResult] = Field(default_factory=list)
     profiled_on_demand: list[str] = Field(default_factory=list)
+    # The targets a `--across` call fanned out over, in the order given; absent
+    # on an ordinary batch, whose payload stays exactly what it was.
+    across: list[str] | None = None
 
     def data(self) -> dict[str, Any]:
         results = []
         for result in self.results:
             payload = result.model_dump(mode="json")
-            if payload["column_notes"] is None:
-                payload.pop("column_notes")
-            if payload["query_notes"] is None:
-                payload.pop("query_notes")
+            for optional in ("column_notes", "query_notes", "target", "template"):
+                if payload[optional] is None:
+                    payload.pop(optional)
             results.append(payload)
-        return {
+        data: dict[str, Any] = {
             "shape": "columnar",
             "results": results,
             "statement_count": len(self.results),
@@ -498,6 +510,9 @@ class QueryBatchResult(Result):
             "failed_count": sum(1 for r in self.results if r.status != "ok"),
             "profiled_on_demand": self.profiled_on_demand,
         }
+        if self.across is not None:
+            data["across"] = self.across
+        return data
 
 
 class ClusterResult(Result):

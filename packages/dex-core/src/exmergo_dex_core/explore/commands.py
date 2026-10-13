@@ -99,7 +99,7 @@ from .results import (
     RankedObject,
     RelationshipsResult,
 )
-from .summary import summarize_map
+from .summary import summarize_map, summarize_skipped
 
 if TYPE_CHECKING:
     from ..engine import DexEngine
@@ -1826,8 +1826,110 @@ def _auto_profile_warning(names: list[str], adapter: Adapter) -> list[str]:
     ]
 
 
+#: The placeholder a `--across` template names the target with.
+ACROSS_PLACEHOLDER = "{ds}"
+
+# A target is substituted into SQL text before the firewall reads it, so it is
+# held to a dataset name's own characters: letters, digits, underscores and
+# hyphens (BigQuery project ids carry them), dot-separated for a qualified
+# `project.dataset` or `database.schema`. No quote, space, semicolon or comment
+# marker can ride in, so a target can only ever change which relation a
+# statement names, never what the statement does.
+_ACROSS_TARGET = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*")
+
+
+def query_across(
+    engine: DexEngine,
+    templates: list[tuple[str, int | None]] | list[str],
+    targets: list[str],
+    *,
+    auto_profile: bool | None = None,
+) -> QueryBatchResult:
+    """Run each template once per target, as one call under one handshake (#545).
+
+    Mirrored environments (dev, qa and prod copies of the same datasets) prompt
+    the same question again and again: is this pattern a fixture artefact or is
+    it real in prod? Each template names its dataset as ``{ds}``; each variant is
+    the template with one target substituted in.
+
+    Nothing new is trusted here. The variants are ordinary statements handed to
+    :func:`query_batch`, so each is adjudicated by the firewall on its own, against
+    its own relation's profile and PII flags, and the objects the whole call needs
+    are priced in one handshake and profiled once. What this adds is the
+    expansion and the labels: every result carries the ``target`` it ran against
+    and the ``template`` it came from, in template-major order, so the variants of
+    one probe sit next to each other and a refusal names the target that failed.
+    """
+
+    prepared = [t if isinstance(t, tuple) else (t, None) for t in templates]
+    if not targets:
+        raise RequestError("--across needs at least one target dataset")
+    seen: set[str] = set()
+    for target in targets:
+        if not _ACROSS_TARGET.fullmatch(target):
+            raise RequestError(
+                f"--across target '{target}' is not a dataset name; use letters, "
+                "digits, underscores and hyphens, dot-separated for a qualified "
+                "project.dataset"
+            )
+        if target.lower() in seen:
+            raise RequestError(f"--across names '{target}' more than once")
+        seen.add(target.lower())
+    for number, (sql, line) in enumerate(prepared, start=1):
+        if ACROSS_PLACEHOLDER not in sql:
+            where = f"line {line}" if line is not None else f"statement {number}"
+            # A refusal message quoting an example, never SQL that runs.
+            raise RequestError(
+                f"{where} names no {ACROSS_PLACEHOLDER}, so it would run "  # noqa: S608
+                "identically against every --across target; write the dataset as "
+                f"{ACROSS_PLACEHOLDER}, for example "
+                f"select count(*) from {ACROSS_PLACEHOLDER}.orders"
+            )
+
+    limit = engine.config.query.max_statements
+    expanded_count = len(prepared) * len(targets)
+    if expanded_count > limit:
+        raise RequestError(
+            f"{len(prepared)} statement(s) across {len(targets)} target(s) is "
+            f"{expanded_count} statements, which exceeds the query.max_statements "
+            f"limit of {limit}; name fewer targets or statements, or raise the "
+            "limit in .dex/config.yml"
+        )
+
+    expanded: list[tuple[str, int | None]] = []
+    labels: list[tuple[int, str]] = []
+    for template_index, (sql, line) in enumerate(prepared):
+        for target in targets:
+            expanded.append((sql.replace(ACROSS_PLACEHOLDER, target), line))
+            labels.append((template_index, target))
+
+    result = query_batch(engine, expanded, auto_profile=auto_profile)
+    for statement, (template_index, target) in zip(result.results, labels, strict=True):
+        statement.template = template_index
+        statement.target = target
+    result.across = list(targets)
+    return result
+
+
+def _across_targets(args: argparse.Namespace) -> list[str] | None:
+    """The `--across` targets, comma-separated and repeatable, or None if unset."""
+
+    raw = getattr(args, "across", None)
+    if raw is None:
+        return None
+    values = [raw] if isinstance(raw, str) else list(raw)
+    return [
+        part.strip() for value in values for part in value.split(",") if part.strip()
+    ]
+
+
 def cmd_query(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
     statements = _statements_from(args, engine)
+    targets = _across_targets(args)
+    if targets is not None:
+        return _batch_envelope(
+            query_across(engine, statements, targets, auto_profile=_auto_profile(args))
+        )
     if len(statements) == 1:
         try:
             return to_envelope(
@@ -1910,7 +2012,9 @@ def _batch_envelope(result: QueryBatchResult) -> env.Envelope:
         cost=envelope.cost,
         warnings=envelope.warnings,
         errors=[
-            f"statement {statement.index + 1} {statement.status}: {statement.error}"
+            f"statement {statement.index + 1}"
+            + (f" (target {statement.target})" if statement.target else "")
+            + f" {statement.status}: {statement.error}"
             for statement in failures
         ],
         reason=env.Reason(failures[0].reason) if failures[0].reason else None,
@@ -2278,13 +2382,41 @@ def map(
     # It is decoupled from len(profiled), which no longer equals len(selected)
     # once some selected objects are served from cache.
     skipped = len(metas) - len(selected)
+    # Named, not only counted (#540): in the first-pass rank order that chose
+    # what to profile, so the head of the list is what only just missed the cut
+    # and is the first worth a targeted `explore profile`.
+    chosen = {m.identifier for m in selected}
+    skipped_ranked = [
+        m.identifier
+        for m in sorted(
+            metas, key=lambda m: (-first_pass.get(m.identifier, 0.0), m.identifier)
+        )
+        if m.identifier not in chosen
+    ]
+    skipped_block = summarize_skipped(skipped_ranked)
     if skipped > 0:
+        lead = ", ".join(skipped_ranked[:3])
         notes.append(
             f"profiled top {len(selected)} of {len(metas)} objects by rank "
             f"(profile_top_n={config.profile_top_n}; all objects are profiled "
-            f"automatically at {_AUTO_PROFILE_ALL} or fewer); pass --full to "
-            "profile everything"
+            f"automatically at {_AUTO_PROFILE_ALL} or fewer); data.skipped names "
+            f"the {skipped} not profiled. Profile the ones you need with "
+            f"`explore profile {lead}`, or pass --full to profile everything"
         )
+        if skipped_block.elided:
+            notes.append(
+                f"data.skipped.objects names the top {len(skipped_block.objects)} "
+                f"of {skipped} skipped objects by rank; {skipped_block.elided} "
+                "more are counted in data.skipped.elided and grouped in "
+                "data.skipped.by_namespace"
+            )
+        if skipped_block.elided_namespaces:
+            notes.append(
+                f"data.skipped.by_namespace lists the "
+                f"{len(skipped_block.by_namespace)} namespaces holding the most "
+                f"skipped objects; {skipped_block.elided_namespaces} more are "
+                "counted in data.skipped.elided_namespaces"
+            )
     if fresh_reused:
         window = config.profile_freshness_hours
         notes.append(
@@ -2362,6 +2494,7 @@ def map(
         profiled_count=len(profiled),
         cache_hit_count=len(fresh_reused),
         skipped_count=skipped,
+        skipped=skipped_block,
         carried_forward_count=carried,
         out_of_scope_carried_count=out_of_scope,
         dropped_count=len(dropped),

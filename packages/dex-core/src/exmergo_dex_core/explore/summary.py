@@ -40,6 +40,72 @@ MAX_COLUMNS_PER_OBJECT = 12
 # at the same point.
 MAX_EDGES = 40
 MAX_DATA_QUALITY_PER_OBJECT = 5
+# The rank cutoff's leftovers, named rather than counted (#540). Sized like the
+# objects the map does report, so a default cutoff names as many objects as it
+# profiled; namespaces get the same budget, which a source allowlist rarely nears.
+MAX_SKIPPED_OBJECTS = 25
+MAX_SKIPPED_NAMESPACES = 25
+
+
+class SkippedNamespace(BaseModel):
+    """How many of the rank cutoff's skipped objects sit in one namespace.
+
+    A record rather than a ``{namespace: count}`` mapping for the reason
+    :meth:`..results.MapResult.data` gives: a warehouse name must never become a
+    JSON key, because the envelope sanitizer matches keys against secret-like
+    words, and a schema named ``auth_tokens`` would take the command down.
+    """
+
+    namespace: str
+    count: int
+
+
+class SkippedObjects(BaseModel):
+    """What the rank cutoff did not profile, so a caller can decide up front.
+
+    ``count`` is every skipped object. ``by_namespace`` groups them by the
+    dataset or schema they sit in, largest first, and ``objects`` names them in
+    rank order, highest first, which is the order worth profiling them in. Both
+    lists are capped, and each cut is counted (``elided_namespaces``,
+    ``elided``), so a short list is never read as the whole of it. A run that
+    profiled everything reports ``count: 0`` and two empty lists.
+    """
+
+    count: int = 0
+    by_namespace: list[SkippedNamespace] = Field(default_factory=list)
+    objects: list[str] = Field(default_factory=list)
+    elided: int = 0
+    elided_namespaces: int = 0
+
+
+def summarize_skipped(
+    ranked: list[str],
+    *,
+    max_objects: int = MAX_SKIPPED_OBJECTS,
+    max_namespaces: int = MAX_SKIPPED_NAMESPACES,
+) -> SkippedObjects:
+    """``ranked`` (skipped identifiers, highest rank first) as a bounded block.
+
+    The namespace is everything before an identifier's last dot, the split the
+    map's own scope bookkeeping uses, so ``project.staging.orders`` and
+    ``db.staging.orders`` stay distinct where two databases share a schema name.
+    """
+
+    counts: dict[str, int] = {}
+    for identifier in ranked:
+        namespace = identifier.rpartition(".")[0] or identifier
+        counts[namespace] = counts.get(namespace, 0) + 1
+    grouped = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return SkippedObjects(
+        count=len(ranked),
+        by_namespace=[
+            SkippedNamespace(namespace=name, count=n)
+            for name, n in grouped[:max_namespaces]
+        ],
+        objects=ranked[:max_objects],
+        elided=max(len(ranked) - max_objects, 0),
+        elided_namespaces=max(len(grouped) - max_namespaces, 0),
+    )
 
 
 class MapColumn(BaseModel):

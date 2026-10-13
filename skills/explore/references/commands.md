@@ -117,7 +117,12 @@ and in an `elided_*` field. `--detail` widens the selection to every column and
 to objects that were inventoried but never profiled, and lifts no cap.
 
 Past 50 objects, `map` profiles only the top 25 by rank and says so in `notes`
-(with `skipped_count`); `--full` profiles everything. On a re-map, objects
+(with `skipped_count`); `--full` profiles everything. `data.skipped` names the
+skipped objects in rank order (`objects`, highest first) and groups them by
+namespace (`by_namespace`), each list capped at 25 with the rest counted in
+`elided` and `elided_namespaces`. When the next step needs a skipped object, run
+`explore profile` on the ones you need rather than probing each in turn. On a
+re-map, objects
 skipped this run keep their prior profiles (`carried_forward_count`), each
 stamped with its own `profiled_at`, so staleness is visible. Fresh cached
 profiles are reused the same way `profile` reuses them (`cache_hit_count`,
@@ -148,6 +153,14 @@ first and the statement then runs. The envelope names it under
 `data.profiled_on_demand`, and on a metered connector that profile is priced
 into the same confirmation as the statements. `--no-auto-profile` restores the
 strict prerequisite.
+
+`--across dev_raw,qa_raw,prod_raw` asks one question of mirrored environments
+(the "is this a dev fixture artefact or real in prod?" check): write the dataset
+as `{ds}` in each statement, and each runs once per target in one call and one
+handshake. Every entry in `data.results` carries its `target` and `template`, and
+a refusal names the target that failed while the others still answer. Targets
+are plain dataset names; statements times targets counts against
+`query.max_statements`.
 
 ## `explore cluster <object> [--features a,b,c] [-k N]`
 

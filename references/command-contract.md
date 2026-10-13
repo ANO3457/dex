@@ -148,7 +148,9 @@ dex explore diagram               -> the cached map as a Mermaid erDiagram, in `
                                      elision is counted in notes; dex writes no file
 dex explore query "<SELECT ...>"  -> firewall-approved SELECTs, capped and row-major
   [more...] | --sql-file <path>      (variadic: one call answers several questions; a file takes
-                                     one statement per line or semicolon-separated statements)
+  [--across <ds,ds>]                 one statement per line or semicolon-separated statements;
+                                     --across runs each statement once per mirrored dataset,
+                                     named as {ds} in the SQL, under one handshake)
 dex explore cluster <object>      -> k-means over a bounded sample of numeric non-PII non-key columns
                                      (a key is a unique column, a column that joins out, or one named like one);
                                      returns cluster sizes + centroids (means) + silhouette, no rows
@@ -1104,7 +1106,13 @@ everywhere.
 
 `explore map` never caps silently: past 50 objects it profiles the top
 `profile_top_n` (default 25) by rank and announces the cutoff in `notes`
-alongside `skipped_count` (`--full` profiles everything). Objects skipped on a
+alongside `skipped_count` (`--full` profiles everything). `data.skipped` names
+what it skipped: `count`, `by_namespace` (records of `namespace` and `count`,
+largest first, each namespace being everything before an identifier's last dot),
+and `objects` in rank order, highest first, each list capped at 25 with the rest
+counted in `elided_namespaces` and `elided`. It is always present, so `count: 0`
+on a `--full` run is the positive statement that nothing was skipped, and it
+changes neither which objects are profiled nor the estimate. Objects skipped on a
 re-map carry their prior profiles forward (`carried_forward_count`), each
 stamped with its own `profiled_at`. A selected object whose cached profile is
 still fresh (same connector, schema unchanged, profiled within
@@ -1258,6 +1266,23 @@ that failed makes the envelope's own status `error` while every answer stays in
 `data`, the same way `transform build` reports a run that failed partway: an `ok`
 envelope carrying a guard refusal would be the weaker claim, and dropping the
 answers to report the refusal would discard work already paid for.
+
+`--across <ds,ds,...>` (comma-separated, repeatable) asks one question of mirrored
+environments: dev, qa and prod copies of the same datasets. Every statement names
+its dataset as `{ds}` and runs once per target, so this is two statements in one
+call:
+`dex explore query "select status, count(*) from {ds}.orders group by 1" --across dev_raw,prod_raw`.
+They are ordinary statements to everything downstream: each is adjudicated by the
+firewall against its own relation's profile and PII flags, and the whole call is
+priced in one handshake and profiled once. Each entry in `data.results` adds
+`target` and `template` (which of the caller's statements it came from), the
+entries run template by template so the variants of one probe sit together, and
+`data.across` lists the targets in the order given. A refusal names its target
+(`statement 2 (target qa_raw) refused: ...`). A target must be a plain dataset
+name (letters, digits, `_`, `-`, dot-separated for a qualified one), since it is
+substituted into the SQL; a statement with no `{ds}`, a repeated target, and a
+call whose statements times targets exceeds `query.max_statements` are refused
+before anything runs. A call without `--across` reports neither key.
 
 The caps follow the call rather than the statement where the difference matters.
 `query.max_rows` and `query.max_cell_chars` bound each statement;
