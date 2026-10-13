@@ -1,4 +1,5 @@
-<img width="1280" height="563" alt="exmergo-dex-showcase" src="https://github.com/user-attachments/assets/9dd574c2-8598-47bc-ae90-7d5a3a4d2e18" />
+<img width="1920" height="1080" alt="Video 2" src="https://github.com/user-attachments/assets/f9c8c052-32fb-4b2f-8b89-a6f484b55035" />
+
 
 **Built by [Exmergo](https://exmergo.com)** · The AI Stack for Your Data Stack.
 
@@ -10,6 +11,7 @@
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Exmergo-165dfc?logo=linkedin&logoColor=white)](https://www.linkedin.com/company/exmergo/)
 [![X](https://img.shields.io/badge/Follow-%40exmergo-165dfc?logo=x&logoColor=white)](https://x.com/exmergo)
+[![Star the repo!](https://img.shields.io/github/stars/exmergo/dex?style=flat&label=Star%20the%20repo!%20%E2%AD%90&labelColor=555&logo=github&logoColor=white&color=165dfc)](https://github.com/exmergo/dex)
 
 ## Install (Any Agent)
 
