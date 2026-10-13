@@ -10,7 +10,7 @@
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Exmergo-165dfc?logo=linkedin&logoColor=white)](https://www.linkedin.com/company/exmergo/)
 [![X](https://img.shields.io/badge/Follow-%40exmergo-165dfc?logo=x&logoColor=white)](https://x.com/exmergo)
-[![GitHub stars](https://img.shields.io/github/stars/exmergo/dex?label=Star&logo=github&logoColor=white&color=165dfc)](https://github.com/exmergo/dex)
+[![Star the repo!](https://img.shields.io/github/stars/exmergo/dex?style=flat&label=Star%20the%20repo!%20%E2%AD%90&labelColor=555&logo=github&logoColor=white&color=165dfc)](https://github.com/exmergo/dex)
 
 ## Install (Any Agent)
 
