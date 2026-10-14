@@ -46,6 +46,14 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ### Fixed
 
+- **`dex config validate` reports a `dbt_project_dir` that holds no dbt
+  project** ([#590]). A pin to a directory that does not exist, or to one with
+  no `dbt_project.yml`, passed validation, and the mistake surfaced later from
+  whichever command first needed the project, not always as a message about the
+  pin. It is now a non-fatal `project_not_found` problem on the pin's line, so
+  `explore map` and `explore query` still run and every command carries it in
+  `warnings`, the same as an `unknown_key`.
+
 - **`host.plan_digest` reads a plan document as a dict, JSON string or bytes**
   ([#580]). It accepted only a `PortablePlan`, so the dict that
   `DexEngine.export_plan(...).plan` returns failed with a builtin
