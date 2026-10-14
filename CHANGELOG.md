@@ -9,6 +9,8 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-10-14
+
 ### Added
 
 - **Manifests for Copilot CLI, Cursor, Kiro and Gemini CLI, and a listing name and
