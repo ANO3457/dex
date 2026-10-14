@@ -13,7 +13,11 @@ Three habits, in order of how much they save:
   one payload and most of it is about something else. `list --metric <m>` if you
   know the metric, `list --for-dimension <d>` if you know the slice, or
   `list --search <word>` if you know neither. All three are free, none costs a round
-  trip beyond the first, and each names its scope in the payload.
+  trip beyond the first, and each names its scope in the payload. Use `--search`
+  when looking for metrics: it returns metrics matched by their own words or by
+  the elements they reach, together with what those metrics reach. To find an
+  unused measure, dimension or semantic model while authoring a metric, list
+  without `--search`.
 - **Read the metric's caveats before its dimensions.** `time_axis`, `filter` and
   `input_measures` change what the number is. The dimension list only changes how
   it is cut.
@@ -23,10 +27,13 @@ Three habits, in order of how much they save:
 
 ## Discovery order
 
-1. **`list`, scoped.** Start narrow. `--search` takes a word and matches it
-   against every element's name and against the project's own label and
-   description, so "revenue" finds the metrics an author wrote about revenue.
-   `--for-dimension pricing_tier` answers "what can I slice by this", and is also
+1. **`list`, scoped.** Start narrow. `--search` is metric-oriented: it takes a
+   word and matches it against a metric's name, label or description, the names,
+   labels and descriptions of the elements it reaches, and its groupable tokens.
+   It returns those metrics with what they reach. A term matching only an element
+   no metric uses returns an empty catalog; list without `--search` to discover
+   that unused element while authoring a metric. `--for-dimension pricing_tier`
+   answers "what can I slice by this", and is also
    the cheapest way to find the metrics that can go on one chart against one axis,
    because it returns the metrics groupable by **all** the tokens named.
 2. **Read the caveats on the metric you picked** (next section). Stop here if they

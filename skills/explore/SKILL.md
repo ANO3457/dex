@@ -117,8 +117,11 @@ uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [
 9. `explore semantic list|values|query` reads the semantic layer. Read
    `${CLAUDE_SKILL_DIR}/references/semantic-playbook.md` before running a metric
    query, because a metric's `time_axis`, `filter`, and measures decide what the
-   number is. Narrow `list` with `--metric`, `--for-dimension`, or `--search`
-   rather than `--full`. Run `values <dimension>` before writing a `--where`
+   number is. Narrow `list` with `--metric` or `--for-dimension`; use `--search`
+   to find matching metrics and what they reach. To discover a measure, dimension
+   or semantic model that no metric uses yet, list without `--search` rather than
+   assuming an empty search result means the element is absent. Run
+   `values <dimension>` before writing a `--where`
    filter. On a native Ossie layer, `values` and `query` refuse and name the
    physical route instead (`explore profile`, then `explore query` on the
    relation): take it.
