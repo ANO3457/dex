@@ -30,6 +30,14 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ### Changed
 
+- **`--help` now describes every command and flag.** Each subcommand carries a
+  one-line summary in its group's listing and a description, naming what it
+  costs, at the top of its own `--help`. Every option and positional has help
+  text, and positionals read as what they take (`plan-id`, `intent`, `column`)
+  rather than `argument`. The shared connection options are described from one
+  table, so the top-level copy and the per-subcommand copy cannot disagree. The
+  `dex --help` epilog no longer uses a double hyphen as a dash. A test fails on
+  any new subcommand or flag added without help.
 - **Native semantic authoring validates through the configured layer, not
   through Ossie by name** ([#597](https://github.com/exmergo/dex/issues/597)).
   `semantic <vendor> define|update|plan` reaches one vendor-neutral route, and
