@@ -27,7 +27,7 @@ from typing import Any
 
 from . import command_args
 from . import envelope as env
-from .config import SEMANTIC_SOURCE_FACTORIES
+from .config import SEMANTIC_DOCUMENT_AUTHORING
 from .engine import DexEngine
 from .guards.cost_guard import ConfirmationRequiredError, CostGuardError
 from .guards.dialect import DialectDependencyError
@@ -80,9 +80,8 @@ COMMAND_SURFACE: dict[str, list[str]] = {
         "preflight",
     ],
     # `define`/`update`/`plan` author the dbt semantic layer; each vendor whose
-    # semantic layer is its own project format gets a subcommand of its own name
-    # for authoring that layer's native documents.
-    "semantic": ["define", "update", "plan", *SEMANTIC_SOURCE_FACTORIES],
+    # native documents dex authors gets a subcommand of its own name for them.
+    "semantic": ["define", "update", "plan", *SEMANTIC_DOCUMENT_AUTHORING],
     # maintain: keep the dbt project correct as the world drifts. `snapshot`
     # captures the known-good baseline; `check` sweeps every axis against it;
     # `schema`/`volume`/`grain`/`semantic` are the per-axis deep detectors;
@@ -636,7 +635,7 @@ def _build_parser() -> argparse.ArgumentParser:
                     # away: never by going unmentioned.
                     sp.add_argument("--definitions-file", default=None)
                     sp.add_argument("--no-parse", action="store_true", default=False)
-                if group == "semantic" and name in SEMANTIC_SOURCE_FACTORIES:
+                if group == "semantic" and name in SEMANTIC_DOCUMENT_AUTHORING:
                     # Whole documents in, so no `--definitions-file`: a native
                     # document is authored as a unit, and the mode the dbt
                     # routes carry in their subcommand name is an argument here.
@@ -813,7 +812,7 @@ def _run(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
     # vendor's extra. Parsing a SQL expression inside a document is optional and
     # names its own skip when the dialect engine is absent, which is a weaker
     # floor than the dbt authoring routes below can accept.
-    if args.group == "semantic" and args.subcommand in SEMANTIC_SOURCE_FACTORIES:
+    if args.group == "semantic" and args.subcommand in SEMANTIC_DOCUMENT_AUTHORING:
         from .transform.native_semantic import cmd_semantic_ossie
 
         return cmd_semantic_ossie(args, engine)
