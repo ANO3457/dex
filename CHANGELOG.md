@@ -9,6 +9,25 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+### Added
+
+- **`semantic.vendor: slayer` configuration and a pinned `[slayer]` extra**
+  ([#596](https://github.com/exmergo/dex/issues/596)). The first step toward
+  SLayer as a third semantic vendor ([#595](https://github.com/exmergo/dex/issues/595)):
+  configuration and packaging only. The reader, authoring and drift land
+  separately. `semantic.slayer.base_dir` names SLayer's storage root inside the
+  repository, and `semantic.slayer.models` is an exact allowlist of
+  `models/<data_source>/<name>.yaml` files under it, with the same rules as
+  `semantic.ossie.files` (no globs, no absolute paths, no `..`, no duplicates).
+  SLayer datasource files and `priority.yaml` are refused, because a datasource
+  carries connection credentials. `[slayer]` pins `motley-slayer==1.2.0` exactly
+  and carries `[sql]`, so an install lands where SLayer's sqlglot floor and dex's
+  ceiling overlap (30.17 to 30.x). A new blocking CI job resolves the two
+  together. With `vendor: slayer` set and the extra absent, a command refuses with
+  `reason: prerequisite` and names the install, and MetricFlow semantic models
+  are not read in SLayer's place. The skill wrapper installs `[slayer]` for
+  `maintain` commands only where the config names that vendor.
+
 ### Fixed
 
 - **`Budget.paradigm` is removed; it validated and did nothing** ([#557]). A
