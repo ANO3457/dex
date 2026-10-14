@@ -1,6 +1,7 @@
 ---
 name: explore
-description: 'Use this whenever you need to know what is actually in a database, warehouse, or DuckDB file before you trust it: ranked inventory of what exists, column profiles, PII detection, grain and data-quality problems, verified join inference, Mermaid ER diagrams, guarded ad-hoc SQL probes, k-means segmentation, and reading the semantic layer a repo declares (dbt semantic models, a hosted dbt Cloud layer, or native Apache Ossie documents), producing a draft map without dumping the whole schema into context. Trigger it on an unmet precondition, not on any particular phrasing: if you are about to write or fix SQL against tables whose columns, types, grain, or join keys you have not verified in this session, use this FIRST. That includes dbt work: building a staging or mart model, fixing a broken model, or debugging wrong numbers, whenever the ticket names source tables without spelling out their schema. It also applies mid-task: if you are partway through and hit a table you have not inspected, stop and use this rather than guessing column names or firing off one-off SELECTs. Also use it for direct questions like "what''s in my duckdb", "which tables matter", "how do these tables relate", "is this data any good", "any PII in here", "how many orders have no customer", "cluster my customers", or "what metrics does this semantic layer define". Explore is read-only and writes nothing but the .dex/ cache. It does not author the model: pair it with transform, which writes the change once you know what you are writing against. To reconcile a project that has fallen out of sync, use maintain.'
+description: 'Use this whenever you need to know what is actually in a database, warehouse, or DuckDB file before you trust it: inventory, column profiles, PII detection, grain and data-quality problems, verified joins, ER diagrams, ad-hoc SQL probes, segmentation, and the semantic layer a repo declares (dbt or Apache Ossie). Trigger it on an unmet precondition, not on phrasing: if you are about to write or fix SQL against tables whose columns, types, grain, or join keys you have not verified in this session, use this FIRST. That includes dbt work (building a model, fixing one, debugging wrong numbers) whenever the ticket names source tables without spelling out their schema. It applies mid-task too: on reaching a table you have not inspected, stop and use this rather than guess column names. Also for "what''s in my duckdb", "is this data any good", "how do these tables relate". Read-only; writes only the .dex/ cache. It does not author the model: transform does, and maintain reconciles a project that has drifted.'
+compatibility: 'Needs a local shell and uv. On first use, uv downloads the exmergo-dex-core engine from PyPI at the version scripts/run.py pins. Runs in Claude Code or another agent that loads Agent Skills and has a shell, not in claude.ai chat.'
 ---
 
 # Explore
@@ -48,6 +49,10 @@ or `.dex/plans/` by hand in place of the command that guards them.
 ```bash
 uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [flags]
 ```
+
+Installed as a plugin or skill, `run.py` runs the `exmergo-dex-core` engine from
+PyPI at the exact version its `DEX_CORE_VERSION` line pins, built from
+https://github.com/exmergo/dex/tree/main/packages/dex-core.
 
 - `uv` is a prerequisite that Claude Code does not install. If the shell reports
   `uv: command not found`, stop and tell the user to install it

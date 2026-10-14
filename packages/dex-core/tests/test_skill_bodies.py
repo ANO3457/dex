@@ -2,7 +2,7 @@
 
 A body enters an agent's context only when the Skill tool loads it, and its
 bundled reference files are read even less, so what a body says first decides
-what an agent does (#489). Three properties are held here:
+what an agent does (#489). Four properties are held here:
 
 - Each body opens with the procedure, delimited by markers. #502 will assert the
   text between the markers against the engine's own; until then the three copies
@@ -12,6 +12,8 @@ what an agent does (#489). Three properties are held here:
 - No skill cites a repository-root document as though it could open it. A skill
   installed through `npx skills add exmergo/dex` has no `references/` beside it,
   so where a policy matters the body states its consequence instead.
+- Each frontmatter fits the Agent Skills specification's caps, which the strictest
+  directories and agents enforce.
 """
 
 from __future__ import annotations
@@ -90,6 +92,37 @@ def test_the_frontmatter_parses_as_yaml_with_a_string_description(skill: str):
     description = parsed.get("description")
     assert isinstance(description, str) and description.strip(), (
         f"skills/{skill}/SKILL.md's description is one string, not a mapping or empty"
+    )
+
+
+# The Agent Skills specification's caps, in code points (what `skills-ref validate`
+# and `len()` both count).
+DESCRIPTION_CAP = 1024
+COMPATIBILITY_CAP = 500
+
+
+@pytest.mark.parametrize("skill", SKILLS)
+def test_the_frontmatter_fits_the_agent_skills_caps(skill: str):
+    """The specification caps `description` at 1,024 characters and the strictest
+    consumers enforce it: OpenAI's plugin portal rejects a longer one and
+    awesome-copilot's `vally lint` fails it, while Codex, VS Code Copilot and
+    SkillsMP cut it mid-word. Claude Code allows 1,536, so a description tuned only
+    in Claude Code drifts past the cap without anything in this repo noticing.
+    `compatibility` is optional and capped at 500."""
+
+    import yaml
+
+    frontmatter = body(skill).split("\n---\n", 1)[0].removeprefix("---\n")
+    parsed = yaml.safe_load(frontmatter)
+    description = parsed["description"]
+    assert len(description) <= DESCRIPTION_CAP, (
+        f"skills/{skill}/SKILL.md's description is {len(description)} characters; "
+        f"the Agent Skills specification caps it at {DESCRIPTION_CAP}"
+    )
+    compatibility = parsed.get("compatibility", "")
+    assert len(compatibility) <= COMPATIBILITY_CAP, (
+        f"skills/{skill}/SKILL.md's compatibility is {len(compatibility)} "
+        f"characters; the Agent Skills specification caps it at {COMPATIBILITY_CAP}"
     )
 
 

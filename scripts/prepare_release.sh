@@ -19,9 +19,13 @@
 # <engine-version> is the PEP 440 version you will tag, without the leading v
 # (for example 0.1.0a1 for an alpha, 0.1.0 for a release). Use the canonical
 # PEP 440 spelling: it must match the built wheel name the workflow asserts on.
-# [plugin-semver], if given, bumps .claude-plugin/plugin.json; its version is
-# semver, distinct from the engine's PEP 440 string, so it is set explicitly
-# rather than copied (0.1.0a1 is valid PEP 440 but not valid semver).
+# [plugin-semver], if given, bumps the plugin manifests each agent reads:
+# .claude-plugin/plugin.json (Claude Code), plugin.json (the Agent Plugins manifest
+# Copilot CLI, Cursor and Kiro read) and gemini-extension.json (Gemini CLI). A
+# manifest left behind advertises the previous version to that agent's users, and
+# packages/dex-core/tests/test_plugin_manifests.py fails the release gate on it. The
+# plugin version is semver, distinct from the engine's PEP 440 string, so it is set
+# explicitly rather than copied (0.1.0a1 is valid PEP 440 but not valid semver).
 set -euo pipefail
 
 ENGINE_VERSION="${1:?usage: prepare_release.sh <engine-version> [plugin-semver]}"
@@ -39,10 +43,12 @@ for skill in explore transform maintain; do
 done
 
 if [ -n "${PLUGIN_VERSION}" ]; then
-  f="${ROOT}/.claude-plugin/plugin.json"
-  sed -i.bak -E "s/(\"version\": \")[^\"]+(\")/\1${PLUGIN_VERSION}\2/" "$f"
-  rm -f "${f}.bak"
-  echo "bumped .claude-plugin/plugin.json -> ${PLUGIN_VERSION}"
+  for manifest in .claude-plugin/plugin.json plugin.json gemini-extension.json; do
+    f="${ROOT}/${manifest}"
+    sed -i.bak -E "s/(\"version\": \")[^\"]+(\")/\1${PLUGIN_VERSION}\2/" "$f"
+    rm -f "${f}.bak"
+    echo "bumped ${manifest} -> ${PLUGIN_VERSION}"
+  done
 fi
 
 # Opening the release section directly under [Unreleased] moves every pending

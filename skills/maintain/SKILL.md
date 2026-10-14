@@ -1,6 +1,7 @@
 ---
 name: maintain
-description: 'Use this to keep a dbt project and its semantic layer correct as the warehouse and the business change, including a semantic layer that is native Apache Ossie documents rather than dbt. It detects drift on four axes and proposes the fix: schema drift (source columns and tables added, dropped, retyped, or renamed), volume drift (a row count that collapsed, a table that emptied, a load that half-failed), grain drift (a key that lost uniqueness, a changed row-per-entity cardinality, an increased join fanout), and semantic drift (a metric, measure, dimension, or entity definition that no longer matches, new categorical values, dangling semantic references). Reach for this when something that used to work has started failing or producing different numbers and the cause is more likely upstream than in the code you just wrote: a test that began failing with no code change, a dashboard whose numbers moved, a model that is suddenly empty or duplicated. Trigger it for requests like "what changed in the warehouse", "did anything drift", "is my dbt project still in sync", "my primary key has duplicates now", "the row count dropped", "did the load run", "the data stopped flowing", "the revenue metric definition changed", "reconcile my models with the source schema", "which models are stale", "did my Ossie semantic layer drift", or "is this relationship still valid". It reads the .dex/ snapshot and proposes reviewable diffs; it never overwrites hand-written work. To author new models or metrics from scratch, use transform. To learn an unfamiliar warehouse for the first time, use explore.'
+description: 'Use this to find out whether an existing dbt project or semantic layer (dbt or Apache Ossie) is correct against its warehouse, and if not, why. `maintain verify` checks the project as it stands; against a .dex/ snapshot, `maintain check` finds schema, volume, grain, and semantic drift and `maintain reconcile` proposes the fix. Reach for it whenever an existing project is suspected wrong, whether or not anything is known to have changed: "this model is wrong, work out why", "the numbers look too high", "some rows are missing", "this column is empty", "duplicates in my fact table", "the project is broken", "diagnose why this test fails", "a test fails and nobody changed the model", "the dashboard moved but the code did not", "did anything drift", "the row count dropped", "the metric definition changed". Read-only; fixes come back as reviewable diffs and never overwrite hand-written work. Writing the fix, or repairing a model you just edited, is transform''s; a data question with no project is explore''s.'
+compatibility: 'Needs a local shell and uv. On first use, uv downloads the exmergo-dex-core engine from PyPI at the version scripts/run.py pins. Runs in Claude Code or another agent that loads Agent Skills and has a shell, not in claude.ai chat.'
 ---
 
 # Maintain
@@ -50,6 +51,10 @@ or `.dex/plans/` by hand in place of the command that guards them.
 ```bash
 uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [flags]
 ```
+
+Installed as a plugin or skill, `run.py` runs the `exmergo-dex-core` engine from
+PyPI at the exact version its `DEX_CORE_VERSION` line pins, built from
+https://github.com/exmergo/dex/tree/main/packages/dex-core.
 
 - `uv` is a prerequisite that Claude Code does not install. If the shell reports
   `uv: command not found`, stop and tell the user to install it

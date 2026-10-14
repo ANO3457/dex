@@ -9,7 +9,73 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+### Added
+
+- **Manifests for Copilot CLI, Cursor, Kiro and Gemini CLI, and a listing name and
+  links in the Claude Code manifest** ([#607]). Copilot CLI, Cursor Marketplace and
+  Kiro read an Agent Plugins 1.0 `plugin.json` at the plugin root. The Gemini CLI
+  extensions gallery lists only repositories that carry a `gemini-extension.json`.
+  dex shipped neither. Both now sit at the repository root with the name, version
+  and description of `.claude-plugin/plugin.json`; the Agent Plugins manifest also
+  carries its keywords. The Claude Code manifest gains
+  `displayName` ("Exmergo Dex", since another plugin named `dex` exists),
+  `privacyPolicyUrl` and `supportUrl`, which the Claude plugin directory reads for
+  its listing. `name` stays `dex`, since it is the install id and the `/dex:*`
+  namespace. `scripts/prepare_release.sh <engine> <plugin-semver>` now bumps the
+  version in all three manifests, and `tests/test_plugin_manifests.py` fails the
+  release gate when their name, version, description or keywords disagree.
+
+- **The README says what dex runs and connects to, and where it runs** ([#607]).
+  A new section lists each download and connection:
+  - `uv` downloading the pinned `exmergo-dex-core` and its dependencies, plus a
+    managed Python when no 3.11 or newer is installed.
+  - The warehouse you configure, which gets read-only SQL.
+  - The hosted dbt Cloud Semantic Layer, when you enable it.
+  - The dbt commands dex runs, which are dbt-core's own: dbt-core sends its
+    anonymous usage statistics unless you turn them off, and `dbt deps` downloads
+    the packages `packages.yml` declares.
+  - Nothing to Exmergo.
+
+  It also says dex needs a coding agent with a local shell and does not run in
+  claude.ai chat, and it links the dex privacy policy. The `uv` prerequisite drops
+  its `curl | sh` installer line in favor of `brew install uv`, `pipx install uv`
+  and the uv installation docs, the advice the skill wrapper has printed since
+  [#530]. skills.sh's security audit flagged that line as downloading and running
+  remote code.
+
+- **Each skill names the engine package it runs, and states what it needs**
+  ([#607]). Each SKILL.md's "Running the engine" section names `exmergo-dex-core`
+  on PyPI, at the version `scripts/run.py` pins, and links its source. Without
+  that, a reader of the skill alone could not tell what gets downloaded. The
+  frontmatter gains the Agent Skills `compatibility` field: a local shell and
+  `uv`, the engine fetched from PyPI on first use, and no claude.ai chat.
+  `claude plugin validate --strict`, `vally lint` and `npx skills` all accept it.
+
+- **`exmergo-dex-core` declares PyPI classifiers, connector keywords, and changelog
+  and issue URLs** ([#607]). It had no classifiers, its keywords named no
+  connector other than DuckDB, and its only links were the homepage and the
+  repository. There is no `License ::` classifier, because under PEP 639 the SPDX
+  `license` field replaces it.
+
+### Changed
+
+- **The three skill descriptions fit the Agent Skills 1,024-character cap**
+  ([#607]). `explore` goes from 1,601 to 1,014 characters, `transform` from 1,617
+  to 1,002, and `maintain` from 1,600 to 1,015. The descriptions retain explore's
+  schema-verification precondition, transform's bug-fix scope and validation
+  before writing, and maintain's diagnostic and drift triggers, along with their
+  guardrails and sibling pointers. A frontmatter test holds the description cap
+  and the optional `compatibility` field's 500-character cap.
+
 ### Fixed
+
+- **`maintain` again claims diagnosis without a prior snapshot or known change**
+  ([#607]). Commit `7f9a0ba` reverted the description introduced by [#534](https://github.com/exmergo/dex/issues/534)
+  for [#233], so 1.13.0 and 1.13.1 shipped the earlier drift-only description
+  despite the 1.13.0 changelog entry. The shortened description restores the
+  diagnostic intent, names `maintain verify` beside snapshot-based `check` and
+  `reconcile`, and includes requests such as "the project is broken" and
+  "diagnose why this test fails". Writing the fix remains transform's job.
 
 - **`Budget.paradigm` is removed; it validated and did nothing** ([#557]). A
   command's cost paradigm comes from its connector (`connect.paradigm_for`),

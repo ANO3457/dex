@@ -1,6 +1,7 @@
 ---
 name: transform
-description: 'Use this to author and change a dbt project or a semantic layer: bootstrap a project in a repo that has none (`transform init`), write or refactor model SQL from staging to marts, add tests and docs in schema.yml, manage dependencies, and define or update the semantic layer, whether that is dbt semantic models (MetricFlow: entities, dimensions, measures, metrics) or native Apache Ossie documents in a repo with no dbt project at all. Reach for this rather than editing model files by hand whenever the change spans more than one file or has to stay consistent with the rest of the project: it validates the edit against the real schema before writing, returns the change as a reviewable diff with a plan id, and catches the class of error that only surfaces at `dbt run`, such as wrong column names, broken refs, or a materialization that fights the project config. On a large project that check is worth more than the round trip costs. It applies to bug-fix tickets too: "this model returns wrong numbers, fix it" is a transform task. Trigger it for requests like "set up a dbt project in this repo", "build a staging model for this table", "refactor this model", "add tests to this model", "create a mart for X", "define a revenue metric", "add a dimension to this entity", "add a metric to my Ossie semantic model", or "update semantics/commerce.ossie.yaml". Any warehouse build is dev-target only, gated, and cost-surfaced first. If you do not yet know the source tables'' columns or grain, use explore first, then come back. To reconcile a project that has drifted out of sync with the warehouse, use maintain.'
+description: 'Use this to author and change a dbt project or a semantic layer: bootstrap a project (`transform init`), write or refactor models from staging to marts, add tests and docs, and define semantic models, entities, dimensions, and metrics in MetricFlow or native Apache Ossie documents. Reach for it instead of editing model files by hand whenever a change spans more than one file or must stay consistent with the project: it validates the edit against the real schema, returns a reviewable diff with a plan id, and catches what otherwise fails at `dbt run`, such as wrong columns or broken refs. Bug-fix tickets count: "this model returns wrong numbers, fix it" is a transform task. Also for "build a staging model for this table", "define a revenue metric", "add a dimension to this entity". Warehouse builds are dev-target only, gated, and cost-surfaced first. If you have not verified the source tables'' columns or grain, use explore first. For a project that drifted from the warehouse, use maintain.'
+compatibility: 'Needs a local shell and uv. On first use, uv downloads the exmergo-dex-core engine from PyPI at the version scripts/run.py pins. Runs in Claude Code or another agent that loads Agent Skills and has a shell, not in claude.ai chat.'
 ---
 
 # Transform
@@ -49,6 +50,10 @@ or `.dex/plans/` by hand in place of the command that guards them.
 ```bash
 uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [flags]
 ```
+
+Installed as a plugin or skill, `run.py` runs the `exmergo-dex-core` engine from
+PyPI at the exact version its `DEX_CORE_VERSION` line pins, built from
+https://github.com/exmergo/dex/tree/main/packages/dex-core.
 
 - `uv` is a prerequisite that Claude Code does not install. If the shell reports
   `uv: command not found`, stop and tell the user to install it

@@ -154,14 +154,15 @@ to it.
 ## Prerequisite: `uv`
 
 dex installs and runs its engine through [`uv`](https://docs.astral.sh/uv/), so you
-need it on your `PATH` before either install below. Neither Claude Code nor the
+need it on your `PATH` before either install above. Neither Claude Code nor the
 plugin installs it for you.
 ```
-curl -LsSf https://astral.sh/uv/install.sh | sh
+brew install uv
 ```
-`brew install uv` and `pipx install uv` work too. Nothing else is required: `uv`
-supplies the Python and the engine, with the connector extra chosen for you at
-runtime.
+`pipx install uv` works too, and the
+[uv installation docs](https://docs.astral.sh/uv/getting-started/installation/)
+cover every other platform. Nothing else is required: `uv` supplies the Python and
+the engine, with the connector extra chosen for you at runtime.
 
 The first command in a fresh environment pays for that install, which is tens of
 seconds on a cold `uv` cache. `--warm` pays it up front instead: it materializes
@@ -172,6 +173,35 @@ uv run --no-project --script skills/<skill>/scripts/run.py --warm
 Run it as a container build step or a CI setup step, or ask your agent to warm dex
 once after installing. Add `--connector snowflake` (or any other connector) to warm
 a warehouse before there is a project to read the choice from.
+
+## What dex runs and connects to
+
+dex runs on your machine, inside your coding agent. It needs an agent with a local
+shell: Claude Code, or any agent that loads Agent Skills. It does not run in
+claude.ai chat, which has no shell to run `uv` in.
+
+- **Install.** The skills run `uv`, which downloads the `exmergo-dex-core` engine at
+  the exact version the skill pins, with its dependencies, from PyPI (or the package
+  index your `uv` configuration names) on first use of each version. If no Python
+  3.11 or newer is on the machine, `uv` also downloads a managed Python.
+- **Your warehouse.** The engine connects only to the warehouse or database you
+  configure, with credentials it discovers from your existing credential chain, and
+  sends it read-only SQL. Credentials never enter the agent's context.
+- **dbt Cloud, if you turn it on.** The hosted dbt Cloud Semantic Layer backend is
+  off by default. Enabled, it sends semantic queries (metric names, dimension names
+  and filter expressions) and catalog requests to your dbt Cloud host with your
+  service token, and dbt Cloud runs them against your warehouse.
+- **dbt.** The dbt commands dex runs for `transform` and `maintain` are dbt-core's
+  own, so dbt-core sends its anonymous usage statistics to dbt Labs unless you turn
+  them off in your dbt configuration. `transform deps` runs `dbt deps`, which
+  downloads the packages your `packages.yml` declares.
+- **Exmergo.** dex sends nothing to Exmergo: no telemetry, analytics, license check
+  or update ping.
+- **Your repository.** dex keeps its own state in `.dex/`, and every change to your
+  project comes back as a diff you review. dbt writes its usual `target/` and
+  `logs/` when dex runs it.
+
+See the [dex privacy policy](https://www.exmergo.com/privacy/dex).
 
 ## Benchmarks
 
