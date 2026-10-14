@@ -533,9 +533,11 @@ SEMANTIC_SOURCE_FACTORIES: dict[str, str] = {
 #: The vendors whose native documents `semantic <vendor> define|update|plan`
 #: authors, each as a subcommand of its own name. A subset of
 #: `SEMANTIC_SOURCE_FACTORIES` rather than all of it, because a vendor's reader
-#: can land before its authoring route does: a subcommand registered ahead of its
-#: route would author through another vendor's validator, which is worse than no
-#: subcommand at all.
+#: can land before it can be authored: the route validates through the layer's
+#: own `SemanticEditTarget.validate_semantic_edits`, and a subcommand registered
+#: before the layer implements it would exist only to refuse. The route takes
+#: no vendor name of its own; it reads the vendor off the subcommand, and refuses
+#: one that is not the configured `semantic.vendor`.
 SEMANTIC_DOCUMENT_AUTHORING: tuple[str, ...] = ("ossie",)
 _SEMANTIC_DEPLOYMENT_SPELLINGS: dict[str, str] = {
     "local": "local",

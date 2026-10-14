@@ -28,6 +28,22 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   are not read in SLayer's place. The skill wrapper installs `[slayer]` for
   `maintain` commands only where the config names that vendor.
 
+### Changed
+
+- **Native semantic authoring validates through the configured layer, not
+  through Ossie by name** ([#597](https://github.com/exmergo/dex/issues/597)).
+  `semantic <vendor> define|update|plan` reaches one vendor-neutral route, and
+  the layer validates its own documents through a new
+  `SemanticEditTarget.validate_semantic_edits` method, which returns a
+  `SemanticEditValidation`. Ossie implements it by delegating to its existing
+  validator, so Ossie authoring behaves as before. A third-party semantic
+  source that implements `SemanticEditTarget` must add the method to stay
+  authorable. A subcommand that does not match `semantic.vendor` (for example
+  `semantic ossie plan` under `vendor: dbt`) is now refused before the edits
+  payload or any document is read, and a vendor that cannot author names the
+  vendors that can. `DexEngine.semantic_native(vendor, mode, intent, edits)` is
+  the library route; `DexEngine.semantic_ossie` remains and delegates to it.
+
 ### Fixed
 
 - **`Budget.paradigm` is removed; it validated and did nothing** ([#557]). A

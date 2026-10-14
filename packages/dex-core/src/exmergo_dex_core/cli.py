@@ -211,7 +211,7 @@ _GROUP_HELP: dict[str, str] = {
     "connect": "check a connector's own credentials and capabilities",
     "explore": "make sense of a warehouse: rank objects, profile columns, infer joins",
     "transform": "author and refactor dbt models, tests, and the semantic layer",
-    "semantic": "define dbt or native Ossie semantics as reviewable diffs",
+    "semantic": "define dbt or native semantic layers as reviewable diffs",
     "maintain": "detect drift against the last snapshot and propose the fix",
     "viz": "preview the semantic layer (not yet implemented)",
     "config": "read, check and change .dex/config.yml, as reviewable diffs",
@@ -813,9 +813,9 @@ def _run(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
     # names its own skip when the dialect engine is absent, which is a weaker
     # floor than the dbt authoring routes below can accept.
     if args.group == "semantic" and args.subcommand in SEMANTIC_DOCUMENT_AUTHORING:
-        from .transform.native_semantic import cmd_semantic_ossie
+        from .transform.native_semantic import cmd_semantic_native
 
-        return cmd_semantic_ossie(args, engine)
+        return cmd_semantic_native(args, engine)
 
     # `transform apply` writes bytes a plan already validated, so what it needs
     # depends on the plan rather than on the verb. A semantic-document plan
