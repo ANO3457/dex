@@ -13,6 +13,23 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ### Added
 
+- **`semantic.vendor: slayer` configuration and a pinned `[slayer]` extra**
+  ([#596](https://github.com/exmergo/dex/issues/596)). The first step toward
+  SLayer as a third semantic vendor ([#595](https://github.com/exmergo/dex/issues/595)):
+  configuration and packaging only. The reader, authoring and drift land
+  separately. `semantic.slayer.base_dir` names SLayer's storage root inside the
+  repository, and `semantic.slayer.models` is an exact allowlist of
+  `models/<data_source>/<name>.yaml` files under it, with the same rules as
+  `semantic.ossie.files` (no globs, no absolute paths, no `..`, no duplicates).
+  SLayer datasource files and `priority.yaml` are refused, because a datasource
+  carries connection credentials. `[slayer]` pins `motley-slayer==1.2.0` exactly
+  and carries `[sql]`, so an install lands where SLayer's sqlglot floor and dex's
+  ceiling overlap (30.17 to 30.x). A new blocking CI job resolves the two
+  together. With `vendor: slayer` set and the extra absent, a command refuses with
+  `reason: prerequisite` and names the install, and MetricFlow semantic models
+  are not read in SLayer's place. The skill wrapper installs `[slayer]` for
+  `maintain` commands only where the config names that vendor.
+
 - **Manifests for Copilot CLI, Cursor, Kiro and Gemini CLI, and a listing name and
   links in the Claude Code manifest** ([#607]). Copilot CLI, Cursor Marketplace and
   Kiro read an Agent Plugins 1.0 `plugin.json` at the plugin root. The Gemini CLI
@@ -61,6 +78,20 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ### Changed
 
+- **Native semantic authoring validates through the configured layer, not
+  through Ossie by name** ([#597](https://github.com/exmergo/dex/issues/597)).
+  `semantic <vendor> define|update|plan` reaches one vendor-neutral route, and
+  the layer validates its own documents through a new
+  `SemanticEditTarget.validate_semantic_edits` method, which returns a
+  `SemanticEditValidation`. Ossie implements it by delegating to its existing
+  validator, so Ossie authoring behaves as before. A third-party semantic
+  source that implements `SemanticEditTarget` must add the method to stay
+  authorable. A subcommand that does not match `semantic.vendor` (for example
+  `semantic ossie plan` under `vendor: dbt`) is now refused before the edits
+  payload or any document is read, and a vendor that cannot author names the
+  vendors that can. `DexEngine.semantic_native(vendor, mode, intent, edits)` is
+  the library route; `DexEngine.semantic_ossie` remains and delegates to it.
+
 - **The three skill descriptions fit the Agent Skills 1,024-character cap**
   ([#607]). `explore` goes from 1,601 to 1,014 characters, `transform` from 1,617
   to 1,002, and `maintain` from 1,600 to 1,015. The descriptions retain explore's
@@ -70,6 +101,22 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
   and the optional `compatibility` field's 500-character cap.
 
 ### Fixed
+
+- **`dex config validate` reports a `dbt_project_dir` that holds no dbt
+  project** ([#590]). A pin to a directory that does not exist, or to one with
+  no `dbt_project.yml`, passed validation, and the mistake surfaced later from
+  whichever command first needed the project, not always as a message about the
+  pin. It is now a non-fatal `project_not_found` problem on the pin's line, so
+  `explore map` and `explore query` still run and every command carries it in
+  `warnings`, the same as an `unknown_key`.
+
+- **`host.plan_digest` reads a plan document as a dict, JSON string or bytes**
+  ([#580]). It accepted only a `PortablePlan`, so the dict that
+  `DexEngine.export_plan(...).plan` returns failed with a builtin
+  `AttributeError`. It now takes the same four forms as `verify_plan_document`,
+  returns the same digest for each, and raises `PlanDocumentError` for input
+  that is not a readable plan. It still runs none of the other checks, so a
+  caller can digest a document it has not verified yet.
 
 - **`maintain` again claims diagnosis without a prior snapshot or known change**
   ([#607]). Commit `7f9a0ba` reverted the description introduced by [#534](https://github.com/exmergo/dex/issues/534)
