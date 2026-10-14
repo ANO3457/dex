@@ -20,6 +20,32 @@ keywords = [
   "duckdb",
   "data-engineering",
   "agent",
+  "snowflake",
+  "bigquery",
+  "databricks",
+  "redshift",
+  "postgres",
+  "clickhouse",
+  "metricflow",
+  "ossie",
+  "agent-skills",
+  "schema-drift",
+  "pii",
+]
+# No `License ::` classifier: under PEP 639 the SPDX `license` above replaces it.
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Database",
+  "Topic :: Database :: Front-Ends",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Typing :: Typed",
 ]
 
 # Base dependencies are the canonical model (pydantic) and config parsing (pyyaml):
@@ -221,6 +247,8 @@ dev = ["ruff==0.15.19", "scikit-learn>=1.4", "exmergo-dex-core[ossie,sql,storage
 [project.urls]
 Homepage = "https://www.exmergo.com/dex"
 Repository = "https://github.com/exmergo/dex"
+Changelog = "https://github.com/exmergo/dex/blob/main/CHANGELOG.md"
+Issues = "https://github.com/exmergo/dex/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/exmergo_dex_core"]
