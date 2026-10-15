@@ -136,7 +136,10 @@ top and sometimes cut from the bottom, and the honesty must not be what is lost:
  "unresolved": [{"path": "models/marts/dyn.sql", "line": 2, "form": "ref_call",
                  "kind": "model", "reason": "dex could not resolve this
                  reference statically"}],
- "ambiguous": [], "freshness": {...}, "binding": {...},
+ "ambiguous": [],
+ "missing": [{"kind": "model", "name": "stg_order", "used_in":
+              ["models/marts/orders.sql"]}],
+ "freshness": {...}, "binding": {...},
  "relations": ["dev.main.stg_orders"], "dependencies": [...]}
 ```
 
@@ -146,6 +149,32 @@ plan reads nothing. An empty one with `completeness: unresolved` means dex could
 not see. A host that reads the first when it should have read the second admits a
 change nobody checked, which is why `completeness` is computed from the limits
 rather than asserted.
+
+**Three findings, and only one of them is about dex.** `unresolved` is a
+reference dex read and could not name, such as `ref(var('x'))`. `ambiguous` is a
+name more than one thing defines. `missing` is a name nothing defines once the
+plan lands: `ref('stg_order')` for a model called `stg_orders`, a source table
+nobody declared, a metric reading a measure that does not exist. `unresolved` and
+`limits` lower `completeness`, because they mean dex did not finish. `ambiguous`
+and `missing` do not, because dex finished and found a problem with the plan. So
+a host admitting a change requires `completeness: complete` *and* `missing: []`.
+
+`missing` is never a guess. Where part of the project went unread (a declared
+package that is not installed, a package set the plan itself changes, a YAML file
+that does not parse), a name with no definition is left out of `missing` and a
+limit names it and says why, which makes the answer `partial`. A two-argument
+`ref('core', 'x')` is never reported missing either, because it can name another
+dbt project that dex does not read.
+
+Each dependency says where its definition lives once the plan lands, in
+`defined`: `plan` when a file the plan writes defines it (a rewrite counts),
+`project` for a file the plan leaves alone, `package` when only an installed
+package does (`package` then names it), or `missing`. That is independent of
+`relation`, which is where dex could see the name built. Without a compiled
+manifest every `relation` is absent, and `defined` still answers. It is absent
+where dex makes no claim: columns, macros and vars the project does not declare
+(dbt's own macros and `--vars` are invisible to a static read), and names only the
+compiled semantic catalog knows.
 
 **Staleness sits beside completeness, not inside it.** A fully resolved graph
 read out of a manifest older than the model sources is complete and stale at
@@ -159,7 +188,9 @@ its own; together they are what makes a later mismatch visible instead of silent
 
 A metric resolves through its measures to its semantic model and on to the
 relation that model sits on, which is how "which table is behind this change"
-gets answered without a second resolver.
+gets answered without a second resolver. A semantic model the plan adds needs no
+compiled catalog: its own entities, dimensions and measures are `defined: plan`,
+and what they sit on is a dependency of the plan like any other.
 
 ## 3. What the edits contain
 
@@ -379,17 +410,21 @@ for vector in conformance_vectors():
     vector["expect"]       # the verdict it should reach
 ```
 
-Twenty-one fixtures ship in the wheel beside the reader: a valid plan and the
+Twenty-three fixtures ship in the wheel beside the reader: a valid plan and the
 same plan exported from a second checkout, tampered content, a repinned digest, a
-future schema version, a delete; a declarative, executable, authority-bearing, and
-unknown classification; a complete, unresolved, and ambiguous grounding; and one
-per build outcome.
+future schema version, a delete; a declarative, executable, authority-bearing,
+unknown, and filtered-metric classification; a complete, unresolved, ambiguous,
+and missing grounding; and one per build outcome. A grounding vector carries the
+project it was grounded against in `payload.project`, as relative paths and their
+content.
 
 They are data rather than assertions, deliberately. The shape a host has to agree
 with is the payload, and a shipped test would only tell it whether dex agrees with
 dex. Run your own reader over them and check the verdict. The engine's own suite
-replays every one, so a vector that stops describing what the engine does fails
-before it reaches anybody.
+replays every plan, classification and grounding vector, so one that stops
+describing what the engine does fails before it reaches anybody. A build vector
+records a dbt run that cannot be repeated offline, so the suite checks that it
+says what it claims rather than recomputing it.
 
 This complements, rather than replaces, the executable contract classes shipped
 for the storage, project, and semantic seams. Those are for someone implementing a

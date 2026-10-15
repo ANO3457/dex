@@ -438,3 +438,82 @@ def test_declared_but_uninstalled_packages_make_the_report_incomplete(tmp_path):
     report = find_references(load(root), ["id"], kind="column")
     assert report.completeness == "incomplete"
     assert any("not installed" in limit for limit in report.limits)
+
+
+# --- what dbt resolves that dex does not edit --------------------------------------
+
+
+def test_names_dbt_resolves_without_an_editable_file_are_declared_not_defined(project):
+    """A Python model, a versioned model's base name and a YAML snapshot exist to
+    dbt, and none has a file a rename could edit. `declarations_of` reports them
+    for a caller asking whether a name exists; every query `transform references`
+    and the rename guards answer from stays exactly as it was.
+    """
+
+    _write(
+        project / "models" / "py_orders.py",
+        "def model(dbt, session):\n    return dbt.ref('stg_departments')\n",
+    )
+    _write(project / "models" / "dim_orders_v1.sql", "select 1 as id\n")
+    _write(
+        project / "models" / "versions.yml",
+        "version: 2\nmodels:\n  - name: dim_orders\n    versions:\n      - v: 1\n",
+    )
+    _write(
+        project / "snapshots" / "snapshots.yml",
+        "snapshots:\n"
+        "  - name: orders_snapshot\n"
+        "    relation: source('raw', 'departments')\n",
+    )
+    index = ReferenceIndex(load(project))
+
+    node_kinds = ("model", "seed", "snapshot")
+    assert {
+        name: [
+            (d.path, d.form, d.kind) for d in index.declarations_of(name, node_kinds)
+        ]
+        for name in ("py_orders", "dim_orders", "orders_snapshot")
+    } == {
+        "py_orders": [("models/py_orders.py", "python_model", "model")],
+        "dim_orders": [("models/versions.yml", "yaml_model_declaration", "model")],
+        "orders_snapshot": [
+            ("snapshots/snapshots.yml", "yaml_snapshot_declaration", "snapshot")
+        ],
+    }
+    for name in ("py_orders", "dim_orders", "orders_snapshot"):
+        assert index.node_kind(name) is None
+        for kind in node_kinds:
+            assert index.definitions_of(name, kind) == []
+            hits, _limits = index.references_to(name, kind)
+            # The YAML entries were always read as entries; nothing new appears.
+            assert {hit.form for hit in hits} <= {"yaml_model_entry"}
+    assert index.kinds_of("py_orders") == []
+
+    # A semantic model's own declarations are found the same way, and are still
+    # the references `transform references` has always reported them as.
+    (measure,) = index.declarations_of("dept_count", ("measure",))
+    assert (measure.path, measure.form) == ("models/schema.yml", "semantic_definition")
+    assert index.definitions_of("dept_count", "measure") == []
+
+
+def test_a_python_model_in_a_package_is_declared_by_that_package(project):
+    _write(
+        project / "dbt_packages" / "utils" / "models" / "py_util.py",
+        "def model(dbt, session):\n    return None\n",
+    )
+    (declared,) = ReferenceIndex(load(project)).declarations_of("py_util", ("model",))
+    assert declared.package == "utils"
+    assert declared.path == "dbt_packages/utils/models/py_util.py"
+
+
+def test_a_yaml_file_that_does_not_parse_is_unread_not_a_limit(project):
+    """Every YAML reader skips a file that does not parse. Saying so here lets a
+    caller that must rule a definition out decline to, without turning the file
+    into a limit that the rename guards would refuse every change over."""
+
+    _write(project / "models" / "broken.yml", "models: [unclosed\n")
+    _write(project / "models" / "empty.yml", "")
+    index = ReferenceIndex(load(project))
+
+    assert index.unread == ["models/broken.yml"]
+    assert not any("broken.yml" in limit for limit in index.limits)

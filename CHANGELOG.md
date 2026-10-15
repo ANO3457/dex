@@ -9,6 +9,86 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ## [Unreleased]
 
+### Added
+
+- **`transform ground` reports what nothing defines**
+  ([#574](https://github.com/exmergo/dex/issues/574)). A `ref()` to a model that
+  does not exist used to ground exactly like a `ref()` to one that does: the same
+  `completeness`, nothing in `unresolved` or `limits`, and no `relation` on either,
+  because without a compiled manifest every relation is absent. Each dependency
+  now carries `defined`:
+  - `plan` when a file the plan writes defines it;
+  - `project` for a project file the plan leaves alone;
+  - `package` when only an installed package does, with `package` naming it;
+  - `missing` when nothing does.
+
+  A new top-level `missing` list, after `ambiguous`, names each missing model,
+  seed, snapshot, source, metric or measure and where the plan reads it.
+  `host.MissingReference` is its type, and a `grounding-missing` conformance
+  vector ships beside `grounding-unresolved`.
+
+  `missing` is never a guess. A name with no definition is left out of it, and a
+  limit names it, making the answer `partial`, when part of the project went
+  unread:
+  - a declared package is not installed;
+  - the plan changes the package set;
+  - a package fails to load;
+  - a YAML file does not parse.
+
+  A two-argument `ref('core', 'x')` is never reported missing, because it can name
+  another dbt project. `defined` is absent for columns, and for macros and vars the
+  project does not declare, because dbt's own macros and `--vars` are invisible to
+  a static read.
+
+- **Grounding finds names dbt resolves that have no SQL file** ([#574](https://github.com/exmergo/dex/issues/574)).
+  These are now found through a new `ReferenceIndex.declarations_of`:
+  - a Python model, by its filename (the content is not read);
+  - the base name of a versioned model;
+  - a snapshot declared in YAML with `relation`.
+
+  A `ref()` to a package's seed or snapshot is reported with that kind rather than
+  as a model, so its manifest relation is found too. `transform references`,
+  `transform propagate` and the delete guard answer as before, because they answer
+  for the files dex can edit.
+
+### Changed
+
+- **A missing metric or measure no longer lowers `completeness`**
+  ([#574](https://github.com/exmergo/dex/issues/574)). It used to be a `limits`
+  entry, which made the answer `partial`, while a missing model changed nothing.
+  Both are now reported in `missing`, and `completeness` says only whether dex
+  finished reading. `unresolved` and `limits` lower it; `ambiguous` and `missing`
+  do not. A host that admits a change on `completeness` alone must now also require
+  `missing: []`. A metric or measure that the source defines but the compiled
+  semantic catalog does not carry is still a limit, because dex could not follow
+  it to its models.
+
+- **A semantic model the plan adds no longer needs a compiled catalog**
+  ([#574](https://github.com/exmergo/dex/issues/574)). Its own entities,
+  dimensions and measures are `defined: plan`, so grounding one in a fresh
+  checkout is `complete`, not `partial` with "the semantic catalog could not be
+  read". That limit is now raised only when the plan reads a metric or measure
+  defined outside it.
+
+- **`"cache"` is no longer in the grounding `ORIGINS` vocabulary**
+  ([#574](https://github.com/exmergo/dex/issues/574)). It was declared and never
+  emitted, since grounding reads only the repository and opens no connection.
+
+- **Grounding conformance vectors carry their project and are replayed**
+  ([#574](https://github.com/exmergo/dex/issues/574)). Each grounding vector's
+  `payload.project` holds the files it was grounded against. The engine's suite
+  now grounds every vector again and compares the result, where before it only
+  checked each vector against itself. The three existing vectors are regenerated
+  with `defined` and `missing`.
+
+### Fixed
+
+- **One dependency per metric and per semantic model**
+  ([#574](https://github.com/exmergo/dex/issues/574)). A metric the plan read
+  appeared twice, once as read and once as resolved through the catalog. A
+  semantic model appeared once for each metric or measure that reached it. Both
+  are now merged, and `used_in` collects every path and route.
+
 ## [1.13.2] - 2026-10-14
 
 ### Added
