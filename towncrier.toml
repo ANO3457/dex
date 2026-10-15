@@ -1,0 +1,52 @@
+# Release notes are written as fragments, one file per change in changelog.d/,
+# and collected into CHANGELOG.md when a release is prepared
+# (scripts/prepare_release.sh). CONTRIBUTING.md under "Changelog fragments" is
+# the contributor guide. The pinned towncrier version lives in that script, and
+# packages/dex-core/tests/test_changelog.py holds every copy of it in step.
+[tool.towncrier]
+directory = "changelog.d"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+# The leading "##" is also how towncrier picks "###" for the type headings.
+title_format = "## [{version}] - {project_date}"
+issue_format = "[#{issue}](https://github.com/exmergo/dex/pull/{issue})"
+# A fragment is named for its pull request, or starts with "+" when it has none
+# yet. A name like "fix-help.fixed.md" would otherwise render as an issue called
+# "fix-help" with a broken link.
+issue_pattern = "\\d+"
+# Setting `ignore` at all is what makes `build` refuse a file it cannot parse
+# instead of silently leaving it out of the release.
+ignore = ["README.md"]
+wrap = false
+
+# Keep a Changelog's categories, in its order. The order here is the order of the
+# headings in each release.
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecated"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "security"
+name = "Security"
+showcontent = true

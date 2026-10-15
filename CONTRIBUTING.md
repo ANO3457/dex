@@ -590,6 +590,116 @@ bump it:
 - `.pre-commit-config.yaml` (the `rev:` tag)
 - `packages/dex-core/pyproject.toml` (the `ruff==<version>` pin in the `dev` extra)
 
+## Keeping the towncrier version in sync
+
+The pinned towncrier version appears in `scripts/prepare_release.sh`,
+`.github/workflows/changelog.yml`, the `towncrier==<version>` pin in the `dev`
+extra of `packages/dex-core/pyproject.toml`, and the commands in this guide and
+in `changelog.d/README.md`. Bump them together; `tests/test_changelog.py` fails
+when any two disagree.
+
+## Changelog fragments
+
+`CHANGELOG.md` is written when a release is prepared, not by pull requests. A
+pull request describes its change in a fragment: a short Markdown file in
+`changelog.d/`. Each fragment is its own file, so pull requests do not conflict
+over a shared `[Unreleased]` section, and an entry cannot end up in a section
+that was already released. When a release is prepared,
+`scripts/prepare_release.sh` collects the pending fragments into the release's
+section with [towncrier](https://towncrier.readthedocs.io/) and deletes them.
+
+### When a pull request needs one
+
+Add a fragment when someone using dex can notice the change: a new command, flag,
+config key or connector; a change to output, defaults, behavior or packaging; a
+bug fix; a deprecation or removal; a security fix. The **Changelog** check fails a
+pull request that has none.
+
+A pull request that no user can observe needs none: documentation, CI, tests or a
+refactor only, and release preparation. A maintainer applies the `no-changelog`
+label to it and the check passes. If you think your pull request qualifies, say
+so in its description. Dependabot's pull requests carry the label automatically.
+
+### Naming a fragment
+
+Name the file `changelog.d/<pull request number>.<type>.md`. The type is the
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) heading the entry appears
+under:
+
+| Type | Use it for |
+| --- | --- |
+| `added` | A new command, flag, config key, connector or capability |
+| `changed` | A change to existing behavior or output |
+| `deprecated` | Something that still works and is going to be removed |
+| `removed` | Something that no longer exists |
+| `fixed` | A bug fix |
+| `security` | A vulnerability fix or hardening |
+
+The release turns the number in the filename into a link to the pull request.
+
+- **No pull request number yet.** Name the file `+<short-slug>.<type>.md`, for
+  example `changelog.d/+help-text.changed.md`. Rename it to the number once the
+  pull request is open; an entry left with a `+` name ships without a link.
+- **More than one kind of change.** Add one fragment per type, such as
+  `613.added.md` and `613.fixed.md`.
+- **Two entries of the same type.** Number the second: `613.fixed.md` and
+  `613.fixed.1.md`.
+
+Create the file in your editor, or with towncrier from the repository root. The
+second command names the file `+<random hex>.fixed.md`:
+
+```
+uvx towncrier@26.9.0 create --content "**Headline.** What changed." 613.fixed.md
+uvx towncrier@26.9.0 create --content "**Headline.** What changed." +.fixed.md
+```
+
+Preview the release notes that the pending fragments produce, and check every
+fragment's name the way CI does:
+
+```
+uvx towncrier@26.9.0 build --draft --version preview
+python3 scripts/check_changelog_fragments.py
+```
+
+### Writing the entry
+
+A fragment is read by someone deciding whether to upgrade, so describe what
+changed for them rather than how the code changed.
+
+- Open with a bold headline stating the new behavior, then explain it: what was
+  wrong or missing, what happens now, and anything a user has to do. When the
+  change is incompatible, or alters output a consumer stores or compares, say
+  what breaks and how to migrate.
+- Use as many paragraphs as the change needs. Lists work too: start their lines
+  at the left margin, and the release indents them under the entry.
+- Leave out the link to your own pull request, which the release adds. Link other
+  issues inline as usual.
+- Keep it em-dash free, like all prose here.
+
+```markdown
+**`dex config validate` reports a `dbt_project_dir` that holds no dbt
+project.** A pin to a directory with no `dbt_project.yml` passed validation,
+and the mistake surfaced later from whichever command first needed the project.
+It is now a non-fatal `project_not_found` problem on the pin's line.
+```
+
+### Moving an entry out of an open pull request
+
+A pull request opened before fragments existed edits `CHANGELOG.md` under
+`[Unreleased]`, and the check now fails it. To fix it:
+
+1. Copy the entry into `changelog.d/<pull request number>.<type>.md`, using the
+   heading it sat under as the type. Drop the leading `- `, the two-space indent
+   on the lines after it, and the link to your own pull request.
+2. Restore `CHANGELOG.md` from main, so the pull request no longer touches it:
+
+   ```
+   git fetch origin
+   git checkout origin/main -- CHANGELOG.md
+   ```
+
+3. Commit both changes and push. The check runs again.
+
 ## Pull requests and release notes
 
 GitHub generates each release's "What's Changed" section from merged pull
@@ -608,12 +718,61 @@ anything else, so no merged PR is silently omitted.
 `downstream-visible` is for a compatible change a consumer can observe in stored
 or compared command output. Use `breaking-change` when consumers must take an
 incompatible action to upgrade; it takes precedence in the generated notes.
-Keep `CHANGELOG.md` updated under `[Unreleased]` for context, migration steps,
-or detail that does not fit a PR title. Before publishing a release, generate
-and review GitHub's notes, then add any necessary highlights or upgrade
-instructions. The tag workflow publishes packages but does not create the
+Context, migration steps and detail that do not fit a PR title go in the pull
+request's [changelog fragment](#changelog-fragments): GitHub's notes list every
+merged pull request, and `CHANGELOG.md` carries the detail. Before publishing a
+release, generate and review GitHub's notes, then add any necessary highlights or
+upgrade instructions. The tag workflow publishes packages but does not create the
 GitHub release or its notes.
 
+## Cutting a release
+
+A maintainer prepares a release on a branch, merges it, then tags the merged
+commit:
+
+1. Preview the notes the pending fragments produce. Fix a fragment that reads
+   badly while it is still a fragment:
+
+   ```
+   uvx towncrier@26.9.0 build --draft --version <engine-version>
+   ```
+
+2. Run the release script with the engine version (PEP 440) and the plugin
+   version (semver), for example `scripts/prepare_release.sh 1.14.0 1.14.0`:
+
+   ```
+   scripts/prepare_release.sh <engine-version> <plugin-version>
+   ```
+
+   It pins the three skill wrappers to the engine version, bumps the three plugin
+   manifests, writes the release's section of `CHANGELOG.md` dated today in UTC,
+   and deletes the fragments it collected. It stages nothing; every change is
+   left in the working tree.
+
+3. Review `git status` and `git diff`, and update any documentation the release
+   changes: status and capability claims, install commands, version strings.
+4. Commit the changelog, the deleted fragments, the pins and the manifests
+   together (`git commit -a` includes the deletions). The pull request edits
+   `CHANGELOG.md`, so it carries the `no-changelog` label.
+5. Once it is merged, tag the merged commit and push the tag. The release
+   workflow refuses, before anything reaches PyPI, a tag whose wrapper pins do
+   not match it or whose `CHANGELOG.md` has no section for it.
+6. Create the GitHub release for the tag from GitHub's generated notes, and add
+   highlights or upgrade instructions from the changelog section.
+
+To correct the notes before committing, edit the generated section in
+`CHANGELOG.md`; once written it is ordinary text. To regenerate it instead,
+restore both and run the script again:
+
+```
+git restore CHANGELOG.md changelog.d/
+scripts/prepare_release.sh <engine-version> <plugin-version>
+```
+
+Running the script again for a version whose section already exists leaves
+`CHANGELOG.md` and any newer fragments alone. A fragment towncrier cannot parse
+stops the script before it changes anything, and
+`python3 scripts/check_changelog_fragments.py` names the file at fault.
 
 ## Maintainers
 

@@ -2,9 +2,9 @@ name: Release
 
 # A semver tag drives the whole chain: a test gate, a coupling check, build, then
 # PyPI publish via Trusted Publishing (OIDC, no stored tokens) and the anti-squat
-# name stubs. The wrapper pins are bumped before tagging (scripts/
-# prepare_release.sh), so this workflow never writes back; it only verifies the
-# tagged commit is self-consistent before it publishes.
+# name stubs. The wrapper pins and the changelog are written before tagging
+# (scripts/prepare_release.sh), so this workflow never writes back; it only
+# verifies the tagged commit is self-consistent before it publishes.
 on:
   push:
     tags: ["v*.*.*"]
@@ -33,7 +33,8 @@ jobs:
 
   # Read-only guard, run before publishing: the wrapper pins are bumped before
   # the tag (scripts/prepare_release.sh), so the tagged commit must already pin
-  # the version this tag will publish. If it does not, the tag was cut without
+  # the version this tag will publish and carry its CHANGELOG.md section, which
+  # the same script writes. If it does not, the tag was cut without
   # running the prepare script, and shipping it would couple the plugin to the
   # wrong engine version (especially once the public catalog pins this tag), so
   # we fail before anything reaches PyPI. No writes, so branch protection is moot.
@@ -41,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Wrapper pins must match the tag
+      - name: Wrapper pins and the changelog must match the tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           fail=0
@@ -53,11 +54,15 @@ jobs:
               fail=1
             fi
           done
+          if ! grep -qF "## [${VERSION}] - " CHANGELOG.md; then
+            echo "CHANGELOG.md has no ${VERSION} section."
+            fail=1
+          fi
           if [ "$fail" = "1" ]; then
             echo "Run scripts/prepare_release.sh ${VERSION}, commit, and re-tag."
             exit 1
           fi
-          echo "All wrapper pins match ${VERSION}."
+          echo "All wrapper pins match ${VERSION}, and CHANGELOG.md has its section."
 
   publish:
     needs: [gate, verify-coupling]
