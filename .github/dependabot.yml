@@ -8,6 +8,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # An action pin bump changes nothing a user of dex can see, so it needs no
+    # changelog fragment. Setting `labels` replaces Dependabot's defaults, which
+    # is why the first two are restated.
+    labels:
+      - "dependencies"
+      - "github_actions"
+      - "no-changelog"
     groups:
       github-actions:
         patterns:

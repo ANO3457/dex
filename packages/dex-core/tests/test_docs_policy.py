@@ -47,7 +47,10 @@ COST_DOC = "references/cost-controls.md"
 
 # Append-only history. Every past wording of every policy is in here on purpose,
 # and rewriting history to satisfy a lint is worse than the drift it would catch.
-EXEMPT = frozenset({"CHANGELOG.md"})
+# A fragment in changelog.d/ is the same history before a release collects it
+# into CHANGELOG.md, so a fragment recording a threshold change is exempt too.
+# The directory's README is a guide rather than history, and stays checked.
+EXEMPT = re.compile(r"CHANGELOG\.md|changelog\.d/(?!README\.md$)[^/]+")
 
 # Where the PII blocking threshold may be stated, and why. Everything else links
 # to references/pii-policy.md.
@@ -96,7 +99,7 @@ def versioned_markdown() -> dict[str, str]:
     return {
         path: (ROOT / path).read_text(encoding="utf-8")
         for path in sorted(set(paths))
-        if path not in EXEMPT and (ROOT / path).is_file()
+        if not EXEMPT.fullmatch(path) and (ROOT / path).is_file()
     }
 
 

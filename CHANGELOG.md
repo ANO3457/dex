@@ -7,87 +7,65 @@ The engine version is derived from the git tag and follows
 [PEP 440](https://peps.python.org/pep-0440/); the plugin follows semver. A single
 tag releases both in lockstep, so entries below are keyed by the engine version.
 
-## [Unreleased]
+Changes merged since the latest release are not listed here yet. Each one is a
+fragment in [`changelog.d/`](changelog.d/), and preparing a release collects the
+pending fragments into a new section below. See
+[Changelog fragments](CONTRIBUTING.md#changelog-fragments) to add one.
 
-### Added
+<!-- towncrier release notes start -->
 
-- **`transform ground` reports what nothing defines**
-  ([#574](https://github.com/exmergo/dex/issues/574)). A `ref()` to a model that
-  does not exist used to ground exactly like a `ref()` to one that does: the same
-  `completeness`, nothing in `unresolved` or `limits`, and no `relation` on either,
-  because without a compiled manifest every relation is absent. Each dependency
-  now carries `defined`:
-  - `plan` when a file the plan writes defines it;
-  - `project` for a project file the plan leaves alone;
-  - `package` when only an installed package does, with `package` naming it;
-  - `missing` when nothing does.
-
-  A new top-level `missing` list, after `ambiguous`, names each missing model,
-  seed, snapshot, source, metric or measure and where the plan reads it.
-  `host.MissingReference` is its type, and a `grounding-missing` conformance
-  vector ships beside `grounding-unresolved`.
-
-  `missing` is never a guess. A name with no definition is left out of it, and a
-  limit names it, making the answer `partial`, when part of the project went
-  unread:
-  - a declared package is not installed;
-  - the plan changes the package set;
-  - a package fails to load;
-  - a YAML file does not parse.
-
-  A two-argument `ref('core', 'x')` is never reported missing, because it can name
-  another dbt project. `defined` is absent for columns, and for macros and vars the
-  project does not declare, because dbt's own macros and `--vars` are invisible to
-  a static read.
-
-- **Grounding finds names dbt resolves that have no SQL file** ([#574](https://github.com/exmergo/dex/issues/574)).
-  These are now found through a new `ReferenceIndex.declarations_of`:
-  - a Python model, by its filename (the content is not read);
-  - the base name of a versioned model;
-  - a snapshot declared in YAML with `relation`.
-
-  A `ref()` to a package's seed or snapshot is reported with that kind rather than
-  as a model, so its manifest relation is found too. `transform references`,
-  `transform propagate` and the delete guard answer as before, because they answer
-  for the files dex can edit.
+## [1.13.3] - 2026-10-15
 
 ### Changed
 
-- **A missing metric or measure no longer lowers `completeness`**
-  ([#574](https://github.com/exmergo/dex/issues/574)). It used to be a `limits`
-  entry, which made the answer `partial`, while a missing model changed nothing.
-  Both are now reported in `missing`, and `completeness` says only whether dex
-  finished reading. `unresolved` and `limits` lower it; `ambiguous` and `missing`
-  do not. A host that admits a change on `completeness` alone must now also require
-  `missing: []`. A metric or measure that the source defines but the compiled
-  semantic catalog does not carry is still a limit, because dex could not follow
-  it to its models.
+- **`--help` now describes every command and flag.** Each subcommand carries a
+  one-line summary in its group's listing and a description, naming what it
+  costs, at the top of its own `--help`. Every option and positional has help
+  text, and positionals read as what they take (`plan-id`, `intent`, `column`)
+  rather than `argument`. The shared connection options are described from one
+  table, so the top-level copy and the per-subcommand copy cannot disagree. The
+  `dex --help` epilog no longer uses a double hyphen as a dash. A test fails on
+  any new subcommand or flag added without help. ([#613](https://github.com/exmergo/dex/pull/613))
+- **Changelog entries are fragments in `changelog.d/`, collected into this file
+  when a release is prepared** ([#623](https://github.com/exmergo/dex/issues/623)).
+  A pull request no longer edits `CHANGELOG.md`. It adds a file named for the pull
+  request and its Keep a Changelog category, such as `changelog.d/613.changed.md`,
+  and `scripts/prepare_release.sh` builds the release section from the pending
+  fragments with towncrier, then deletes them. Concurrent pull requests no longer
+  conflict on a shared `[Unreleased]` block, and an entry can no longer land in a
+  section that was already released: #613's entry merged into the 1.13.2 section
+  after 1.13.2 was tagged, and now ships in this release instead.
 
-- **A semantic model the plan adds no longer needs a compiled catalog**
-  ([#574](https://github.com/exmergo/dex/issues/574)). Its own entities,
-  dimensions and measures are `defined: plan`, so grounding one in a fresh
-  checkout is `complete`, not `partial` with "the semantic catalog could not be
-  read". That limit is now raised only when the plan reads a metric or measure
-  defined outside it.
+  A new `Changelog` CI check requires a fragment, refuses a direct `CHANGELOG.md`
+  edit, and checks every fragment's name and that the notes render. A maintainer
+  applies the `no-changelog` label to a pull request that needs no entry. The
+  release workflow also refuses a tag whose `CHANGELOG.md` has no section for it.
+  An open pull request moves its `[Unreleased]` text into a fragment; the steps are
+  in `CONTRIBUTING.md` under "Changelog fragments".
 
-- **`"cache"` is no longer in the grounding `ORIGINS` vocabulary**
-  ([#574](https://github.com/exmergo/dex/issues/574)). It was declared and never
-  emitted, since grounding reads only the repository and opens no connection.
 
-- **Grounding conformance vectors carry their project and are replayed**
-  ([#574](https://github.com/exmergo/dex/issues/574)). Each grounding vector's
-  `payload.project` holds the files it was grounded against. The engine's suite
-  now grounds every vector again and compares the result, where before it only
-  checked each vector against itself. The three existing vectors are regenerated
-  with `defined` and `missing`.
+### Added
 
-### Fixed
+- **`exmergo_dex_core.host` exports `Reason` and `reason_for`**
+  ([#582](https://github.com/exmergo/dex/issues/582)). A host that calls
+  `DexEngine` in process holds the exception rather than an envelope, and had no
+  public way to get the `reason` the CLI would have printed for it. Both names
+  are the envelope's own objects, so a host and the CLI classify a refusal with
+  the same function, and a test runs every row of the classification table
+  through the CLI to keep them together. `ConfirmationRequiredError` is the one
+  exception a host meets that is not a refusal: `reason_for` reads it as `guard`,
+  while the CLI answers it with `needs_confirmation` and no `reason`. The
+  docstring and `references/host-integration.md` say so, and also that the full
+  table needs the `sql` extra, which every warehouse connector extra brings.
+  Without it, a class listed only in the table's second tier reads its nearest
+  listed ancestor, so `CostGuardError` reads `request` rather than `guard`.
 
-- **One dependency per metric and per semantic model**
-  ([#574](https://github.com/exmergo/dex/issues/574)). A metric the plan read
-  appeared twice, once as read and once as resolved through the catalog. A
-  semantic model appeared once for each metric or measure that reached it. Both
-  are now merged, and `used_in` collects every path and route.
+- **`transform test --mutate` labels surviving mutants on Postgres too** ([#548]).
+  Surviving mutants on Postgres are now checked for equivalence against the
+  unmutated baseline using `hashtextextended({alias}::text, 0)`, labeling them
+  as equivalent or distinguishable (including mutants that turn a column to NULL)
+  instead of reporting `not_checked`. The equivalence check remains opt-in via
+  `--check-equivalence` and is priced into the upfront compute-seconds estimate.
 
 ## [1.13.2] - 2026-10-14
 
@@ -158,14 +136,6 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ### Changed
 
-- **`--help` now describes every command and flag.** Each subcommand carries a
-  one-line summary in its group's listing and a description, naming what it
-  costs, at the top of its own `--help`. Every option and positional has help
-  text, and positionals read as what they take (`plan-id`, `intent`, `column`)
-  rather than `argument`. The shared connection options are described from one
-  table, so the top-level copy and the per-subcommand copy cannot disagree. The
-  `dex --help` epilog no longer uses a double hyphen as a dash. A test fails on
-  any new subcommand or flag added without help.
 - **Native semantic authoring validates through the configured layer, not
   through Ossie by name** ([#597](https://github.com/exmergo/dex/issues/597)).
   `semantic <vendor> define|update|plan` reaches one vendor-neutral route, and

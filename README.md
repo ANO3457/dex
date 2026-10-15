@@ -398,8 +398,10 @@ published `exmergo-dex-core` package and these skills.
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup, the Ruff lint and
-format workflow, and the pre-commit hook. Every pull request into `main` must
-pass the Lint workflow and CI before it can merge.
+format workflow, the pre-commit hook, and changelog fragments. Every pull request
+into `main` must pass the Lint workflow and CI before it can merge, and describes
+its change in a fragment under [`changelog.d/`](changelog.d/) unless no user can
+see it.
 
 ## Community
 

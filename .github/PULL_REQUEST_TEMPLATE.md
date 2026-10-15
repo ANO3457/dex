@@ -14,6 +14,9 @@
       cost-guarded, PII flagged not surfaced, propose-don't-impose
 - [ ] PR title is ready for release notes; applicable release-note labels and
       upgrade guidance are included
-- [ ] `CHANGELOG.md` updated under `[Unreleased]`
+- [ ] A changelog fragment is in `changelog.d/` (`<this PR's number>.<type>.md`),
+      or the change is invisible to users and needs the `no-changelog` label;
+      `CHANGELOG.md` itself is not edited
+      ([how to add one](https://github.com/exmergo/dex/blob/main/CONTRIBUTING.md#changelog-fragments))
 - [ ] Prose is em-dash free (checked in CI)
 - [ ] No credentials, secrets, or raw warehouse rows in code, tests, or fixtures
