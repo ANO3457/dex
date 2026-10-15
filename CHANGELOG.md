@@ -44,6 +44,29 @@ pending fragments into a new section below. See
   in `CONTRIBUTING.md` under "Changelog fragments".
 
 
+### Added
+
+- **`exmergo_dex_core.host` exports `Reason` and `reason_for`**
+  ([#582](https://github.com/exmergo/dex/issues/582)). A host that calls
+  `DexEngine` in process holds the exception rather than an envelope, and had no
+  public way to get the `reason` the CLI would have printed for it. Both names
+  are the envelope's own objects, so a host and the CLI classify a refusal with
+  the same function, and a test runs every row of the classification table
+  through the CLI to keep them together. `ConfirmationRequiredError` is the one
+  exception a host meets that is not a refusal: `reason_for` reads it as `guard`,
+  while the CLI answers it with `needs_confirmation` and no `reason`. The
+  docstring and `references/host-integration.md` say so, and also that the full
+  table needs the `sql` extra, which every warehouse connector extra brings.
+  Without it, a class listed only in the table's second tier reads its nearest
+  listed ancestor, so `CostGuardError` reads `request` rather than `guard`.
+
+- **`transform test --mutate` labels surviving mutants on Postgres too** ([#548]).
+  Surviving mutants on Postgres are now checked for equivalence against the
+  unmutated baseline using `hashtextextended({alias}::text, 0)`, labeling them
+  as equivalent or distinguishable (including mutants that turn a column to NULL)
+  instead of reporting `not_checked`. The equivalence check remains opt-in via
+  `--check-equivalence` and is priced into the upfront compute-seconds estimate.
+
 ## [1.13.2] - 2026-10-14
 
 ### Added
