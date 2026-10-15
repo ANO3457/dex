@@ -117,6 +117,11 @@ class Reference(BaseModel):
     #: answered from this, so a column documented in a shared `schema.yml` is
     #: placed in the model it documents rather than in a node called "schema".
     owner: str | None = None
+    #: The package or project a two-argument `ref('x', 'm')` names first. dbt
+    #: looks for `m` only there, and another dbt project (a dbt Mesh dependency)
+    #: is invisible to this index, so a caller concluding that a name does not
+    #: exist has to know it was qualified. Recorded only when it is a literal.
+    qualifier: str | None = None
 
 
 class ReferenceIndex:
@@ -144,6 +149,17 @@ class ReferenceIndex:
         #: out: the graph accessors answer questions about the project a caller
         #: can edit, and a packaged model is not one.
         self._node_kinds: dict[str, str] = {}
+        #: Names dbt resolves that no file dex edits defines: a Python model, the
+        #: base name a versioned model declares in YAML, a snapshot declared in
+        #: YAML. Kept out of `_by_name`, which every other query answers from,
+        #: because those queries are about editable sites: a rename cannot move a
+        #: `.py` file, and a removal guard keyed by kind must keep matching.
+        self._declared: dict[tuple[str, str], list[Reference]] = defaultdict(list)
+        #: Files and packages the scan could not read at all. A YAML file that
+        #: does not parse is skipped by every YAML reader in the engine without a
+        #: limit; listing it here lets a caller that has to rule a definition out
+        #: say why it cannot, without changing what the existing readers refuse on.
+        self.unread: list[str] = []
 
         self._scan(view, package=None)
         if scan_packages:
@@ -329,6 +345,29 @@ class ReferenceIndex:
             if reference.form in ("definition", "project_yml_var")
         ]
 
+    def declarations_of(self, name: str, kinds: tuple[str, ...]) -> list[Reference]:
+        """Every place dbt would find ``name`` declared as any of ``kinds``.
+
+        Wider than :meth:`definitions_of`, which answers for the files a rename or
+        a removal edits. This also counts what dbt resolves and dex does not edit:
+        a Python model, a versioned model's base name, a snapshot declared in
+        YAML, and the measures, dimensions and entities a semantic model declares.
+        It answers "does this name exist", and keeping it a separate query is what
+        lets that answer widen without moving what ``transform references``
+        reports or what the rename guards match.
+        """
+
+        found: list[Reference] = []
+        for kind in kinds:
+            found.extend(self.definitions_of(name, kind))
+            found.extend(self._declared.get((kind, name), []))
+            found.extend(
+                reference
+                for reference in self._by_name.get((kind, name), [])
+                if reference.form in ("semantic_definition", "semantic_entity_ref")
+            )
+        return found
+
     @staticmethod
     def _is_qualified(name: str) -> bool:
         return "." in name
@@ -366,6 +405,22 @@ class ReferenceIndex:
                 self._scan_sql(source.content, path, node_kinds, package=package)
             elif family == "seed" and path.endswith(".csv"):
                 self._scan_seed_header(source.content, path, package=package)
+        # dbt builds a Python model and `ref()` reaches it, but the loader reads
+        # SQL models only, so the name is taken from the file on disk and its
+        # content is never read.
+        root = Path(view.root)
+        for model_path in view.model_paths:
+            for python in sorted((root / model_path).rglob("*.py")):
+                self._declared[("model", python.stem)].append(
+                    Reference(
+                        path=f"{prefix}{python.relative_to(root).as_posix()}",
+                        line=1,
+                        form="python_model",
+                        kind="model",
+                        name=python.stem,
+                        package=package,
+                    )
+                )
         self._scan_yaml(view, node_kinds, package=package, prefix=prefix)
         self._scan_project_vars(view, package=package, prefix=prefix)
 
@@ -438,6 +493,7 @@ class ReferenceIndex:
                     name=target,
                     resolution=RESOLVED if target else INDETERMINATE,
                     package=package,
+                    qualifier=call.args[0] if target and len(call.args) > 1 else None,
                 )
             )
             if target and node_name(path) != target:
@@ -622,7 +678,8 @@ class ReferenceIndex:
         package: str | None,
         prefix: str = "",
     ) -> None:
-        for parsed, raw_path in yaml_documents(view):
+        documents = yaml_documents(view)
+        for parsed, raw_path in documents:
             path = f"{prefix}{raw_path}"
             source = view.files[raw_path].content
             lines = _ScalarLines(source, self.limits, path)
@@ -632,6 +689,36 @@ class ReferenceIndex:
                 self._scan_model_entry(entry, path, lines, node_kinds, package=package)
             for source_entry in _dicts(parsed.get("sources")):
                 self._scan_source_entry(source_entry, path, lines, package=package)
+            # A versioned model is `ref()`-ed by its base name, which no file is
+            # named after (they are `<name>_v<n>.sql` unless `defined_in` says
+            # otherwise), and a snapshot can be declared in YAML with no SQL at
+            # all. In both the YAML entry is the declaration; the key that makes
+            # it one is what separates it from a properties-only entry.
+            for key, kind, marker in (
+                ("models", "model", "versions"),
+                ("snapshots", "snapshot", "relation"),
+            ):
+                for entry in _dicts(parsed.get(key)):
+                    name = entry.get("name")
+                    if isinstance(name, str) and entry.get(marker):
+                        self._declared[(kind, name)].append(
+                            Reference(
+                                path=path,
+                                line=lines.peek(name),
+                                form=f"yaml_{kind}_declaration",
+                                kind=kind,
+                                name=name,
+                                package=package,
+                            )
+                        )
+        parsed_paths = {raw_path for _parsed, raw_path in documents}
+        for raw_path in sorted(view.files):
+            if raw_path in parsed_paths or not raw_path.endswith((".yml", ".yaml")):
+                continue
+            try:
+                yaml.safe_load(view.files[raw_path].content)
+            except yaml.YAMLError:
+                self.unread.append(f"{prefix}{raw_path}")
 
         for kind, entry, raw_path in semantic_yaml_entries(view):
             path = f"{prefix}{raw_path}"
@@ -978,6 +1065,7 @@ class ReferenceIndex:
                 )
             except Exception:
                 self.limits.append(f"package '{entry.name}' could not be read")
+                self.unread.append(f"dbt_packages/{entry.name}/")
 
 
 class _ScalarLines:

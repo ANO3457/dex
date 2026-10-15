@@ -279,10 +279,14 @@ dex transform apply               -> applies a plan document in this checkout, w
 dex transform ground [plan-id]    -> what the plan depends on and how finished the answer is:
                                      dependencies, the relations behind them, what could not be
                                      resolved (with file and line), what more than one thing defines,
-                                     how fresh the compiled artifacts are, and a fingerprint of the
-                                     plan, the source tree, the config, the packages and the engine.
-                                     completeness is computed from limits, never asserted, so "depends
-                                     on nothing" and "resolution did not finish" are different answers.
+                                     what nothing defines once the plan lands (missing; each
+                                     dependency's defined says plan, project or package), how fresh
+                                     the compiled artifacts are, and a fingerprint of the plan, the
+                                     source tree, the config, the packages and the engine.
+                                     completeness is computed from limits and unresolved, never
+                                     asserted, so "depends on nothing" and "resolution did not
+                                     finish" are different answers. A missing name does not lower
+                                     it: admit on complete and an empty missing together.
                                      Repo-only and free on every connector
 dex transform classify [plan-id]  -> what each edit's content contains, from the content and the
     [--edits-file <f>]               operation and never from the declared kind or the filename:

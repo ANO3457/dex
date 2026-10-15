@@ -7,12 +7,16 @@ can never disagree about what a plan digest is.
 
 The second is the vectors. They are shipped data a host runs its own reader over,
 and they are only worth shipping if they still describe what the engine does, so
-the engine's own suite replays every one of them here. A vector that drifts fails
-here before it reaches anybody.
+the engine's own suite replays every one it can recompute here: plans,
+classifications, and groundings, which carry the project they were grounded
+against. A vector that drifts fails here before it reaches anybody. A build
+vector records a dbt run that cannot be repeated offline, so it is checked for
+saying what it claims rather than recomputed.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -47,6 +51,7 @@ def test_the_facade_re_exports_rather_than_re_implements():
     from exmergo_dex_core.envelope import EstimateQuality, Reason, reason_for
     from exmergo_dex_core.transform.classify import classify_content
     from exmergo_dex_core.transform.evidence import BuildOutcome
+    from exmergo_dex_core.transform.grounding import MissingReference
     from exmergo_dex_core.transform.plans import PlanEdit
     from exmergo_dex_core.transform.portable import verify_plan_document
 
@@ -55,6 +60,7 @@ def test_the_facade_re_exports_rather_than_re_implements():
     assert host.BuildOutcome is BuildOutcome
     assert host.EstimateQuality is EstimateQuality
     assert host.PlanEdit is PlanEdit
+    assert host.MissingReference is MissingReference
     assert host.reason_for is reason_for
     assert host.Reason is Reason
 
@@ -166,9 +172,44 @@ def test_each_grounding_vector_records_the_verdict_it_claims(vector):
         assert len(result["unresolved"]) == vector["expect"]["unresolved_count"]
     if "ambiguous_count" in vector["expect"]:
         assert len(result["ambiguous"]) == vector["expect"]["ambiguous_count"]
-    # Every grounding payload carries the verdict before the findings, so a
-    # truncating reader loses the findings rather than the honesty.
-    assert list(result)[:2] == ["completeness", "limits"]
+    if "missing_count" in vector["expect"]:
+        assert len(result["missing"]) == vector["expect"]["missing_count"]
+    # Every grounding payload carries the verdict and the three findings before
+    # the dependencies, so a truncating reader loses the long list rather than
+    # the honesty.
+    assert list(result)[:5] == [
+        "completeness",
+        "limits",
+        "unresolved",
+        "ambiguous",
+        "missing",
+    ]
+
+
+@pytest.mark.parametrize("vector", vectors_for("grounding"), ids=lambda v: v["name"])
+def test_each_grounding_vector_replays_from_the_project_it_carries(vector, tmp_path):
+    """Grounded again from `payload.project`, the answer is the one that shipped.
+
+    Two fields cannot match by construction and are left out: the engine version,
+    and the newest source file's modification time, which is when this test wrote
+    the file. Everything else, the digests included, is a function of the files.
+    """
+
+    pytest.importorskip("sqlglot")
+    from exmergo_dex_core.dbt_project import load
+
+    project = tmp_path / "analytics"
+    for path, content in vector["payload"]["project"].items():
+        target = project / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    edits = [host.PlanEdit.model_validate(e) for e in vector["payload"]["edits"]]
+    replayed = host.ground_plan(load(project), edits, project=project).data()
+    shipped = copy.deepcopy(vector["expect"]["result"])
+    for result in (replayed, shipped):
+        del result["binding"]["engine_version"]
+        del result["freshness"]["newest_source_at"]
+    assert replayed == shipped
 
 
 @pytest.mark.parametrize(
