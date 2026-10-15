@@ -18,5 +18,7 @@
       or the change is invisible to users and needs the `no-changelog` label;
       `CHANGELOG.md` itself is not edited
       ([how to add one](https://github.com/exmergo/dex/blob/main/CONTRIBUTING.md#changelog-fragments))
+- [ ] User-facing behavior changes are reflected in `references/` or `docs/`
+      (the documentation site is rebuilt from them on each release)
 - [ ] Prose is em-dash free (checked in CI)
 - [ ] No credentials, secrets, or raw warehouse rows in code, tests, or fixtures
