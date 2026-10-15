@@ -7,7 +7,42 @@ The engine version is derived from the git tag and follows
 [PEP 440](https://peps.python.org/pep-0440/); the plugin follows semver. A single
 tag releases both in lockstep, so entries below are keyed by the engine version.
 
-## [Unreleased]
+Changes merged since the latest release are not listed here yet. Each one is a
+fragment in [`changelog.d/`](changelog.d/), and preparing a release collects the
+pending fragments into a new section below. See
+[Changelog fragments](CONTRIBUTING.md#changelog-fragments) to add one.
+
+<!-- towncrier release notes start -->
+
+## [1.13.3] - 2026-10-15
+
+### Changed
+
+- **`--help` now describes every command and flag.** Each subcommand carries a
+  one-line summary in its group's listing and a description, naming what it
+  costs, at the top of its own `--help`. Every option and positional has help
+  text, and positionals read as what they take (`plan-id`, `intent`, `column`)
+  rather than `argument`. The shared connection options are described from one
+  table, so the top-level copy and the per-subcommand copy cannot disagree. The
+  `dex --help` epilog no longer uses a double hyphen as a dash. A test fails on
+  any new subcommand or flag added without help. ([#613](https://github.com/exmergo/dex/pull/613))
+- **Changelog entries are fragments in `changelog.d/`, collected into this file
+  when a release is prepared** ([#623](https://github.com/exmergo/dex/issues/623)).
+  A pull request no longer edits `CHANGELOG.md`. It adds a file named for the pull
+  request and its Keep a Changelog category, such as `changelog.d/613.changed.md`,
+  and `scripts/prepare_release.sh` builds the release section from the pending
+  fragments with towncrier, then deletes them. Concurrent pull requests no longer
+  conflict on a shared `[Unreleased]` block, and an entry can no longer land in a
+  section that was already released: #613's entry merged into the 1.13.2 section
+  after 1.13.2 was tagged, and now ships in this release instead.
+
+  A new `Changelog` CI check requires a fragment, refuses a direct `CHANGELOG.md`
+  edit, and checks every fragment's name and that the notes render. A maintainer
+  applies the `no-changelog` label to a pull request that needs no entry. The
+  release workflow also refuses a tag whose `CHANGELOG.md` has no section for it.
+  An open pull request moves its `[Unreleased]` text into a fragment; the steps are
+  in `CONTRIBUTING.md` under "Changelog fragments".
+
 
 ## [1.13.2] - 2026-10-14
 
@@ -78,14 +113,6 @@ tag releases both in lockstep, so entries below are keyed by the engine version.
 
 ### Changed
 
-- **`--help` now describes every command and flag.** Each subcommand carries a
-  one-line summary in its group's listing and a description, naming what it
-  costs, at the top of its own `--help`. Every option and positional has help
-  text, and positionals read as what they take (`plan-id`, `intent`, `column`)
-  rather than `argument`. The shared connection options are described from one
-  table, so the top-level copy and the per-subcommand copy cannot disagree. The
-  `dex --help` epilog no longer uses a double hyphen as a dash. A test fails on
-  any new subcommand or flag added without help.
 - **Native semantic authoring validates through the configured layer, not
   through Ossie by name** ([#597](https://github.com/exmergo/dex/issues/597)).
   `semantic <vendor> define|update|plan` reaches one vendor-neutral route, and
