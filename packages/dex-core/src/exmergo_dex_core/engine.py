@@ -1513,6 +1513,13 @@ class DexEngine:
 
         return self.semantic_native("ossie", mode, intent, edits)
 
+    def semantic_slayer(
+        self, mode: str, intent: str, edits: list[PlanEdit]
+    ) -> PlanResult:
+        """`semantic slayer`: :meth:`semantic_native` for SLayer model files."""
+
+        return self.semantic_native("slayer", mode, intent, edits)
+
     # --- lifecycle ------------------------------------------------------------
 
     def close(self) -> None:
