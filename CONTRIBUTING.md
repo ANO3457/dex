@@ -583,13 +583,17 @@ python3 scripts/check_no_em_dashes.py path/to/file.md
 
 ## The documentation site
 
-The site at https://docs.exmergo.com is assembled by
-`scripts/build_docs_site.py` from four sources, and nothing it produces is
-committed to `main`:
+The site at https://docs.exmergo.com is served from
+[exmergo/docs](https://github.com/exmergo/docs), which owns the site's settings
+and home page. Dex is one section of it, at https://docs.exmergo.com/dex, and
+this repository builds and publishes that section: `scripts/build_docs_site.py`
+assembles the `dex/` folder from four sources, and nothing it produces is
+committed to `main` here:
 
-- `docs/`: hand-written pages (`.mdx`), the site configuration and navigation
-  (`docs.json`), and `skill.md`, which tells an agent that finds the site where
-  dex's real skills come from.
+- `docs/`: hand-written pages (`.mdx`), and `section.json`, the section's
+  navigation and redirects. Site-wide settings (name, colours, navbar,
+  analytics, the product switcher, `skill.md`) belong to exmergo/docs, and the
+  build refuses any in `section.json`.
 - `references/`: each file is published at the route `REFERENCE_PAGES` in the
   build script gives it. The H1 is replaced by the title in that table, links
   between references are rewritten to site routes, and every other relative link
@@ -599,37 +603,45 @@ committed to `main`:
   `dex --help` prints, so a flag without help text fails the build.
 - `CHANGELOG.md`: the ten most recent releases.
 
-**Linking.** A page under `docs/` links by root-absolute route
-(`/guardrails/cost-controls`), never by file. A reference links by relative path
+**Linking.** A page under `docs/` links by site route
+(`/dex/guardrails/cost-controls`), never by file, and to the rest of the site by
+its full URL. A reference links by relative path
 (`cost-controls.md#the-one-time-ask`), as it always has. An anchor must resolve
 on GitHub and on the site, which name a few headings differently: avoid a `/` or
 an apostrophe in a heading you link to, and repeated heading text.
 
 **Adding a page.** A new reference needs a row in `REFERENCE_PAGES` (route,
-title, a description of 140 to 160 characters) and an entry in `docs.json`
-navigation. A new hand-written page needs `title` and `description` frontmatter
-and a navigation entry. The build fails on a page missing from navigation, on
-navigation naming a page that does not exist, and on a reference with no row.
+title, a description of 140 to 160 characters) and an entry in the
+`section.json` navigation. A new hand-written page needs `title` and
+`description` frontmatter and a navigation entry. Navigation names pages as the
+section sees them (`connectors/bigquery`); the build moves them under `dex/`.
+The build fails on a page missing from navigation, on navigation naming a page
+that does not exist, and on a reference with no row.
 
-**Building and previewing locally:**
+**Building and previewing locally.** Previewing needs a checkout of exmergo/docs
+beside this one, because the site's settings live there:
 
 ```
-uv run --project packages/dex-core python scripts/build_docs_site.py --require-help
+git clone https://github.com/exmergo/docs ../docs
+uv run --project packages/dex-core python scripts/build_docs_site.py --require-help --site ../docs
 cd build/docs-site && npx --yes mint@4.2.994 dev
 ```
 
-The first command prints every problem as `path:line: message` and writes
-nothing unless the build is clean. Pull requests that touch the sources run the
-same build in CI, followed by `mint validate` and
-`mint broken-links --check-anchors`. `MINT_VERSION` in
-`.github/workflows/docs-site.yml` is the one place the Mintlify CLI version is
-set; keep the command above in step with it.
+Then open http://localhost:3000/dex. The build prints every problem as
+`path:line: message` and writes nothing unless it is clean; without `--site` it
+writes only the `dex/` folder. Pull requests that touch the sources run the same
+build in CI against the current exmergo/docs, then `mint validate`,
+`mint broken-links --check-anchors` and `mint a11y` over the whole site.
+`MINT_VERSION` in `.github/workflows/docs-site.yml` is the one place the Mintlify
+CLI version is set; keep the command above in step with it. On Windows,
+`mint broken-links` reports every link to a page two folders deep as broken
+(a path-separator bug in the checker); CI runs on Linux and is the one to trust.
 
-**When it goes live.** The release workflow deploys the site from the tag after
-PyPI publish, by pushing one generated commit to the `docs-site` branch, which
-Mintlify serves. A documentation fix therefore ships with the next release.
-Never edit the `docs-site` branch or use Mintlify's web editor: the next deploy
-replaces the branch.
+**When it goes live.** After PyPI publish, the release workflow commits the
+built `dex/` folder to exmergo/docs, replacing that folder and nothing else, and
+Mintlify deploys it. A documentation fix therefore ships with the next release.
+Never edit `dex/` in exmergo/docs or use Mintlify's web editor: the next release
+replaces the folder.
 
 **Claims.** Public pages state only what dex does today:
 
@@ -867,14 +879,15 @@ credentials:
   when PyPI answers 404 for the name. For protection before that release, you can
   publish a stub once by hand; the CI job then simply skips it. To reserve another
   name, add a stub package, a matrix entry, and a pending publisher.
-- **Documentation site:** install the Mintlify GitHub App on this repository
-  only, then point the Mintlify project's Git settings at branch `docs-site`
-  with the docs at the branch root, and add the custom domain
-  `docs.exmergo.com` (a `CNAME docs` record to the target Mintlify gives).
-  Create a `docs-site` GitHub environment whose deployment rule allows `main`
-  and `v*` tags, and a ruleset on the `docs-site` branch blocking deletion.
-  Before the first release that includes the site, publish it once by
-  dispatching the `Docs site` workflow from `main` with `allow_untagged`.
+- **Documentation site:** Mintlify serves exmergo/docs (branch `main`, at the
+  root) on the custom domain `docs.exmergo.com` (a `CNAME docs` record to the
+  target Mintlify gives). This repository publishes its `dex/` folder there
+  through an organization GitHub App (the organization disables deploy keys),
+  installed on exmergo/docs only with Contents: read and write. Its client ID is
+  the `DOCS_APP_CLIENT_ID` variable and its private key the
+  `DOCS_APP_PRIVATE_KEY` secret of the `docs-site` environment here, whose
+  deployment rule allows `main` and `v*` tags. To publish outside a release,
+  dispatch the `Docs site` workflow from `main` with `allow_untagged`.
 - **ADE-bench spike:** stand up ADE-bench locally on DuckDB against the no-plugin
   baseline to confirm the runner before depending on it (the exact command is in
   `benchmarks/ade_bench/README.md`).

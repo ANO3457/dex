@@ -86,7 +86,7 @@ def make_repo(
     pages = (
         {
             "index.mdx": (
-                f"---\ntitle: Home\ndescription: {DESC}\n---\n\nSee [alpha](/alpha).\n"
+                f"---\ntitle: Home\ndescription: {DESC}\n---\n\nSee [a](/dex/alpha).\n"
             )
         }
         if pages is None
@@ -100,10 +100,6 @@ def make_repo(
         path = root / "docs" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    (root / "docs" / "skill.md").write_text(
-        "---\nname: dex\ndescription: d\n---\n\nInstall the real skills.\n",
-        encoding="utf-8",
-    )
     (root / "CHANGELOG.md").write_text(
         changelog
         or "# Changelog\n\n## [Unreleased]\n\n- pending\n\n"
@@ -114,8 +110,26 @@ def make_repo(
     nav = [Path(n).with_suffix("").as_posix() for n in pages]
     nav += [r.removesuffix(".md") for r in references]
     nav += ["cli/overview", "cli/tool", "changelog"]
-    (root / "docs" / "docs.json").write_text(
-        json.dumps({"name": "x", "navigation": {"pages": nav}}), encoding="utf-8"
+    (root / "docs" / "section.json").write_text(
+        json.dumps({"navigation": {"product": "Dex", "pages": nav}}),
+        encoding="utf-8",
+    )
+    return root
+
+
+def make_site(root: Path) -> Path:
+    """A minimal exmergo/docs checkout, with a stale dex/ to be replaced."""
+
+    (root / "dex").mkdir(parents=True)
+    (root / "dex" / "stale.mdx").write_text("old", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (root / "index.mdx").write_text(
+        "---\ntitle: Exmergo\n---\n\nHome.\n", encoding="utf-8"
+    )
+    (root / "docs.json").write_text(
+        json.dumps({"navigation": {"products": [{"$ref": "./dex/navigation.json"}]}}),
+        encoding="utf-8",
     )
     return root
 
@@ -190,7 +204,10 @@ def test_every_cli_group_and_subcommand_has_a_page_and_a_heading(real_build):
             assert f"\n## dex {group} {sub}\n" in body
         # Shared options are documented once, on the overview, not per command.
         assert "`--repo-root" not in body
-    assert "`--repo-root DIR`" in builder.pages["cli/overview"].body
+        assert "](/dex/cli/overview#global-options)" in body
+    overview = builder.pages["cli/overview"].body
+    assert "`--repo-root DIR`" in overview
+    assert "](/dex/cli/explore)" in overview
 
 
 def test_two_builds_are_byte_identical(tmp_path, real_build):
@@ -281,7 +298,7 @@ def test_links_are_rewritten_to_routes_and_repository_urls(tmp_path):
     builder = make_builder(root)
     assert not builder.build(), messages(builder.problems)
     body = builder.pages["alpha"].body
-    assert "[b](/beta)" in body and "[b2](/beta#two)" in body
+    assert "[b](/dex/beta)" in body and "[b2](/dex/beta#two)" in body
     assert "[here](#local)" in body
     assert f"[agents]({site.GITHUB}/blob/main/AGENTS.md)" in body
     assert f"[dir]({site.GITHUB}/tree/main/skills)" in body
@@ -312,26 +329,30 @@ def test_hand_written_pages_link_by_route_only(tmp_path):
         pages={
             "index.mdx": (
                 f"---\ntitle: Home\ndescription: {DESC}\n---\n\n"
-                "[ok](/alpha) [rel](alpha.md) [gone](/nowhere)\n"
+                "[ok](/dex/alpha) [home](/) [rel](alpha.md) [gone](/dex/nowhere) "
+                "[out](/viz/start)\n"
             )
         },
     )
     problems = messages(make_builder(root).build())
-    assert "pages under docs/ link by root-absolute route" in problems
-    assert "links to /nowhere, not a page" in problems
-    assert "/alpha, not a page" not in problems
+    assert "pages under docs/ link by site route, such as /dex/" in problems
+    assert "links to /dex/nowhere, not a page" in problems
+    assert "links to /viz/start, outside the /dex section" in problems
+    assert "/dex/alpha," not in problems and "links to /," not in problems
 
 
 def test_a_tracked_file_linking_an_unknown_docs_page_fails(tmp_path):
     root = make_repo(tmp_path)
-    url = site.SITE + "/no-such-page"
+    url = site.SITE + "/dex/no-such-page"
     (root / "README.md").write_text(
-        f"Docs: {url} and {site.SITE}/alpha\n", encoding="utf-8"
+        f"Docs: {url}, {site.SITE}/dex/alpha, {site.SITE}/viz and {site.SITE}\n",
+        encoding="utf-8",
     )
     builder = make_builder(root, list_tracked_files=lambda: ["README.md"])
     problems = messages(builder.build())
     assert f"README.md:1: {url} is not a page on the site" in problems
-    assert "/alpha is not a page" not in problems
+    # Our own page resolves; the rest of the site is exmergo/docs's to answer for.
+    assert problems.count("is not a page") == 1
 
 
 # --- Escaping ---------------------------------------------------------------
@@ -461,20 +482,87 @@ def test_write_replaces_a_previous_build(tmp_path):
     assert not builder.build(), messages(builder.problems)
     out = tmp_path / "out"
     builder.write(out)
-    (out / "stale.mdx").write_text("old", encoding="utf-8")
+    (out / "dex" / "stale.mdx").write_text("old", encoding="utf-8")
     builder.write(out)
-    assert not (out / "stale.mdx").exists()
-    assert (out / "alpha.mdx").is_file() and (out / "skill.md").is_file()
-    assert (out / "README.md").read_text(encoding="utf-8").startswith(site.OUT_MARKER)
+    assert sorted(p.name for p in out.iterdir()) == ["dex"]
+    assert not (out / "dex" / "stale.mdx").exists()
+    assert (out / "dex" / "alpha.mdx").is_file()
+    readme = (out / "dex" / "README.md").read_text(encoding="utf-8")
+    assert readme.startswith(site.OUT_MARKER)
 
 
-def test_redirects_cover_every_reference_path(tmp_path):
+def test_write_with_a_site_assembles_the_whole_site(tmp_path):
+    root = make_repo(tmp_path / "repo")
+    builder = make_builder(root)
+    assert not builder.build(), messages(builder.problems)
+    out = tmp_path / "out"
+    builder.write(out, site=make_site(tmp_path / "docs"))
+    assert (out / "index.mdx").is_file() and (out / "docs.json").is_file()
+    assert (out / "dex" / "alpha.mdx").is_file()
+    assert not (out / "dex" / "stale.mdx").exists()  # the site's old dex/ is gone
+    assert not (out / ".git").exists()
+
+
+def test_write_never_clears_a_git_checkout_or_the_site_itself(tmp_path):
+    """An exmergo/docs checkout carries the build marker in its dex/ folder, so
+    the marker alone would let `--out ../docs` wipe a real repository."""
+
+    root = make_repo(tmp_path / "repo")
+    builder = make_builder(root)
+    assert not builder.build(), messages(builder.problems)
+    docs = make_site(tmp_path / "docs")
+    (docs / "dex" / "README.md").write_text(site.OUT_MARKER + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="it is a git checkout"):
+        builder.write(docs)
+    with pytest.raises(SystemExit, match="it is a git checkout"):
+        builder.write(docs, site=docs)
+    with pytest.raises(SystemExit, match="it contains --site"):
+        builder.write(tmp_path, site=docs)
+    assert (docs / ".git" / "HEAD").is_file() and (docs / "index.mdx").is_file()
+
+
+def test_the_site_copy_skips_only_its_top_level_dex_and_git(tmp_path):
+    root = make_repo(tmp_path / "repo")
+    builder = make_builder(root)
+    assert not builder.build(), messages(builder.problems)
+    docs = make_site(tmp_path / "docs")
+    (docs / "images" / "dex").mkdir(parents=True)
+    (docs / "images" / "dex" / "logo.svg").write_text("<svg/>", encoding="utf-8")
+    out = tmp_path / "out"
+    builder.write(out, site=docs)
+    assert (out / "images" / "dex" / "logo.svg").is_file()
+    assert not (out / ".git").exists() and not (out / "dex" / "stale.mdx").exists()
+
+
+def test_the_section_ships_its_own_menu_and_redirects(tmp_path):
     root = make_repo(tmp_path)
     builder = make_builder(root)
     assert not builder.build(), messages(builder.problems)
-    redirects = json.loads(builder.rendered()["docs.json"])["redirects"]
-    assert {"source": "/references/alpha.md", "destination": "/alpha"} in redirects
-    assert {"source": "/references/alpha", "destination": "/alpha"} in redirects
+    files = builder.rendered()
+    navigation = json.loads(files["dex/navigation.json"])
+    assert navigation["product"] == "Dex"
+    assert "dex/alpha" in navigation["pages"] and "dex/index" in navigation["pages"]
+    redirects = json.loads(files["dex/redirects.json"])
+    assert {"source": "/dex/references/alpha.md", "destination": "/dex/alpha"} in (
+        redirects
+    )
+    assert {"source": "/dex/references/alpha", "destination": "/dex/alpha"} in (
+        redirects
+    )
+    assert "dex/docs.json" not in files and "docs.json" not in files
+
+
+def test_a_section_cannot_carry_site_settings_or_claim_other_routes(tmp_path):
+    root = make_repo(tmp_path)
+    config = json.loads((root / "docs" / "section.json").read_text(encoding="utf-8"))
+    config["theme"] = "maple"
+    config["redirects"] = [{"source": "/start", "destination": "/dex/alpha"}]
+    (root / "docs" / "section.json").write_text(json.dumps(config), encoding="utf-8")
+    problems = messages(make_builder(root).build())
+    assert (
+        "holds theme; a section carries only its navigation and redirects" in problems
+    )
+    assert "redirect source /start is outside /dex" in problems
 
 
 def test_private_material_never_reaches_a_page(tmp_path):

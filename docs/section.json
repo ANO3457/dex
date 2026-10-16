@@ -1,0 +1,114 @@
+{
+  "navigation": {
+    "product": "Dex",
+    "description": "Agent-native analytics engineering",
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "index"
+            ]
+          },
+          {
+            "group": "Guardrails",
+            "pages": [
+              "guardrails/cost-controls",
+              "guardrails/pii-policy"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/source-of-truth",
+              "concepts/methodology",
+              "concepts/dbt-project"
+            ]
+          },
+          {
+            "group": "Connectors",
+            "pages": [
+              "connectors/duckdb",
+              "connectors/bigquery",
+              "connectors/snowflake",
+              "connectors/databricks",
+              "connectors/redshift",
+              "connectors/postgres",
+              "connectors/clickhouse"
+            ]
+          },
+          {
+            "group": "Semantic layers",
+            "pages": [
+              "semantic-layers/overview",
+              "semantic-layers/ossie"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/ossie-semantic-layer"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "CLI",
+            "pages": [
+              "cli/overview",
+              "cli/connect",
+              "cli/explore",
+              "cli/transform",
+              "cli/semantic",
+              "cli/maintain",
+              "cli/config",
+              "cli/viz",
+              "cli/demo"
+            ]
+          },
+          {
+            "group": "Using dex",
+            "pages": [
+              "reference/command-contract"
+            ]
+          },
+          {
+            "group": "Extending dex",
+            "pages": [
+              "reference/project-formats",
+              "reference/storage-backends",
+              "reference/host-integration"
+            ]
+          },
+          {
+            "group": "Project",
+            "pages": [
+              "reference/evaluation"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Changelog",
+        "pages": [
+          "changelog"
+        ]
+      }
+    ]
+  },
+  "redirects": [
+    {
+      "source": "/dex/cli",
+      "destination": "/dex/cli/overview"
+    },
+    {
+      "source": "/dex/reference",
+      "destination": "/dex/reference/command-contract"
+    }
+  ]
+}
