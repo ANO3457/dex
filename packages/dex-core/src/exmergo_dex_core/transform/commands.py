@@ -41,7 +41,7 @@ from . import plans as plans_mod
 # `build`'s signature and therefore evaluated at import. It carries no
 # dependency of its own; the rest of the build module stays deferred for
 # the reason stated above.
-from .build import DependencyPolicy
+from .build import UPTIME_LINE, DependencyPolicy
 from .native_semantic import edits_from_payload, plan_hint, read_payload_file
 from .plans import EditKind, PlanEdit, PlanError
 from .results import (
@@ -101,6 +101,20 @@ _COMPUTE_TIME_CAP_NOTES = {
 _DEFAULT_COMPUTE_TIME_CAP_NOTE = (
     "the warehouse-level statement timeout and auto-suspend are the server-side caps"
 )
+
+# What a build settled at dbt's statement time alone leaves out, per connector
+# that bills uptime rather than statement time. Raised only where the adapter
+# that models the uptime was never opened (pricing degraded before it could
+# be), because then the figure is a floor and a caller enforcing a ceiling
+# against it has to know.
+_UNMODELED_UPTIME_NOTES = {
+    "snowflake": (
+        "settled at dbt's statement time alone: the warehouse could not be read, "
+        "so the uptime Snowflake bills beyond it (the 60-second minimum per "
+        "resume and the AUTO_SUSPEND idle tail) is not in this figure, which is "
+        "a lower bound"
+    ),
+}
 
 # The same shape for db-load, and for the same reason. This one is not
 # decoration: the note asserts that a specific server-side cap was applied, and
@@ -889,6 +903,7 @@ def test_mutations(
                 mutation_mod=mutation_mod,
                 prices=prices,
                 equivalence=equivalence,
+                uptime=getattr(adapter, "warehouse_uptime", None),
             )
             runs, spend, run_warnings = result.pop("_meta")
             warnings.extend(run_warnings)
@@ -1144,6 +1159,11 @@ def _price_mutations(
     survives. That is the ceiling, and the confirmed batch has to cover the
     ceiling rather than a guess at how strong the suite is.
 
+    So does what the warehouse bills the batch as a whole (Snowflake's resume
+    minimum and idle tail), as a line of its own and never in ``prices``: the
+    stop rule asks the uptime model what is still owed instead, because that
+    figure grows with the time between runs rather than with any one of them.
+
     Returns the total, the per-table lines the handshake shows, the price of
     each statement keyed the way the run loop asks for it, and notes.
     """
@@ -1189,6 +1209,10 @@ def _price_mutations(
 
     per_table: dict[str, float] = {}
     prices: dict[str, float] = {}
+    uptime = getattr(adapter, "warehouse_uptime", None)
+    quoted = uptime.quote() if uptime is not None else 0.0
+    if quoted > 0:
+        per_table[UPTIME_LINE] = quoted
     with contextlib.suppress(Exception):
         per_table["(baseline)"] = prices["(baseline)"] = price(batch.identity_compiled)
     for mutant in batch.mutants:
@@ -1226,7 +1250,7 @@ def _price_mutations(
                 "only a survivor runs one, so the settled spend is at most this"
             )
 
-    if not per_table:
+    if not set(per_table) - {UPTIME_LINE}:
         return None, {}, {}, [*notes, "the batch could not be priced upfront"]
     return sum(per_table.values()), per_table, prices, notes
 
@@ -1245,6 +1269,7 @@ def _run_mutants(
     mutation_mod,
     prices: dict[str, float] | None = None,
     equivalence: _EquivalenceCheck | None = None,
+    uptime=None,
 ):
     """The baseline, then one run per mutant, stopping if the budget runs out.
 
@@ -1261,6 +1286,7 @@ def _run_mutants(
         ceiling=ceiling,
         prices=prices,
         fallback=(estimate or 0.0) / max(len(batch.mutants) + 1, 1),
+        uptime=uptime,
     )
 
     shadow.write(model_path, batch.identity)
@@ -1330,6 +1356,7 @@ def _run_mutants(
 
     mutants.sort(key=lambda m: (_survivor_rank(m), m["id"]))
     decided = counts["killed"] + counts["survived"]
+    warnings.extend(meter.settle_uptime())
     return {
         "baseline": {
             "tests": [
@@ -1375,6 +1402,12 @@ class _BatchSpend:
     Prices are per statement, keyed ``(baseline)``, a mutant's id, or
     ``<id> equivalence``. A statement with no price of its own falls back to an
     even share of the batch estimate.
+
+    ``uptime`` is the adapter's model of what the warehouse bills the batch
+    beyond its statements (Snowflake's resume minimum, the time between dbt
+    invocations while the warehouse stays up, and the idle tail), or ``None``
+    where the warehouse bills statement time. It is told each run and asked what
+    is still owed, so the stop rule leaves room for it.
     """
 
     def __init__(
@@ -1386,6 +1419,7 @@ class _BatchSpend:
         ceiling: float | None,
         prices: dict[str, float] | None = None,
         fallback: float = 0.0,
+        uptime=None,
     ):
         self._paradigm = paradigm
         self._connector = connector
@@ -1393,6 +1427,7 @@ class _BatchSpend:
         self._ceiling = ceiling
         self._prices = prices or {}
         self._fallback = fallback
+        self._uptime = uptime
         self._spent = 0.0
         self.spend: dict[str, float | None] | None = None
         self.runs = 0
@@ -1404,7 +1439,8 @@ class _BatchSpend:
 
         if self._paradigm is Paradigm.FREE_LOCAL or self._ceiling is None:
             return True
-        return self._spent + self._price(key) <= self._ceiling
+        owed = self._uptime.pending() if self._uptime is not None else 0.0
+        return self._spent + owed + self._price(key) <= self._ceiling
 
     def settle(self, summary: dict | None, key: str) -> None:
         """Ledger one finished dbt invocation and add it to the running total."""
@@ -1425,6 +1461,31 @@ class _BatchSpend:
             run_spend, self._paradigm, fallback=self._price(key)
         )
         self.spend = _merge_spend(self.spend, run_spend)
+        if self._uptime is not None and summary:
+            self._uptime.observe(
+                _execution_seconds(summary), span=summary.get("elapsed_seconds")
+            )
+
+    def settle_uptime(self) -> list[str]:
+        """Book what the warehouse billed the batch beyond its statements, as
+        one more row of this command's own (no estimate, like the runs'), and
+        add it to the batch's spend. Returns the notes that explain it."""
+
+        if self._uptime is None:
+            return []
+        overhead, notes = self._uptime.settle()
+        if overhead > 0:
+            self.spend = _merge_spend(
+                self.spend,
+                _record_build_spend(
+                    self._store,
+                    self._connector,
+                    overhead,
+                    self._paradigm,
+                    command="transform test",
+                ),
+            )
+        return notes
 
     def _price(self, key: str) -> float:
         return self._prices.get(key, self._fallback)
@@ -1817,7 +1878,8 @@ def apply(engine: DexEngine, plan_id: str | None = None) -> ApplyResult:
             # caller has to accept before anything is overwritten.
             pending_confirmation=ConfirmationRequest(
                 data={
-                    "hint": (
+                    "hint": outcome.conflict_hint
+                    or (
                         "these files changed after the plan was made (human edits "
                         "are authoritative); re-plan against current state, or "
                         "re-run with --confirm to overwrite deliberately"
@@ -1946,7 +2008,8 @@ def apply_document(
             diffs=outcome.diffs,
             pending_confirmation=ConfirmationRequest(
                 data={
-                    "hint": (
+                    "hint": outcome.conflict_hint
+                    or (
                         "these files differ from what the plan was authored "
                         "against (human edits are authoritative); re-plan against "
                         "this checkout, or re-run with --confirm to overwrite "
@@ -2328,6 +2391,12 @@ def build(
         )
         raise
 
+    # dbt ran its statements outside the adapter, so the uptime model is told
+    # what they were before anything else runs on the warehouse: the
+    # verification's statements come after them on its clock.
+    uptime = getattr(adapter, "warehouse_uptime", None)
+    if uptime is not None:
+        uptime.observe(_execution_seconds(summary), span=summary.get("elapsed_seconds"))
     # dbt has just written to the warehouse this adapter listed while pricing,
     # so what it listed (a dev schema that did not exist, a table's row count)
     # is stale for anything that reads after the build. On the free path the
@@ -2596,6 +2665,17 @@ class DbtParseError(DexError):
         self.warnings = warnings or []
 
 
+def _execution_seconds(summary: dict | None) -> float:
+    """The statement time a dbt run reports: the sum of its nodes'
+    ``execution_time``, the one spend figure every non-BigQuery dbt adapter
+    gives."""
+
+    return sum(
+        float(node.get("execution_time") or 0)
+        for node in (summary or {}).get("nodes", [])
+    )
+
+
 def _record_build_spend(
     store: Store,
     connector: str,
@@ -2615,7 +2695,8 @@ def _record_build_spend(
     what `transform build` spent must not be handed another command's rows.
 
     ``billed`` is ``None`` only where dbt executed statements and reported no
-    billing figure for any of them, which is unknown spend rather than none.
+    billing figure for any of them (dbt-bigquery without ``bytes_billed``), which
+    is unknown spend rather than none.
     Nothing is ledgered then, because there is no figure to ledger, and the unit
     key still reports ``None`` so the caller reads "unavailable" instead of the
     zero that would under-report it.
@@ -2682,12 +2763,13 @@ def _record_build_spend(
         else float(billed) + float(gate_billed),
         "session_spent_today": session_spent,
         # The one command where settlement can genuinely be unknown. dbt runs the
-        # statements, and dbt-snowflake, dbt-databricks and dbt-redshift report no
-        # billing figure at all, so `billed is None` here means statements ran and
-        # nobody said what they cost. Stated as its own flag rather than left to be
-        # inferred from a null, because a caller summing spend across envelopes has
-        # to be able to tell an unknown apart from a zero without knowing which
-        # adapters report figures.
+        # statements, so `billed is None` here means statements ran and nobody said
+        # what they cost: a bytes-billed adapter that reported no figure. The
+        # compute-time adapters report none either, and settle from statement time
+        # instead. Stated as its own flag rather than left to be inferred from a
+        # null, because a caller summing spend across envelopes has to be able to
+        # tell an unknown apart from a zero without knowing which adapters report
+        # figures.
         "settled": billed is not None,
         "unknown_settlement": billed is None,
         "reserved": None,
@@ -2704,6 +2786,7 @@ def _settle_dbt_spend(
     estimate: float | None,
     adapter=None,
     gate_billed: float = 0.0,
+    uptime_seconds: float = 0.0,
     command: str = "transform build",
 ) -> tuple[dict[str, float | None] | None, list[str]]:
     """What one finished dbt run cost, ledgered, with the note that explains it.
@@ -2718,9 +2801,15 @@ def _settle_dbt_spend(
     ``command`` names the ledger row's command, so a caller that is not a build
     settles under its own name and a reader summing one command's spend is not
     handed another's.
+
+    ``uptime_seconds`` is what the warehouse billed the command beyond its
+    statements (Snowflake's resume minimum and idle tail, from the adapter's
+    uptime model), folded into this run's row rather than written as a row of
+    its own, so the build keeps one estimate-to-billed ratio for calibration.
     """
 
     from ..envelope import Paradigm
+    from ..guards.cost_guard import spend_field
 
     spend: dict[str, float | None] | None = None
     if paradigm is Paradigm.BYTES_SCANNED:
@@ -2773,13 +2862,13 @@ def _settle_dbt_spend(
             connector, _DEFAULT_COMPUTE_TIME_CAP_NOTE
         )
         notes = [cap_note, *notes]
-        # dbt-snowflake, dbt-databricks, and dbt-redshift report no billing figure;
-        # per-node execution time is the honest compute-seconds actual. It is
-        # always known (a run with no nodes burned no seconds), so unlike the
-        # bytes path there is no unknown case to distinguish from zero.
-        seconds = sum(
-            float(node.get("execution_time") or 0) for node in summary.get("nodes", [])
-        )
+        # dbt-snowflake, dbt-databricks, and dbt-redshift report no billing
+        # figure, so the actual starts from per-node execution time, which is
+        # always known (a run with no nodes burned no seconds). It is statement
+        # time, which is not what every one of these warehouses bills: Snowflake
+        # bills uptime, and its adapter's model supplies the rest as
+        # `uptime_seconds`.
+        seconds = _execution_seconds(summary) + uptime_seconds
         spend = _record_build_spend(
             store,
             connector,
@@ -2792,17 +2881,16 @@ def _settle_dbt_spend(
         translate = getattr(adapter, "compute_spend_translation", None)
         if translate is not None:
             # Unconditional, including at zero seconds: the translated keys
-            # (compute-unit-hours, USD) are part of this connector's spend shape,
-            # and a run that omitted them would be the same present-sometimes key
-            # this issue is about, one level down.
-            spend.update(translate(seconds))
+            # (compute-unit-hours, credits, USD) are part of this connector's
+            # spend shape, and a run that omitted them would be the same
+            # present-sometimes key this issue is about, one level down. Of the
+            # reported total, so the gate's share is translated too.
+            spend.update(translate(spend[spend_field(paradigm)] or 0.0))
     elif paradigm is Paradigm.DB_LOAD:
         notes = [_DB_LOAD_CAP_NOTES.get(connector, _UNCAPPED_BUILD_NOTE), *notes]
         # The db-load dbt adapters report no billing figure; per-node execution
         # time is the honest database-seconds actual.
-        seconds = sum(
-            float(node.get("execution_time") or 0) for node in summary.get("nodes", [])
-        )
+        seconds = _execution_seconds(summary)
         spend = _record_build_spend(
             store,
             connector,
@@ -2876,12 +2964,17 @@ def _price_build(
             if engine.config.guards.approved_functions
             else {}
         )
+        # Quoted before anything is priced: it is one line of its own rather
+        # than folded into whichever node is priced first, and the model reads
+        # the warehouse as this build found it, before dbt wakes it.
+        uptime = getattr(adapter, "warehouse_uptime", None)
         estimate, per_node, notes = compile_estimate(
             project,
             adapter,
             target=target,
             select=select,
             env=compile_env,
+            overhead=uptime.quote() if uptime is not None else 0.0,
             **guard_options,
         )
         if verify:
@@ -3028,14 +3121,27 @@ def _shape_build_result(
         unserialized_ledger_warning,
     )
 
-    # Read before the settle releases it: on this command the gate bills for the
-    # folded verification and nothing else, because dbt spends outside the gate
-    # entirely and the compile that priced the run only dry-ran.
-    gate_billed = gate.billed if gate is not None else 0.0
+    # The warehouse's uptime first, folded into dbt's row below rather than
+    # booked by the gate as a row of its own, so the build keeps one
+    # estimate-to-billed ratio. Settling the model here leaves the gate's own
+    # hook nothing to book.
+    uptime = getattr(adapter, "warehouse_uptime", None)
+    uptime_seconds, uptime_notes = uptime.settle() if uptime is not None else (0.0, [])
+    # On this command the gate bills for the folded verification and nothing
+    # else, because dbt spends outside the gate entirely and the compile that
+    # priced the run only dry-ran.
     if gate is not None:
         gate.settle()
+    gate_billed = gate.billed if gate is not None else 0.0
     messages = summary.pop("messages", [])
+    summary.pop("elapsed_seconds", None)
     notes = [*extra_notes, *summary.pop("notes", [])]
+    if (
+        uptime is None
+        and connector in _UNMODELED_UPTIME_NOTES
+        and _execution_seconds(summary) > 0
+    ):
+        uptime_notes = [_UNMODELED_UPTIME_NOTES[connector]]
     if verification is not None:
         notes = [*notes, *verification.warnings]
         if verification.findings:
@@ -3059,9 +3165,11 @@ def _shape_build_result(
         estimate=estimate,
         adapter=adapter,
         gate_billed=gate_billed,
+        uptime_seconds=uptime_seconds,
     )
     notes = [
         *notes,
+        *uptime_notes,
         *no_session_ceiling_warning(
             paradigm, session_ceiling, declined=session_ceiling_declined
         ),

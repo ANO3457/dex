@@ -322,6 +322,11 @@ dex semantic ossie define|update|plan
                                   -> native Ossie whole-document edits as diffs; limited to the exact
                                      files in semantic.ossie.files, validated as one prospective
                                      layer, and applied atomically with transform apply
+dex semantic slayer define|update|plan
+                                  -> SLayer model files as whole-file diffs; limited to the exact
+                                     files in semantic.slayer.models, validated as one prospective
+                                     set with SLayer's own model, and applied atomically with
+                                     transform apply
 dex maintain snapshot [--project-only]
                                   -> capture/refresh the known-good baseline in .dex/snapshot.json;
                                      --project-only re-fingerprints only project layers and carries the
@@ -331,15 +336,19 @@ dex maintain check                -> sweep every drift axis vs the snapshot; ran
                                      two-phase on billed connectors: free axes now, one estimate for scans)
 dex maintain schema [<objects>]   -> structural drift: columns/tables added, dropped, retyped, renamed;
                                      nullability; dangling sources; a model added, removed, or
-                                     content-changed since the baseline (metadata, free everywhere)
+                                     content-changed since the baseline (metadata, free everywhere);
+                                     under semantic.vendor: slayer, the models held to the warehouse
+                                     by SLayer's own validate-models rules on dex's metadata
 dex maintain volume [<objects>]   -> freshness drift: row counts that collapsed, emptied, or spiked (free)
 dex maintain grain [<objects>]    -> cardinality/identity drift: lost key uniqueness, changed grain, join
-                                     fanout, and the grains the project declares re-verified
+                                     fanout, the grains the project declares re-verified, and declared
+                                     join arity measured (join_cardinality_exceeded)
                                      (aggregates; gated by --confirm --budget on billed connectors)
 dex maintain semantic [<objects>] -> definition drift and dangling refs (free) + categorical dimension
                                      cardinality change (a scan; gated on billed connectors)
 dex maintain reconcile [<class>]  -> propose the edits that reconcile detected drift, as a stored plan
-                                     of diffs tagged mechanical/advisory (applied with transform apply)
+                                     of diffs tagged mechanical/advisory (applied with transform apply);
+                                     a SLayer layer's own removals as a second plan, semantic_plan_id
 dex maintain verify [<selector>]  -> is the project correct right now, no .dex/snapshot.json baseline
                                      required (unlike every subcommand above). Build status:
                                      failed/skipped build nodes (naming the failed cause, walking back
@@ -928,6 +937,18 @@ replace) inlines a literal credential, so no secret ever reaches the diff.
   before storing anything. It writes the accepted content byte-for-byte, with
   no YAML/JSON reformatting, and never changes a configured document absent from
   the payload. File removal is not part of this command.
+- `semantic slayer define|update|plan` is the same route for SLayer model files.
+  Each edit is one whole model file keyed as `semantic.slayer.models` names it,
+  relative to `semantic.slayer.base_dir`, and nothing else under the storage root
+  is writable. The prospective set is validated with the pinned release's own
+  `SlayerModel` (current format `version`, unique names, path agreeing with name
+  and data source, joins resolving within the set onto columns both sides have)
+  and, for an edited model, a `default_time_dimension` that names a column, no
+  key the pinned release does not declare at its level (SLayer ignores one, so it
+  would be written and do nothing), and saved-measure formulas that parse. Every
+  refusal names the file, the element, and for an unknown key the pinned
+  release. Apply writes the authored bytes, all files or none, and a file
+  SLayer's own storage rewrote after planning is a conflict that says so.
 
 
 Skill-to-subcommand mapping: `explore` fronts `connect`/`explore`; `transform`
@@ -990,6 +1011,27 @@ without the `[ossie]` extra refuses and names it. dex pins the Ossie schema by
 content hash rather than by the version string the document carries. See
 `references/semantic-layer.md`, and `references/ossie-compatibility.md` for what
 dex accepts, checks, links, and declines to claim under that pin.
+
+**`vendor: slayer` reads SLayer model files from the repository**, the ones named
+in `semantic.slayer.models` under `semantic.slayer.base_dir`, each validated by
+SLayer's own `SlayerModel` from the release the `[slayer]` extra pins. A file in
+any format version but that release's current one is refused before SLayer can
+migrate it, and every refusal names the file and the element. `list` answers:
+each model is a semantic model, each column a dimension keyed `model.column`, and
+each saved measure a `formula` metric groupable by its own model's columns, so
+`--for-dimension` answers too. Measures and entities are declared `unavailable`,
+because a saved measure declares no aggregation and SLayer has no entities; its
+keys and joins reach `explore` through the declaration channel instead. `query`
+and `values` refuse by name: SLayer would execute through its own datasource
+connection, outside the cost guard and the query firewall, and under dex SLayer
+never touches the warehouse. Values SLayer caches in a model file
+(`sampled_values`) are never read. See `references/semantic-layer.md`.
+`maintain` reads the same models on every axis without opening a SLayer
+datasource or SLayer storage: the baseline records the SLayer release and model
+format version, declared keys and join `cardinality` are measured on the grain
+axis, and the schema axis runs SLayer's own `validate-models` comparison on the
+metadata dex captured, whose removals `maintain reconcile` plans through the
+`semantic slayer update` route.
 
 `list` costs no warehouse query on either backend, and neither does the reverse
 lookup, which inverts the dimension list each metric already carries rather than

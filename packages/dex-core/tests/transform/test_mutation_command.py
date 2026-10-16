@@ -721,6 +721,102 @@ def test_the_budget_can_stop_the_batch_before_a_survivors_comparison(project):
     assert any("budget covered 1 of" in w for w in warnings)
 
 
+class _UptimeStandIn:
+    """Owes a fixed amount beyond the batch's statements until it settles, the
+    way the Snowflake model owes a resume minimum and an idle tail."""
+
+    def __init__(self, owed: float):
+        self.owed = owed
+        self.observed: list[tuple[float, float | None]] = []
+        self.settled = 0
+
+    def pending(self) -> float:
+        return 0.0 if self.settled else self.owed
+
+    def quote(self) -> float:
+        return self.pending()
+
+    def observe(self, seconds: float, *, span: float | None = None) -> None:
+        self.observed.append((seconds, span))
+
+    def settle(self) -> tuple[float, list[str]]:
+        self.settled += 1
+        if self.settled > 1:
+            return 0.0, []
+        return self.owed, ["the warehouse idled after the batch"]
+
+
+def test_the_stop_rule_leaves_room_for_what_the_warehouse_bills_beyond_the_runs(
+    project,
+):
+    """A warehouse that bills uptime owes its idle tail once the last run is
+    done. A batch that spends the whole budget on runs leaves the tail over it,
+    so the stop rule counts what is still owed before admitting the next run,
+    and the batch settles that once, as one more row of its own."""
+
+    import json
+
+    from exmergo_dex_core.envelope import Paradigm
+    from exmergo_dex_core.transform.commands import _run_mutants
+
+    batch = mutation.enumerate_mutants(
+        mutation.prepare("select a from t where a > 1 and b > 2", dialect="duckdb")
+    )
+    assert len(batch.mutants) > 2
+    shadow = _CopyStandIn()
+    prices = {"(baseline)": 10.0, **{m.id: 10.0 for m in batch.mutants}}
+    uptime = _UptimeStandIn(owed=75.0)
+    store = FilesystemStore(project.parent)
+    result = _run_mutants(
+        shadow,
+        "models/fct.sql",
+        batch,
+        model="fct",
+        paradigm=Paradigm.COMPUTE_TIME,
+        connector="snowflake",
+        store=store,
+        ceiling=100.0,
+        estimate=None,
+        mutation_mod=mutation,
+        prices=prices,
+        uptime=uptime,
+    )
+    _runs, spend, warnings = result.pop("_meta")
+
+    # The baseline, then one mutant: 10 + 75 + 10 fits, 20 + 75 + 10 does not.
+    assert shadow.invoked == ["test", "test"]
+    assert result["counts"]["not_run"] == len(batch.mutants) - 1
+    assert uptime.observed == [(10.0, None), (10.0, None)]
+    assert uptime.settled == 1
+    assert spend["seconds_billed"] == pytest.approx(95.0)
+    assert "the warehouse idled after the batch" in warnings
+    ledger = (project.parent / ".dex" / "spend.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in ledger]
+    assert [r["billed_seconds"] for r in rows] == [10.0, 10.0, 75.0]
+    assert {r["command"] for r in rows} == {"transform test"}
+    assert all(r["estimate"] is None for r in rows)
+
+
+def test_the_uptime_quote_is_a_line_of_its_own_and_never_a_run_price():
+    from exmergo_dex_core.transform.build import UPTIME_LINE
+    from exmergo_dex_core.transform.commands import _price_mutations
+
+    class _Quoting(_TextPricedAdapter):
+        def __init__(self):
+            self.warehouse_uptime = _UptimeStandIn(owed=60.0)
+
+    adapter = _Quoting()
+    batch = mutation.enumerate_mutants(
+        mutation.prepare("select a from t where a > 1 and b > 2", dialect="duckdb")
+    )
+    estimate, per_table, prices, _notes = _price_mutations(
+        adapter, _PricingCopy(None), "models/fct.sql", batch, {"name": "fct"}, mutation
+    )
+    assert per_table[UPTIME_LINE] == 60.0
+    assert UPTIME_LINE not in prices
+    assert estimate == pytest.approx(sum(per_table.values()))
+
+
 class _TextPricedAdapter:
     """Prices a statement by its length, so different SQL prices differently."""
 

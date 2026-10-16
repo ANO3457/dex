@@ -1,7 +1,8 @@
 # Querying the semantic layer (`explore semantic`)
 
 dex can author a semantic layer (`transform` / `semantic define|update` for dbt,
-`semantic ossie define|update` for native Apache Ossie documents) and detect drift
+`semantic ossie define|update` for native Apache Ossie documents, `semantic slayer
+define|update` for SLayer model files) and detect drift
 in it (`maintain semantic`). `explore semantic` is the third piece: it *queries*
 the layer, so an agent can discover metrics and, where the layer defines a
 runtime, run governed metric queries. Three backends answer the same commands
@@ -394,8 +395,8 @@ Two configured axes, and one that is derived:
 
 | axis | values | what it decides | set how |
 |---|---|---|---|
-| `vendor` | `dbt`, `ossie` | which semantic-layer format answers | configured, ambient per repo |
-| `deployment` | `local`, `dbt_cloud` (`local` only for `ossie`) | which endpoint or artifact is read | configured |
+| `vendor` | `dbt`, `ossie`, `slayer` | which semantic-layer format answers | configured, ambient per repo |
+| `deployment` | `local`, `dbt_cloud` (`local` only for `ossie` and `slayer`) | which endpoint or artifact is read | configured |
 | `execution` | `dex`, `vendor` | **whether dex's cost guard applies** | derived, never configured |
 
 `execution` is the one the guards read, so it is reported on every result rather
@@ -840,6 +841,222 @@ The pin lives in four places and two of them are asserted by an offline test, so
 the procedure is written out once in
 [Apache Ossie compatibility](ossie-compatibility.md#upgrading-the-pin). Follow it
 there rather than from memory; updating the hash alone is not an upgrade.
+
+## SLayer models (`vendor: slayer`)
+
+[SLayer](https://github.com/MotleyAI/slayer) keeps a semantic layer as YAML model
+files validated by pydantic. dex reads the configured model files from the
+repository, with no MetricFlow in the path and with SLayer itself never touching
+the warehouse: no datasource is opened, and SLayer's storage is never opened
+either, because opening it runs layout migrations that move and rename files.
+
+```yaml
+semantic:
+  vendor: slayer
+  slayer:
+    base_dir: semantics/slayer          # SLayer's storage root, in the repository
+    models:
+      - models/warehouse/orders.yaml    # models/<data_source>/<name>.yaml
+      - models/warehouse/customers.yaml
+```
+
+The `[slayer]` extra pins one exact SLayer release (`motley-slayer==1.2.0`), and
+selecting the vendor without it refuses by name with `reason: prerequisite`.
+
+### What a model file is checked against
+
+Each file is read with `yaml.safe_load` and validated by SLayer's own
+`SlayerModel`, so what dex accepts is what the pinned release accepts. On top of
+that, and before any of it reaches a catalog:
+
+- **the format version.** `SlayerModel` migrates an older `version` while parsing
+  and reads a newer one best-effort. dex checks first and refuses anything but the
+  pinned release's current format (15 at 1.2.0), naming both numbers. A file with
+  no `version` is stale, because SLayer's storage reads it as version 1.
+- **the path.** A file has to sit where SLayer keeps it,
+  `models/<data_source>/<name>.yaml`, with its `name` and `data_source` agreeing.
+- **the set.** A model name declared twice refuses every file declaring it, since
+  SLayer resolves joins and references by name. A join to a model the set does not
+  hold, or to a column the target does not declare as a base column, refuses the
+  model declaring it, and that runs to a fixed point.
+- **unknown keys.** `SlayerModel` and every model nested in it ignore a key they
+  do not declare, so a field SLayer does not have validates and does nothing.
+  dex compares every mapping with the fields the pinned release declares at its
+  level (model, column and its `format`, saved measure, aggregation and its
+  `params`, join) and names each other key as `unknown_key`, with what SLayer
+  uses instead where the key is a MetricFlow habit. Reading, this is a warning:
+  SLayer reads the file, so dex does too. Authoring refuses it (below).
+
+Every refusal names the file and the element (`columns['order id'].name`,
+`joins[0].target_model`). One broken file leaves the rest readable: the catalog
+answers for the models that read and carries a note for each that did not, and it
+raises only when none could be read.
+
+### How SLayer maps onto the catalog
+
+dex's catalog is shaped by MetricFlow, and SLayer is shaped differently:
+
+| SLayer | catalog |
+|---|---|
+| `SlayerModel` | a semantic model, on the relation `sql_table` names. A model backed by `sql` or `source_queries`, or a `sql_table` that is not fully qualified for the connector, carries no relation and a note says why |
+| `Column` | a dimension, keyed `model.column`, the reference a SLayer query uses. `time` for `DATE` and `TIMESTAMP`, `categorical` otherwise. The `column` is the physical one behind it, and `None` for an expression or a quoted identifier |
+| saved `ModelMeasure` | a metric of type `formula`, named `model.measure`, with the formula under `composition.expr`, the model's filters under `filter`, and every column of its own model as a groupable token |
+| `default_time_dimension` | the model's `agg_time_dimension` and each of its metrics' `time_axis`, resolved the way SLayer resolves it (the declared column, else the model's only date or timestamp column) |
+| `Aggregation` | named in a note: a function a formula applies to a column, not an element that answers a number |
+| `Column.primary_key`, `Column.unique` | declared keys, through the declaration channel |
+| `ModelJoin` | a declared relationship with every ordered pair, through the declaration channel |
+
+What has no home is declared in `unavailable` rather than left empty:
+
+- **no measures and no entities.** A saved measure is a formula with no
+  aggregation of its own, and a column becomes an aggregation input only inside a
+  query, so nothing is a measure in the catalog's sense. SLayer has no entities;
+  its keys and joins reach `explore` through the declaration channel instead.
+- **no label, `model_ref` or primary entity on a semantic model.**
+- **no `input_measures` and no queryable grains on a metric.**
+
+`dimension_scope` is `declarations`: a metric's groupable tokens are its own
+model's columns, and columns reached through a join are not listed, because which
+paths SLayer accepts depends on join arity it resolves at query time.
+
+**What is never read.** A `Column` can carry `sampled`, `sampled_values` and
+`distinct_count`, values and cardinalities SLayer cached from the warehouse. None
+of them reaches the catalog, the declarations, or the fingerprint, since values
+reach agent context only through `explore query`'s firewall. `meta` is not carried
+either.
+
+### What reaches `explore`, and what does not run
+
+- a sole primary-key column, or a `unique` column, becomes a declared unique key;
+  several primary-key columns become one composite grain in declared order, never
+  also split into single keys;
+- a join becomes a declared relationship at confidence 1.0, written child to
+  parent: the joining model is the child, except where `cardinality` is
+  `one_to_many`. A single-pair join is also a foreign key, except where
+  `cardinality` is `many_to_many`, which says the far side is not a key;
+- `explore map --use-project` marks each relation with the SLayer models on it.
+
+`explore semantic query` and `values` refuse by name. SLayer has a query runtime,
+but it executes through SLayer's own datasource connection, which carries
+credentials dex does not read and spends outside the cost guard and the query
+firewall. The refusal names the governed route: the relations the catalog reports,
+read with `explore query`.
+
+### What `maintain` makes of the layer
+
+`maintain snapshot` fingerprints each model (excluding the values SLayer caches,
+so a re-profile is not a definition change), each saved measure, each declared
+key, and each join with its full ordered pairs and its declared `cardinality`.
+No `maintain` command opens a SLayer datasource or SLayer storage: every axis
+reads the model files and the metadata dex captured through its own connection.
+
+- **Semantic.** The layer-neutral detection runs on the fingerprint unchanged: a
+  definition added, removed or changed, and a dimension, key or join naming a
+  column that is gone. The fingerprint also records the vendor, the SLayer
+  release and the model format version. A content hash is a hash of what the
+  pinned release made of a file, so an upgrade changes every hash without anyone
+  editing one: a release or format change is reported once, as
+  `semantic_format_changed`, and definitions are not compared by content until
+  `maintain snapshot` baselines the new format. Added and removed definitions
+  are still reported. A move from another vendor is `semantic_vendor_changed`,
+  and no definition is compared across it.
+- **Grain.** Every declared key, from `primary_key` (a composite one measured
+  whole) and `unique`, is checked for uniqueness on the model's table, and a
+  failure is `declared_grain_not_unique`. Each join's declared `cardinality` is
+  measured too: `many_to_one` says the target's join columns are unique,
+  `one_to_one` says both sides' are, and a side that is not is
+  `join_cardinality_exceeded`, because every row on the other side can then
+  match several and anything aggregated across the join is counted more than
+  once. A `one_to_many` join is read the other way round. A join declaring no
+  cardinality is named in `warnings` as unchecked, never passed silently.
+- **Schema.** SLayer's `validate-models` compares each `sql_table` model with the
+  live schema through SLayer's own datasource connection, which carries
+  credentials dex does not read. dex runs the same comparison instead, through
+  SLayer's pure entry points (`diff_sql_table_model`, `compute_datasource_drops`),
+  on the columns and types dex's own metadata reports. A declared column the
+  table no longer has is `declared_column_missing`; one whose declared type is in
+  another of SLayer's buckets (number, string, boolean, temporal) than the
+  warehouse's is `declared_type_conflict`; a model whose table was in the
+  baseline and is gone is `declared_relation_missing`; and a model that loses a
+  join, measure or filter only because another drop cascaded into it is
+  `declared_dependency_dropped`. Each finding carries the model's whole removal
+  as SLayer computes it. A warehouse type dex cannot place in a bucket is never
+  reported as a conflict, a column matches case-insensitively when exactly one
+  does, and a model backed by `sql` or `source_queries` is named as not compared,
+  because SLayer checks those by running the query.
+- **Reconcile.** `maintain reconcile` turns those removals into edits of the
+  model files and stores them as a plan of their own, through the `semantic
+  slayer update` route and its validation, reported as `data.semantic_plan_id`
+  beside any dbt plan. Each removed entry is cut out by the lines it occupies, so
+  comments and formatting survive and the diff shows the removal alone; an entry
+  that cannot be cut that way (a flow-style list) leaves the proposal advisory
+  rather than reformatting the file. A model whose table is gone is never
+  removed: deleting the file is advisory, because a vanished table is as often a
+  rename as a retirement. A type conflict is proposed as SLayer's removal, with
+  the alternative named: if the warehouse type is intended, change the declared
+  type instead.
+
+### Authoring SLayer models
+
+The repository's SLayer model files are the source of truth, and dex writes them
+through plan and apply like every other edit. They are not generated from dbt with
+`slayer import-dbt`, which is one-way and turns dbt references into bare model
+names, losing custom schemas and aliases.
+
+Use `semantic slayer define|update|plan <intent> --edits-file <path|->`. Each edit
+is one whole model file, and `kind` may be omitted because the command implies
+`semantic_document`. A path is written exactly as `semantic.slayer.models` lists
+it, relative to `semantic.slayer.base_dir`:
+
+```json
+{"edits": [{"path": "models/warehouse/orders.yaml", "content": "..."}]}
+```
+
+The write surface is that list and nothing else. A datasource file (it carries
+connection credentials), `priority.yaml`, SLayer's search index and memories, a
+model file nobody configured, and a path outside the storage root are refused, as
+is a configured model symlinked anywhere but the storage root's `models/`. To add
+a model, add its path to `semantic.slayer.models` first (`dex config set`), then
+`define` it: a configured file may be absent until then.
+
+dex overlays the edits on the other configured models and validates the whole set
+they would leave before storing anything, with no warehouse connection and without
+opening SLayer's storage:
+
+- every model parses as the pinned release's current `SlayerModel`. An authored
+  file must carry the current `version`; a lower one is refused, naming the
+  version dex expects, because SLayer would rewrite the file on its next save;
+- names are unique, and each file sits at `models/<data_source>/<name>.yaml`
+  agreeing with the model inside;
+- every join's `target_model` is in the set, and every join pair names a column
+  both sides have;
+- an edited model's `default_time_dimension` names one of its columns (the reader
+  only warns about this; a model dex is about to write is held to more);
+- an edited model carries no key the pinned release does not declare at its
+  level. The reader only warns about one too, and the refusal names the file,
+  the element (`measures['revenue'].agg`) and the release, since SLayer would
+  ignore the key and dex would be writing one that does nothing;
+- an edited model's saved measures parse with SLayer's own formula parser, with
+  sibling measures available by bare name. SLayer checks scalar calls inside a
+  formula with sqlglot, so without the `[sql]` extra this check is skipped and a
+  note says so.
+
+Every refusal names the file and the element. `define` refuses a model that
+exists, `update` one that does not, and `plan` reports both under `defined` and
+`updated`. These commands remove no model and no file.
+
+`transform apply` re-hashes every target, validates the set again, and writes the
+authored bytes exactly (comments, key order and line endings included), all files
+or none. **dex owns the configured model files.** SLayer's own tooling rewrites
+model files it saves (`slayer serve`, `slayer ingest`,
+`slayer validate-models --persist-cardinality`, a storage migration on open), and
+a file rewritten after planning no longer matches the plan's pin. The apply
+refuses, and the conflict says SLayer's storage is the likely author and that the
+plan has to be remade with `semantic slayer plan`; `--confirm` overwrites the
+change deliberately instead. Keep SLayer tooling from writing the files dex owns.
+
+Not in this release: propagating a rename or a removal, and grounding authored
+models against the warehouse or the exploration cache. Both stay dbt-only.
 
 ## Internal architecture
 

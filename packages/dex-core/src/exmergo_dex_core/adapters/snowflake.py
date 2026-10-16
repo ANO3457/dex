@@ -6,14 +6,19 @@ runtime. So inventory, ``connect test``, and all schema facts stay free, and
 the guarded quantity is warehouse-seconds, not bytes.
 
 Snowflake has no dry-run, so estimates are a documented heuristic (table bytes
-over a conservative per-size scan rate, floored at the 60-second resume
-minimum when the warehouse is suspended) and every envelope that carries one
+over a conservative per-size scan rate) and every envelope that carries one
 says so. The server-side backstop is a per-statement
 ``STATEMENT_TIMEOUT_IN_SECONDS`` set to the remaining budget before each billed
 statement, so a wrong estimate cannot overrun the ceiling: Snowflake kills the
-statement. Actual spend is wall-clock seconds per statement (which includes
-any resume time this statement caused, the honest attribution), recorded to
-the ledger as ``billed_seconds``.
+statement.
+
+Snowflake bills warehouse uptime rather than statement time: at least 60
+seconds per resume, then per second until the warehouse has idled for its
+AUTO_SUSPEND. Actual spend is therefore two parts, both recorded to the ledger
+as ``billed_seconds``: wall-clock seconds per statement, and, once the command's
+last statement is done, the uptime no statement reported (the resume minimum,
+the time between statements, the idle tail). ``_WarehouseUptime`` models the
+second part, and the estimate quotes the same model, so the two agree.
 
 Read-only is enforced in depth: the SELECT-only guard in the snowflake dialect
 on every data statement through one execution door, an adapter that issues no
@@ -25,6 +30,7 @@ spent on.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -85,8 +91,7 @@ _BARE_SCOPE_SEARCH_LIMIT = 20
 _COLUMN_BATCH = 50
 
 # Snowflake bills at least 60 seconds each time a suspended warehouse resumes,
-# regardless of query duration. Estimates against a suspended warehouse carry
-# this floor once so the quoted number is what the account will actually see.
+# regardless of query duration: the floor on a resumed command's uptime.
 _RESUME_MINIMUM_SECONDS = 60.0
 
 # The estimate heuristic: a deliberately conservative X-Small scan rate.
@@ -152,6 +157,270 @@ class SnowflakeConnectionError(ConnectorError):
     resolved. The message always names the fix, never a credential."""
 
 
+def _live_state(row: dict) -> dict:
+    """What SHOW WAREHOUSES says about the pinned warehouse that can change
+    while dex works: its state, its load, when it last resumed, and how long it
+    idles before suspending (``None`` when AUTO_SUSPEND is 0 or NULL, which
+    Snowflake reads as never)."""
+
+    def number(key: str) -> int:
+        try:
+            return int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    resumed_on = row.get("resumed_on")
+    return {
+        "name": str(row.get("name", "")),
+        "state": str(row.get("state", "unknown")).upper(),
+        "running": number("running"),
+        "queued": number("queued"),
+        "resumed_on": None if resumed_on in (None, "") else str(resumed_on),
+        "auto_suspend": number("auto_suspend") or None,
+    }
+
+
+class _WarehouseUptime:
+    """What one command costs the pinned warehouse beyond its statements' own
+    time, from the rules Snowflake bills by.
+
+    Snowflake bills a warehouse for being up, not for running statements: at
+    least 60 seconds every time a suspended warehouse resumes, then per second
+    until it has idled for AUTO_SUSPEND. Statement time alone under-reports
+    exactly the small commands an agent runs most: a three-second build on a
+    warehouse that suspends after 60 idle seconds bills over a minute. So the
+    command is also charged:
+
+    - the time between its own statements, while the warehouse stayed up;
+    - a 60-second floor on that uptime when it found the warehouse suspended;
+    - the AUTO_SUSPEND tail when it leaves the warehouse idle, which a free SHOW
+      WAREHOUSES says once its last statement is done. The last user pays: two
+      commands within one tail of each other both claim it, an over-count in
+      the one direction a cost guard may round.
+
+    The estimate quotes the same model before anything runs (``quote``) and the
+    statement timeout holds back what is still owed (``pending``), so estimate,
+    cap and settlement agree. It is a model, not a meter: Snowflake's suspend
+    check runs about every 30 seconds, so a tail can run up to that much longer
+    than AUTO_SUSPEND (most likely when the setting is not a multiple of 30), and
+    SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY stays the authority.
+    It cannot be settled from that view instead: it is hourly, hours behind, and
+    readable only with ACCOUNTADMIN or MONITOR USAGE.
+
+    One per cost gate, so one per command: a held engine keeps its adapter and
+    swaps the gate, and a resume the first command paid for must not be
+    remembered by the second. ``read_state`` returns a fresh :func:`_live_state`
+    (functional DI), ``clock`` is the adapter's, and statements dex did not run
+    itself (dbt's) are reported through :meth:`observe` by whoever ran them.
+    """
+
+    def __init__(self, *, read_state: Callable[[], dict], clock: Callable[[], float]):
+        self._read_state = read_state
+        self._clock = clock
+        self._before: dict | None = None
+        self._before_read = False
+        self._first_start: float | None = None
+        self._last_end: float | None = None
+        self._recorded = 0.0
+        self._quoted: float | None = None
+        self._charged = False
+        self._settled = False
+
+    def seed(self, state: dict) -> None:
+        """Take the warehouse as this command found it from a SHOW that already
+        ran, rather than asking again."""
+
+        if not self._before_read:
+            self._before, self._before_read = state, True
+
+    @property
+    def before(self) -> dict | None:
+        """The warehouse as this command found it, read once. ``None`` when it
+        could not be read, which the model prices as suspended."""
+
+        if not self._before_read:
+            self._before_read = True
+            with contextlib.suppress(Exception):
+                self._before = self._read_state()
+        return self._before
+
+    def observe(self, seconds: float, *, span: float | None = None) -> None:
+        """Count statement time that just finished on the warehouse, already
+        ledgered by whoever ran it, as an interval ending now.
+
+        ``span`` is the wall time those statements were spread over when it is
+        longer than their sum, as with a dbt run: its nodes sit between parsing,
+        compiling and dbt's own round trips, and the warehouse is up throughout.
+        Zero seconds count for nothing, because a dbt run that executed no node
+        never woke the warehouse.
+        """
+
+        if seconds <= 0:
+            return
+        end = self._clock()
+        start = end - max(float(span or 0.0), seconds)
+        self._first_start = (
+            start if self._first_start is None else min(self._first_start, start)
+        )
+        self._last_end = end if self._last_end is None else max(self._last_end, end)
+        self._recorded += seconds
+
+    def pending(self) -> float:
+        """What the warehouse will bill this command beyond the statement time
+        already recorded, if the command leaves it idle: what an estimate quotes
+        before anything runs, and what the statement timeout holds back. Zero
+        once settled."""
+
+        if self._settled:
+            return 0.0
+        before = self.before
+        tail = float((before or {}).get("auto_suspend") or 0)
+        return self._owed(tail=tail, resumed=self._found_suspended())
+
+    def quote(self) -> float:
+        """The overhead an estimate carries, once per command. A command that
+        prices many statements still resumes the warehouse at most once and
+        leaves one tail, so a sum of per-statement estimates must not multiply
+        it in (verified live: mutation coverage once priced 39 statements at
+        2,379 seconds, of which 2,340 were resume floors)."""
+
+        if self._quoted is not None:
+            return 0.0
+        self._quoted = self.pending()
+        return self._quoted
+
+    def charge_share(self) -> float:
+        """The same overhead, charged against the gate once on the confirmed
+        run, by whichever billed statement goes first."""
+
+        if self._charged:
+            return 0.0
+        self._charged = True
+        return self.pending()
+
+    def estimate_note(self) -> str | None:
+        """What the quoted overhead is, for the handshake beside the number."""
+
+        before = self.before
+        if before is None:
+            return (
+                "the warehouse's state could not be read, so the estimate "
+                f"assumes it is suspended and carries the {_RESUME_MINIMUM_SECONDS:g}"
+                "-second resume minimum"
+            )
+        name, auto_suspend = before["name"] or "the warehouse", before["auto_suspend"]
+        if auto_suspend is None:
+            return (
+                f"AUTO_SUSPEND is off on {name}: it bills until it is suspended by "
+                "hand, and no estimate can bound that idle time"
+            )
+        if not self._quoted:
+            return None
+        if self._found_suspended():
+            return (
+                f"includes {self._quoted:g} warehouse-seconds no statement will "
+                f"report: {name} is suspended, so the first statement resumes it "
+                f"(Snowflake bills at least {_RESUME_MINIMUM_SECONDS:g} seconds per "
+                f"resume), and it then idles {auto_suspend} seconds (AUTO_SUSPEND) "
+                "before suspending"
+            )
+        return (
+            f"includes {self._quoted:g} warehouse-seconds no statement will report: "
+            f"{name} idles {auto_suspend} seconds (AUTO_SUSPEND) after the last "
+            "statement before it suspends"
+        )
+
+    def settle(self) -> tuple[float, list[str]]:
+        """Book the command's overhead once its statements are done.
+
+        The cost gate's ``settle_overhead``, and called directly by a command
+        that runs dbt, so the overhead can join dbt's own settlement row and the
+        command keeps one estimate-to-billed ratio. Idempotent: a second call
+        returns nothing, so whichever runs first books it.
+        """
+
+        if self._settled:
+            return 0.0, []
+        self._settled = True
+        if self._first_start is None:
+            return 0.0, []
+        before = self.before
+        try:
+            after: dict | None = self._read_state()
+        except Exception:
+            after = None
+        if (
+            before is not None
+            and after is not None
+            and before["state"] != "STARTED"
+            and after["state"] != "STARTED"
+            and before["resumed_on"] is not None
+            and before["resumed_on"] == after["resumed_on"]
+        ):
+            # Answered without waking it: a result-cache hit, a count served
+            # from metadata, a statement refused at compile.
+            return 0.0, []
+        facts = after or before or {}
+        name, auto_suspend = (
+            facts.get("name") or "the warehouse",
+            facts.get("auto_suspend"),
+        )
+        # Whatever the state reads: SHOW WAREHOUSES can still say SUSPENDED
+        # while it resumes for another session's query, which is then the one
+        # leaving it idle.
+        busy = after is not None and (after["running"] > 0 or after["queued"] > 0)
+        resumed = self._found_suspended()
+        tail = 0.0 if busy or auto_suspend is None else float(auto_suspend)
+        overhead = self._owed(tail=tail, resumed=resumed)
+        start = (
+            f"This command resumed {name}, which bills at least "
+            f"{_RESUME_MINIMUM_SECONDS:g} seconds per resume"
+            if resumed
+            else f"{name} was already running"
+        )
+        if auto_suspend is None:
+            end = (
+                "AUTO_SUSPEND is off, so it bills until it is suspended by hand; "
+                "that idle time is not in this figure, which is a lower bound"
+            )
+        elif busy:
+            end = (
+                "Other queries were running on it when this command finished, so "
+                "no idle tail is charged"
+            )
+        elif after is None:
+            end = (
+                "Its state afterwards could not be read, so its "
+                f"{auto_suspend}-second AUTO_SUSPEND tail is charged as if it were "
+                "left idle"
+            )
+        else:
+            end = (
+                f"It was left idle, so its {auto_suspend}-second AUTO_SUSPEND tail "
+                "is charged"
+            )
+        return overhead, [
+            f"spend includes {overhead:.1f} warehouse-seconds no statement "
+            "reported, because Snowflake bills uptime rather than statement time. "
+            f"{start}. {end}. Modeled from Snowflake's billing rules, so "
+            "approximate (its idle check runs about every 30 seconds); "
+            "SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY is the authority"
+        ]
+
+    def _found_suspended(self) -> bool:
+        before = self.before
+        return before is None or before["state"] != "STARTED"
+
+    def _owed(self, *, tail: float, resumed: bool) -> float:
+        span = 0.0
+        if self._first_start is not None and self._last_end is not None:
+            span = self._last_end - self._first_start
+        uptime = span + tail
+        if resumed:
+            uptime = max(uptime, _RESUME_MINIMUM_SECONDS)
+        return max(uptime - self._recorded, 0.0)
+
+
 class SnowflakeAdapter:
     """Holds one Snowflake connection plus the cost gate for one command.
 
@@ -205,10 +474,8 @@ class SnowflakeAdapter:
         self.forget_metadata()
         self._warehouse_info: dict | None = None
         self._notes: dict[str, list[str]] = {}
-        # The 60s resume minimum is charged once per command, by whichever
-        # billed statement runs first, and quoted into estimates once too.
-        self._resume_floor_pending: bool | None = None
-        self._resume_floor_quoted = False
+        self._uptime: _WarehouseUptime | None = None
+        self._uptime_gate: CostGate | None = None
         self._session_prepared = False
 
     # --- capabilities (free) ---------------------------------------------------
@@ -237,14 +504,22 @@ class SnowflakeAdapter:
         }
         if self.target.warehouse:
             info = self._warehouse()
+            state = self.warehouse_uptime.before or {}
             budget["warehouse"] = {
                 "name": info["name"],
                 "size": info["size"],
                 "credits_per_hour": info["credits_per_hour"],
-                "state": info["state"],
+                "state": state.get("state", "unknown"),
+                "auto_suspend_seconds": state.get("auto_suspend"),
             }
             if cost.ceiling is not None:
                 budget["ceiling_credits"] = self._to_credits(cost.ceiling)
+            if state and state.get("auto_suspend") is None:
+                caps["warnings"] = [
+                    f"AUTO_SUSPEND is off on {info['name']}: it bills until it is "
+                    "suspended by hand, and dex can neither bound nor attribute that "
+                    "idle time; set AUTO_SUSPEND (60 seconds suits short commands)"
+                ]
         else:
             caps["warnings"] = [
                 "no snowflake.warehouse pinned in .dex/config.yml; metadata "
@@ -266,8 +541,9 @@ class SnowflakeAdapter:
         a table's row count, is stale by then.
 
         What survives is what this command has paid for or what dbt cannot
-        change: the session, the warehouse facts, the resume charge, and the
-        visible databases (dbt creates schemas, never a database).
+        change: the session, the warehouse facts, the uptime this command owes
+        the warehouse, and the visible databases (dbt creates schemas, never a
+        database).
         """
 
         self._objects: dict[str, dict] = {}
@@ -610,13 +886,24 @@ class SnowflakeAdapter:
     # --- the warehouse and the credit translation -------------------------------
 
     def _warehouse(self) -> dict:
-        """The pinned warehouse's facts (size, state, credit rate), fetched
-        free via SHOW WAREHOUSES and cached per command. Refuses when the
-        config pins nothing or the pin does not resolve: dex never spends on a
-        warehouse the config does not name."""
+        """The pinned warehouse's facts that hold still (size, credit rate),
+        fetched free via SHOW WAREHOUSES and cached for the adapter's life; what
+        moves (state, load, auto-suspend) belongs to :attr:`warehouse_uptime`,
+        which this seeds from the same SHOW. Refuses when the config pins
+        nothing or the pin does not resolve: dex never spends on a warehouse
+        the config does not name."""
 
-        if self._warehouse_info is not None:
-            return self._warehouse_info
+        if self._warehouse_info is None:
+            state = self._read_warehouse()  # refuses when nothing is pinned
+            self.warehouse_uptime.seed(state)
+        return self._warehouse_info
+
+    def _read_warehouse(self) -> dict:
+        """One free SHOW WAREHOUSES for the pinned warehouse: caches the facts
+        that hold still the first time, and returns the live state. The uptime
+        model's ``read_state``, so its before and after readings cost one SHOW
+        each and the first one also serves :meth:`_warehouse`."""
+
         pinned = self.target.warehouse
         if not pinned:
             raise SnowflakeConnectionError(
@@ -632,20 +919,40 @@ class SnowflakeAdapter:
                 "snowflake.warehouse in .dex/config.yml"
             )
         row = rows[0]
-        size_token = str(row.get("size", "")).upper().replace("-", "").replace(" ", "")
-        credits = _CREDITS_PER_HOUR.get(size_token)
-        generation = str(row.get("resource_constraint") or "")
-        gen2 = "GEN_2" in generation.upper()
-        if credits is not None and gen2:
-            credits *= _GEN2_MULTIPLIER
-        self._warehouse_info = {
-            "name": str(row.get("name", pinned)),
-            "size": str(row.get("size", "unknown")),
-            "state": str(row.get("state", "unknown")).upper(),
-            "credits_per_hour": credits,
-            "gen2": gen2,
-        }
-        return self._warehouse_info
+        if self._warehouse_info is None:
+            size_token = (
+                str(row.get("size", "")).upper().replace("-", "").replace(" ", "")
+            )
+            credits = _CREDITS_PER_HOUR.get(size_token)
+            generation = str(row.get("resource_constraint") or "")
+            gen2 = "GEN_2" in generation.upper()
+            if credits is not None and gen2:
+                credits *= _GEN2_MULTIPLIER
+            self._warehouse_info = {
+                "name": str(row.get("name", pinned)),
+                "size": str(row.get("size", "unknown")),
+                "credits_per_hour": credits,
+                "gen2": gen2,
+            }
+        return _live_state(row)
+
+    @property
+    def warehouse_uptime(self) -> _WarehouseUptime | None:
+        """This command's uptime model, or ``None`` when no warehouse is pinned
+        and nothing can run. Rebuilt whenever the cost gate is, and installed on
+        it, so the gate books what the model owes when the command settles.
+        A command that runs dbt reports dbt's statements to it through
+        :meth:`_WarehouseUptime.observe`."""
+
+        if not self.target.warehouse:
+            return None
+        if self._uptime is None or self._uptime_gate is not self.cost_gate:
+            self._uptime = _WarehouseUptime(
+                read_state=self._read_warehouse, clock=self._clock
+            )
+            self._uptime_gate = self.cost_gate
+            self.cost_gate.settle_overhead = self._uptime.settle
+        return self._uptime
 
     def _to_credits(self, seconds: float) -> float | None:
         info = self._warehouse_info or (
@@ -672,6 +979,10 @@ class SnowflakeAdapter:
             ),
             "notes": [_ESTIMATE_QUALITY_NOTE],
         }
+        uptime = self.warehouse_uptime
+        uptime_note = uptime.estimate_note() if uptime is not None else None
+        if uptime_note:
+            data["notes"].append(uptime_note)
         if per_table:
             data["per_table_seconds"] = per_table
         credits = self._to_credits(estimate)
@@ -691,13 +1002,25 @@ class SnowflakeAdapter:
     def spend_display(self) -> dict:
         """Credit translation of actual seconds, merged into ``data.spend``."""
 
-        summary: dict[str, object] = {}
-        credits = self._to_credits(self.cost_gate.spend_summary()["seconds_billed"])
+        return self.compute_spend_translation(
+            self.cost_gate.spend_summary()["seconds_billed"]
+        )
+
+    def compute_spend_translation(self, seconds: float) -> dict[str, float]:
+        """Translate settled warehouse-seconds into credits (and dollars when
+        ``snowflake.credit_price_usd`` is set), for a command the gate settled
+        and for a dbt run alike, so a build reports the unit Snowflake bills
+        in exactly as an explore scan does."""
+
+        translated: dict[str, float] = {}
+        credits = self._to_credits(seconds)
         if credits is not None:
-            summary["credits_billed"] = credits
+            translated["credits_billed"] = credits
             if self.target.credit_price_usd is not None:
-                summary["usd_billed"] = round(credits * self.target.credit_price_usd, 4)
-        return summary
+                translated["usd_billed"] = round(
+                    credits * self.target.credit_price_usd, 4
+                )
+        return translated
 
     # --- estimation (free; feeds the confirm handshake) -------------------------
 
@@ -706,8 +1029,9 @@ class SnowflakeAdapter:
     ) -> tuple[float, dict[str, float]]:
         """The heuristic warehouse-seconds estimate for profiling: per table,
         its bytes over the size-scaled scan rate times the number of aggregate
-        batches; plus the 60-second resume minimum once when the warehouse is
-        currently suspended. Free: everything comes from SHOW metadata.
+        batches; plus, once per command, the uptime no statement will report
+        (the resume minimum and the idle tail). Free: everything comes from
+        SHOW metadata.
 
         Blob-type columns are excluded from the batch count the same way
         ``explore.profile.profile`` excludes them from the scan itself
@@ -727,16 +1051,18 @@ class SnowflakeAdapter:
             ]
             batches = max((len(scan_columns) + _COLUMN_BATCH - 1) // _COLUMN_BATCH, 1)
             per_table[identifier] = batches * self._scan_seconds(meta.byte_size)
-        total = sum(per_table.values()) + self._estimate_floor()
+        uptime = self.warehouse_uptime
+        total = sum(per_table.values()) + (uptime.quote() if uptime else 0.0)
         return total, per_table
 
     def query_estimate(self, sql: str) -> float:
         """The heuristic estimate for one firewall-approved query: the summed
-        bytes of every referenced table over the scan rate, plus the resume
-        minimum once per command when the warehouse is suspended."""
+        bytes of every referenced table over the scan rate, plus, once per
+        command, the uptime no statement will report."""
 
         checked = assert_select_only(sql, dialect=self.dialect)
-        return self._statement_estimate(checked) + self._estimate_floor()
+        uptime = self.warehouse_uptime
+        return self._statement_estimate(checked) + (uptime.quote() if uptime else 0.0)
 
     def _statement_estimate(self, sql: str) -> float:
         total_bytes = 0
@@ -765,30 +1091,6 @@ class SnowflakeAdapter:
                 size_factor /= _GEN2_MULTIPLIER
         rate = _XSMALL_SCAN_BYTES_PER_SECOND * max(size_factor, 1.0)
         return max(byte_size / rate, _MIN_STATEMENT_SECONDS)
-
-    def _estimate_floor(self) -> float:
-        """The resume minimum's share of an estimate: included exactly once per
-        command. A command that prices many statements resumes the warehouse at
-        most once, so a sum of per-statement estimates (mutation coverage prices
-        every test of every mutant) must not multiply the floor into it
-        (verified live: a 39-statement batch quoted 2,379 seconds, of which
-        2,340 were floors)."""
-
-        if self._resume_floor() <= 0 or self._resume_floor_quoted:
-            return 0.0
-        self._resume_floor_quoted = True
-        return _RESUME_MINIMUM_SECONDS
-
-    def _resume_floor(self) -> float:
-        """60 once when the pinned warehouse is suspended (each resume bills a
-        60-second minimum), else 0. Cached: one command resumes at most once."""
-
-        if self._resume_floor_pending is None:
-            if not self.target.warehouse:
-                self._resume_floor_pending = False
-            else:
-                self._resume_floor_pending = self._warehouse()["state"] != "STARTED"
-        return _RESUME_MINIMUM_SECONDS if self._resume_floor_pending else 0.0
 
     def _referenced_tables(self, sql: str) -> set[str]:
         try:
@@ -1143,7 +1445,7 @@ class SnowflakeAdapter:
 
         rows, labels, types = self._execute_query(
             sql,
-            estimate=self._statement_estimate(sql) + self._resume_floor(),
+            estimate=self._statement_estimate(sql),
             timeout_seconds=timeout_seconds,
             max_rows=max_rows,
         )
@@ -1158,15 +1460,14 @@ class SnowflakeAdapter:
         """SELECT-only guard, heuristic charge, then the timeout-capped run."""
 
         assert_select_only(sql, dialect=self.dialect)
-        self.cost_gate.charge(estimate + self._consume_resume_floor())
+        self.cost_gate.charge(estimate + self._uptime_share())
         return self._run(sql)
 
     def _execute_query(
         self, sql: str, *, estimate: float, timeout_seconds: float, max_rows: int
     ) -> tuple[list, list[str], list[str]]:
         assert_select_only(sql, dialect=self.dialect)
-        self.cost_gate.charge(estimate)
-        self._consume_resume_floor()
+        self.cost_gate.charge(estimate + self._uptime_share())
         cursor = self._billed_cursor()
         started = self._clock()
         try:
@@ -1199,10 +1500,13 @@ class SnowflakeAdapter:
     def _billed_cursor(self):
         """A cursor prepared for spend: warehouse pinned (strict), query tag
         set, and the server-side statement timeout wound down to what remains
-        of the budget, so even a wrong heuristic cannot overrun the ceiling."""
+        of the budget once the uptime this command will still owe is held back,
+        so even a wrong heuristic cannot overrun the ceiling."""
 
         info = self._warehouse()  # refuses when config pins no warehouse
-        remaining = self.cost_gate.statement_cap(unit="warehouse-second")
+        remaining = self.cost_gate.statement_cap(
+            unit="warehouse-second", reserve=self.warehouse_uptime.pending()
+        )
         cursor = self._conn.cursor()
         if not self._session_prepared:
             # dex-built session statements, not agent SQL: the warehouse
@@ -1224,14 +1528,11 @@ class SnowflakeAdapter:
             job_id=getattr(cursor, "sfqid", None),
             statement=sql,
         )
+        self.warehouse_uptime.observe(elapsed)
 
-    def _consume_resume_floor(self) -> float:
-        """The first billed statement of a command carries the 60-second
-        resume charge when the warehouse was suspended; later ones do not."""
-
-        floor = self._resume_floor()
-        self._resume_floor_pending = False
-        return floor
+    def _uptime_share(self) -> float:
+        uptime = self.warehouse_uptime
+        return uptime.charge_share() if uptime is not None else 0.0
 
     def _translate(self, exc: Exception, timeout_seconds: float | None) -> Exception:
         message = str(exc)

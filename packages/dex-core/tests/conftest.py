@@ -119,8 +119,9 @@ def fake_sf_connection():
     Requires the real snowflake-connector-python library (the [snowflake]
     extra) for its error types; skipped when absent, but CI and the release
     gate install the extra, so the Snowflake safety families run everywhere
-    that matters. The DEX_WH warehouse starts SUSPENDED so resume-minimum
-    behavior is on by default; tests that want a warm warehouse flip its state.
+    that matters. The DEX_WH warehouse starts SUSPENDED with a 60-second
+    AUTO_SUSPEND, so a billed command resumes it and owes the resume minimum and
+    the idle tail by default; tests that want a warm warehouse flip its state.
     """
 
     pytest.importorskip("snowflake.connector")

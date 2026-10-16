@@ -230,3 +230,25 @@ def test_a_statement_that_cannot_be_parsed_is_refused_rather_than_passed():
 def test_the_allowlist_config_is_empty_by_default():
     assert GuardConfig().approved_functions == []
     assert DexConfig().guards.approved_functions == []
+
+
+def test_snowflake_names_the_uptime_it_bills_outside_any_statement(
+    dbt_project_dir: Path,
+):
+    """A statement timeout bounds statements, and Snowflake bills the warehouse
+    for being up: the resume minimum and the idle tail are spend no
+    statement-level control can stop."""
+
+    _profile(
+        dbt_project_dir,
+        "snowflake",
+        {"account": "a", "user": "u", "database": "d", "schema": "s", "warehouse": "w"},
+    )
+    report = guarded_execution_preflight(
+        adapter_declarations("snowflake", Paradigm.COMPUTE_TIME),
+        project_dir=dbt_project_dir,
+    )
+    assert any(
+        "60-second minimum each time it resumes" in u and "AUTO_SUSPEND" in u
+        for u in report.unsupported
+    )
