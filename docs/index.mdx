@@ -12,24 +12,24 @@ Every rule that makes this safe lives in the engine, not in a prompt. dex never
 writes to your data, never pulls personal data into the agent's context, never
 spends on a metered warehouse before quoting the cost, never changes your project
 except as a diff you review, and never builds anywhere but a dev target. The
-[cost controls](/guardrails/cost-controls) and the [PII policy](/guardrails/pii-policy)
+[cost controls](/dex/guardrails/cost-controls) and the [PII policy](/dex/guardrails/pii-policy)
 describe two of those rules in full.
 
 ## Explore, Transform, Maintain
 
 - **Explore** ranks what matters in a warehouse, profiles it from aggregates, flags
   personal data, and infers how tables join. See the
-  [exploration methodology](/concepts/methodology).
+  [exploration methodology](/dex/concepts/methodology).
 - **Transform** writes and refactors dbt models, tests, and semantic layers as
   plans you review before anything is applied. See
-  [what dex reads and writes in a dbt project](/concepts/dbt-project).
+  [what dex reads and writes in a dbt project](/dex/concepts/dbt-project).
 - **Maintain** compares the warehouse and the project against a known-good
   snapshot and proposes the edits that reconcile any drift.
 
 ## Where to go next
 
-- The [CLI reference](/cli/overview) lists every command and flag.
-- The connector pages, starting with [DuckDB](/connectors/duckdb), cover
+- The [CLI reference](/dex/cli/overview) lists every command and flag.
+- The connector pages, starting with [DuckDB](/dex/connectors/duckdb), cover
   credentials, cost, and read-only enforcement for each warehouse.
-- The [Apache Ossie tutorial](/guides/ossie-semantic-layer) walks a native
+- The [Apache Ossie tutorial](/dex/guides/ossie-semantic-layer) walks a native
   semantic layer through every command on a local warehouse.

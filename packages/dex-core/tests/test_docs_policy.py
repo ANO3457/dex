@@ -281,9 +281,9 @@ def test_relative_links_between_documents_resolve():
 
     broken = []
     for path, text in versioned_markdown().items():
-        # Site pages link by route (`/guardrails/cost-controls`), not by file, and
-        # `scripts/build_docs_site.py` resolves every one of them against the
-        # assembled site. `docs/skill.md` is plain markdown and stays checked here.
+        # Site pages link by route (`/dex/guardrails/cost-controls`), not by file,
+        # and `scripts/build_docs_site.py` resolves every one of them against the
+        # assembled site.
         if path.startswith("docs/") and path.endswith(".mdx"):
             continue
         base = (ROOT / path).parent

@@ -4,9 +4,9 @@ name: Release
 # PyPI publish via Trusted Publishing (OIDC, no stored tokens) and the anti-squat
 # name stubs, then the documentation site. The wrapper pins and the changelog
 # are written before tagging (scripts/prepare_release.sh), so this workflow never
-# writes to tagged history; it verifies the tagged commit is self-consistent
-# before it publishes, and its one write is the generated docs-site branch, after
-# publish.
+# writes back to this repository; it verifies the tagged commit is
+# self-consistent before it publishes. Its one write outside PyPI is the Dex
+# section of the documentation site, committed to exmergo/docs after publish.
 on:
   push:
     tags: ["v*.*.*"]
@@ -105,12 +105,14 @@ jobs:
 
   # The documentation site, published from the tag only after PyPI accepted the
   # release, so the docs always describe what `pip install` gives you. Build and
-  # validation live in docs-site.yml, shared with pull requests; its deploy job is
-  # this workflow's only write, and it writes only the generated docs-site branch.
+  # validation live in docs-site.yml, shared with pull requests. Its deploy job
+  # commits the dex/ folder to exmergo/docs with a token from the organization's
+  # docs publisher app (held by the docs-site environment), so this repository
+  # is only read.
   docs-site:
     needs: publish
     permissions:
-      contents: write
+      contents: read
     uses: ./.github/workflows/docs-site.yml
     with:
       ref: ${{ github.ref_name }}
