@@ -1,0 +1,51 @@
+---
+title: dex CLI overview
+sidebarTitle: Overview
+description: 'Every dex CLI command at a glance: global options, connection flags shared by all subcommands, and where to start, generated from the released argparse tree.'
+---
+
+Explore an unfamiliar warehouse, transform it with reviewable dbt edits, and maintain it as the world drifts.
+
+## Getting oriented
+
+Point it at data with `--connector`/`--path`, or commit a connector: block to .dex/config.yml (found by walking up from the working directory).
+
+DBT_PROFILES_DIR only locates dbt profiles.yml for dbt operations and the last-resort credential fallback; it does not select dex's connector or override `--connector`/`--path` or .dex/config.yml.
+
+No warehouse yet: `dex demo` seeds a local one, no credentials needed. Have one already: `dex explore map` is the command to run first. It ranks what matters, profiles it, and infers how the tables join.
+
+`dex <group> --help` lists a group's own subcommands.
+
+## Command groups
+
+| Group | What it does |
+| --- | --- |
+| [`dex connect`](/cli/connect) | check a connector's own credentials and capabilities |
+| [`dex explore`](/cli/explore) | make sense of a warehouse: rank objects, profile columns, infer joins |
+| [`dex transform`](/cli/transform) | author and refactor dbt models, tests, and the semantic layer |
+| [`dex semantic`](/cli/semantic) | define dbt or native semantic layers as reviewable diffs |
+| [`dex maintain`](/cli/maintain) | detect drift against the last snapshot and propose the fix |
+| [`dex viz`](/cli/viz) | preview the semantic layer (not yet implemented) |
+| [`dex config`](/cli/config) | read, check and change .dex/config.yml, as reviewable diffs |
+| [`dex demo`](/cli/demo) | create a seeded local DuckDB warehouse to try dex against (no credentials, no network) |
+
+## Global options
+
+Every command accepts these. The last column says where on the command line each one may go.
+
+| Option | Description | Position |
+| --- | --- | --- |
+| `--connector NAME` | warehouse to use, overriding connector: in .dex/config.yml | before the group or after the subcommand |
+| `--path FILE` | DuckDB database file to read | before the group or after the subcommand |
+| `--scope NAMESPACE` | narrow the committed source allowlist to this namespace; repeatable | before the group or after the subcommand |
+| `--project PROJECT` | BigQuery project (the older spelling of `--scope`) | before the group or after the subcommand |
+| `--dataset DATASET` | BigQuery dataset, repeatable (the older spelling of `--scope`) | before the group or after the subcommand |
+| `--repo-root DIR` | directory to resolve .dex/config.yml from, walking up (default: .) | before the group or after the subcommand |
+| `--confirm` | run a billed command after its cost was quoted | before the group or after the subcommand |
+| `--budget AMOUNT` | spend this command may use, in the connector's cost unit | before the group or after the subcommand |
+| `--session-ceiling AMOUNT` | answer the one-time ask: commit this daily spend ceiling | before the group or after the subcommand |
+| `--no-session-ceiling` | answer the one-time ask: record that no ceiling applies | before the group or after the subcommand |
+| `--cache-backend NAME` | where .dex/ state is kept for this run; must precede the group | before the group only |
+| `--project-format NAME` | transformation project format for this run; must precede the group | before the group only |
+
+Source: [`packages/dex-core/src/exmergo_dex_core/cli.py`](https://github.com/exmergo/dex/blob/v1.14.0/packages/dex-core/src/exmergo_dex_core/cli.py) ([edit on main](https://github.com/exmergo/dex/edit/main/packages/dex-core/src/exmergo_dex_core/cli.py)). This page is generated; change the source, not the site.

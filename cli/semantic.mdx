@@ -1,0 +1,122 @@
+---
+title: dex semantic
+sidebarTitle: semantic
+description: 'Reference for dex semantic: define, update, and plan dbt semantic models or native Apache Ossie documents as reviewable diffs, with every flag documented.'
+---
+
+define dbt or native semantic layers as reviewable diffs
+
+## dex semantic define
+
+Validate new semantic models or metrics, including with dbt's own parser, and store them as a plan. Refuses a removal. Repo-only.
+
+```text
+dex semantic define [--edits-file FILE] [--definitions-file FILE] [--no-parse]
+    [<intent>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<intent>]` | one line saying what the change is for |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | whole-file edits payload as JSON; '-' reads stdin |  |
+| `--definitions-file FILE` | definitions written in place, as JSON; '-' reads stdin |  |
+| `--no-parse` | skip validation with dbt's own parser |  |
+
+## dex semantic update
+
+Validate changed semantic definitions, removals included, and store them as a plan. Repo-only.
+
+```text
+dex semantic update [--edits-file FILE] [--definitions-file FILE] [--no-parse]
+    [<intent>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<intent>]` | one line saying what the change is for |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | whole-file edits payload as JSON; '-' reads stdin |  |
+| `--definitions-file FILE` | definitions written in place, as JSON; '-' reads stdin |  |
+| `--no-parse` | skip validation with dbt's own parser |  |
+
+## dex semantic plan
+
+Validate a payload of semantic definitions and classify each as defined, updated, unchanged or removed, then store a plan. Repo-only.
+
+```text
+dex semantic plan [--edits-file FILE] [--definitions-file FILE] [--no-parse]
+    [<intent>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<intent>]` | one line saying what the change is for |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | whole-file edits payload as JSON; '-' reads stdin |  |
+| `--definitions-file FILE` | definitions written in place, as JSON; '-' reads stdin |  |
+| `--no-parse` | skip validation with dbt's own parser |  |
+
+## dex semantic ossie
+
+Validate whole Ossie documents at the paths semantic.ossie.files configures, then store a plan. Needs the [ossie] extra. Repo-only.
+
+```text
+dex semantic ossie [--edits-file FILE] [{define,update,plan}] [<intent>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[{define,update,plan}]` | define new documents, update existing ones, or plan a mix |  |
+| `[<intent>]` | one line saying what the change is for |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | whole-document edits payload as JSON; '-' reads stdin |  |
+
+## dex semantic slayer
+
+Validate whole SLayer model files at the paths semantic.slayer.models configures, with SLayer's own model, then store a plan. Needs the [slayer] extra. Repo-only.
+
+```text
+dex semantic slayer [--edits-file FILE] [{define,update,plan}] [<intent>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[{define,update,plan}]` | define new documents, update existing ones, or plan a mix |  |
+| `[<intent>]` | one line saying what the change is for |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | whole-document edits payload as JSON; '-' reads stdin |  |
+
+Every command here also accepts the [global options](/cli/overview#global-options).
+
+Source: [`packages/dex-core/src/exmergo_dex_core/cli.py`](https://github.com/exmergo/dex/blob/v1.14.0/packages/dex-core/src/exmergo_dex_core/cli.py) ([edit on main](https://github.com/exmergo/dex/edit/main/packages/dex-core/src/exmergo_dex_core/cli.py)). This page is generated; change the source, not the site.

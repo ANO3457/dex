@@ -1,0 +1,21 @@
+---
+title: dex demo
+sidebarTitle: demo
+description: 'Reference for dex demo: create a seeded local DuckDB warehouse with realistic data quality problems, no credentials or network, to try every dex command on.'
+---
+
+create a seeded local DuckDB warehouse to try dex against (no credentials, no network)
+
+```text
+dex demo [<target>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<target>]` | DuckDB file to create, refused if it exists (default: dex_demo.duckdb) |  |
+
+Every command here also accepts the [global options](/cli/overview#global-options).
+
+Source: [`packages/dex-core/src/exmergo_dex_core/cli.py`](https://github.com/exmergo/dex/blob/v1.14.0/packages/dex-core/src/exmergo_dex_core/cli.py) ([edit on main](https://github.com/exmergo/dex/edit/main/packages/dex-core/src/exmergo_dex_core/cli.py)). This page is generated; change the source, not the site.

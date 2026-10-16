@@ -1,0 +1,295 @@
+---
+title: dex transform
+sidebarTitle: transform
+description: 'Reference for dex transform: every subcommand that authors, plans, applies, builds, and tests dbt changes, with each flag, default, and positional argument.'
+---
+
+author and refactor dbt models, tests, and the semantic layer
+
+## dex transform init
+
+Propose a new dbt project as create diffs, for the connector named by `--connector` or .dex/config.yml. Refuses if a dbt project exists. Free.
+
+```text
+dex transform init [--layered-schemas] [--in-place] [<name>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<name>]` | name of the dbt project to create |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--layered-schemas` | build each layer into its own schema |  |
+| `--in-place` | scaffold into the current directory instead of &lt;name>/ |  |
+
+## dex transform plan
+
+Validate the edits in `--edits-file`, diff them against the project, and store a plan. Nothing is written until transform apply. Repo-only.
+
+```text
+dex transform plan [--edits-file FILE] [--scaffold TABLE]
+    [--attribute-rows | --no-attribute-rows] [<intent>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<intent>]` | one line saying what the edits are for |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | the edits payload as JSON; '-' reads stdin |  |
+| `--scaffold TABLE` | add a staging model skeleton for a profiled table |  |
+| `--attribute-rows` | measure the row-population delta of each change |  |
+| `--no-attribute-rows` | name row-affecting changes without measuring them |  |
+
+## dex transform apply
+
+Write a plan's diffs into the project. With no id, applies the latest unapplied plan. A file edited since planning is a conflict, never an overwrite. Repo-only.
+
+```text
+dex transform apply [--plan-file FILE] [--expect-digest HEX] [<plan-id>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<plan-id>]` | plan to apply (default: latest unapplied) |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--plan-file FILE` | apply an exported plan document instead of a stored plan |  |
+| `--expect-digest HEX` | refuse a plan document whose digest is not this one |  |
+
+## dex transform build
+
+Run dbt build on a dev target only, after a free preflight and a cost estimate. It runs only with `--confirm` and `--budget`.
+
+```text
+dex transform build [--target TARGET] [--select SELECTOR] [--verify]
+    [--for-plan PLAN-ID] [--for-plan-file FILE] [--no-install-deps]
+```
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--target TARGET` | dbt target to build; prod-looking targets are refused |  |
+| `--select SELECTOR` | dbt node selection, passed through to dbt |  |
+| `--verify` | run the maintain verify sweep over the built nodes |  |
+| `--for-plan PLAN-ID` | report whether the build covered this stored plan |  |
+| `--for-plan-file FILE` | report coverage of an exported plan document |  |
+| `--no-install-deps` | refuse missing dbt packages instead of installing them |  |
+
+## dex transform deps
+
+Run dbt deps inside the project. Repo-confined, with no warehouse spend.
+
+```text
+dex transform deps
+```
+
+## dex transform plans
+
+List the plans in .dex/plans, pending and applied, newest first. Free.
+
+```text
+dex transform plans
+```
+
+## dex transform macro
+
+With no name, list the dbt macros dex ships. With a name, plan scaffolding that macro into the project's macro directory. Repo-only.
+
+```text
+dex transform macro [<macro>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<macro>]` | shipped macro to scaffold (omit to list them) |  |
+
+## dex transform references
+
+Report every use of each name across model SQL, YAML, macros, seeds and installed packages, and say how complete the answer is. Repo-only and free.
+
+```text
+dex transform references [--kind KIND] [--full] <name> [<name> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `<name> [<name> ...]` | name to look up; model.column resolves through ref() |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--kind KIND` | narrow to one kind, such as model, column, var or metric |  |
+| `--full` | lift the cap of 200 occurrences across 50 files |  |
+
+## dex transform rename
+
+Generate one plan renaming a column, var, model, seed, snapshot, macro or source everywhere it is used. Refuses rather than partially applying. Repo-only and free.
+
+```text
+dex transform rename [--edits-file FILE] <kind> <old> <new>
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `<kind>` | column, var, model, seed, snapshot, macro or source |  |
+| `<old>` | current name; a column is named model.column |  |
+| `<new>` | new name |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | hand-authored edits to store in the same plan |  |
+
+## dex transform remove
+
+Plan the removal of a definition and refuse while any read survives, naming each one. Pass the read edits with `--edits-file`. Repo-only.
+
+```text
+dex transform remove [--edits-file FILE] <kind> <name>
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `<kind>` | column, var, model, seed, snapshot, macro or source |  |
+| `<name>` | name to remove; a column is named model.column |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | hand-authored edits to store in the same plan |  |
+
+## dex transform place
+
+Find the lowest common model that can define the column for every target, define it there, and thread it down. `--explain` stores no plan. Repo-only and free.
+
+```text
+dex transform place [--targets MODELS] [--expr SQL] [--explain] [<column>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<column>]` | name of the derived column to define |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--targets MODELS` | models that need the column, comma-separated |  |
+| `--expr SQL` | SQL expression that computes the column |  |
+| `--explain` | return the reasoning without storing a plan |  |
+
+## dex transform test
+
+`--scaffold` plans a unit_tests skeleton for a model. `--mutate` plants one defect at a time and reports which ones no test caught. Mutation runs dbt on the dev target and is billed on metered connectors.
+
+```text
+dex transform test [--scaffold MODEL | --mutate MODEL] [--max-mutants N]
+    [--target TARGET] [--check-equivalence | --no-check-equivalence]
+```
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--scaffold MODEL` | plan a unit test skeleton for this model |  |
+| `--mutate MODEL` | measure which planted defects this model's tests miss |  |
+| `--max-mutants N` | run at most N mutants (can only lower the cap of 20) |  |
+| `--target TARGET` | dbt dev target to mutate against |  |
+| `--check-equivalence` | compare each survivor with the model on the dev data |  |
+| `--no-check-equivalence` | report survivors without comparing them |  |
+
+## dex transform export
+
+Print one stored plan as a document another checkout can verify and apply, with a digest over the whole plan. Repo-only and free.
+
+```text
+dex transform export [<plan-id>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<plan-id>]` | plan to export (default: latest unapplied) |  |
+
+## dex transform ground
+
+List the models, sources, columns and relations a plan reads, what could not be resolved, and a fingerprint of the inputs. Repo-only and free.
+
+```text
+dex transform ground [<plan-id>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<plan-id>]` | plan to ground (default: latest unapplied) |  |
+
+## dex transform classify
+
+Read each edit's content and label it declarative, executable, authority-bearing, data or unknown, naming the signal. Repo-only and free.
+
+```text
+dex transform classify [--edits-file FILE] [<plan-id>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<plan-id>]` | plan to classify (default: latest unapplied) |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--edits-file FILE` | classify an edits payload as JSON; '-' reads stdin |  |
+
+## dex transform preflight
+
+Read the rendered profiles.yml for provider-side controls on the dev target and say whether any of them binds. Free and connectionless.
+
+```text
+dex transform preflight [--target TARGET]
+```
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--target TARGET` | profiles.yml target to read (default: the configured dev target) |  |
+
+Every command here also accepts the [global options](/cli/overview#global-options).
+
+Source: [`packages/dex-core/src/exmergo_dex_core/cli.py`](https://github.com/exmergo/dex/blob/v1.14.0/packages/dex-core/src/exmergo_dex_core/cli.py) ([edit on main](https://github.com/exmergo/dex/edit/main/packages/dex-core/src/exmergo_dex_core/cli.py)). This page is generated; change the source, not the site.

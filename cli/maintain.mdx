@@ -1,0 +1,123 @@
+---
+title: dex maintain
+sidebarTitle: maintain
+description: 'Reference for dex maintain: snapshot a baseline, check schema, volume, grain, and semantic drift, verify a project, and reconcile with proposed diffs.'
+---
+
+detect drift against the last snapshot and propose the fix
+
+## dex maintain snapshot
+
+Pin the current map and fingerprint the project layers as the baseline drift is measured against. `--project-only` opens no connection.
+
+```text
+dex maintain snapshot [--project-only]
+```
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--project-only` | refingerprint only the project layers; opens no connection |  |
+
+## dex maintain check
+
+Run every drift axis against the snapshot and rank the findings. The free axes always run; the scanning axes are offered with an estimate.
+
+```text
+dex maintain check [<object> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<object> ...]` | object to check (default: the whole project) |  |
+
+## dex maintain schema
+
+Compare structure against the snapshot: columns, tables, nullability, dangling sources and changed models. Free metadata.
+
+```text
+dex maintain schema [<object> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<object> ...]` | object to check (default: the whole project) |  |
+
+## dex maintain volume
+
+Compare row counts against the snapshot from free metadata. Objects with no maintained count, such as views, are named as not compared.
+
+```text
+dex maintain volume [<object> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<object> ...]` | object to check (default: the whole project) |  |
+
+## dex maintain grain
+
+Re-measure key uniqueness, grain and join fanout, plus declared grains. Scans the data, so it is billed on metered connectors.
+
+```text
+dex maintain grain [<object> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<object> ...]` | object to check (default: the whole project) |  |
+
+## dex maintain semantic
+
+Report changed, added and removed semantic definitions and references that no longer resolve, for free. Dimension cardinality change is a scan, offered with an estimate.
+
+```text
+dex maintain semantic [<object> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<object> ...]` | object to check (default: the whole project) |  |
+
+## dex maintain reconcile
+
+Store the reconciling edits as a plan of diffs tagged mechanical or advisory. Never applied here; use transform apply. Repo-only.
+
+```text
+dex maintain reconcile [{schema,volume,grain,semantic}]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[{schema,volume,grain,semantic}]` | reconcile only this drift class (default: all) |  |
+
+## dex maintain verify
+
+Check build status, column contracts, row population, grain and join contracts against the built relations. Mostly free metadata; view row counts and join probes are offered with an estimate.
+
+```text
+dex maintain verify [<object> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<object> ...]` | dbt selector to verify (default: the whole project) |  |
+
+Every command here also accepts the [global options](/cli/overview#global-options).
+
+Source: [`packages/dex-core/src/exmergo_dex_core/cli.py`](https://github.com/exmergo/dex/blob/v1.14.0/packages/dex-core/src/exmergo_dex_core/cli.py) ([edit on main](https://github.com/exmergo/dex/edit/main/packages/dex-core/src/exmergo_dex_core/cli.py)). This page is generated; change the source, not the site.

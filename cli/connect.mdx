@@ -1,0 +1,19 @@
+---
+title: dex connect
+sidebarTitle: connect
+description: 'Reference for dex connect test: check that a connector can reach its warehouse with discovered credentials and report what it can do, before any real work.'
+---
+
+check a connector's own credentials and capabilities
+
+## dex connect test
+
+Open the resolved connection read-only and report the dialect, the capabilities, and the cost paradigm. Free: it runs no billed query.
+
+```text
+dex connect test
+```
+
+Every command here also accepts the [global options](/cli/overview#global-options).
+
+Source: [`packages/dex-core/src/exmergo_dex_core/cli.py`](https://github.com/exmergo/dex/blob/v1.14.0/packages/dex-core/src/exmergo_dex_core/cli.py) ([edit on main](https://github.com/exmergo/dex/edit/main/packages/dex-core/src/exmergo_dex_core/cli.py)). This page is generated; change the source, not the site.

@@ -1,0 +1,1308 @@
+---
+title: Changelog
+description: 'Release notes for exmergo-dex-core and the dex skills: what was added, changed, and fixed in each of the recent releases, with links to the pull requests.'
+rss: true
+---
+
+<Update label="1.14.0" description="2026-10-16">
+
+### Added
+
+- **SLayer models read into the semantic catalog.** Under
+  `semantic.vendor: slayer`, `explore semantic list` reads the configured model
+  files with no warehouse connection. Each file is validated by the pinned
+  release's own `SlayerModel`, and SLayer's storage is never opened, because
+  opening it moves and renames files. A file in any format version but the pinned
+  release's current one (15) is refused before SLayer can migrate it, as are a
+  model filed under another name, a name declared twice, and a join to a model or
+  column the set does not hold, each naming the file and the element. Each model
+  is a semantic model, each column a dimension keyed `model.column`, and each saved
+  measure a `formula` metric; measures and entities are declared in `unavailable`
+  rather than invented, and `query` and `values` refuse by name. Declared keys
+  (composite primary keys kept whole) and joins (every ordered pair) reach
+  `explore map`, `relationships` and `profile` through `--use-project`, and
+  `maintain snapshot` fingerprints the layer. Values SLayer caches in a model file
+  (`sampled_values`) are never read. The skill wrapper now also installs
+  `[slayer]` for `explore semantic` and for `explore` commands run with
+  `--use-project` where the config names that vendor. ([#611](https://github.com/exmergo/dex/pull/611))
+- **`semantic slayer define|update|plan`: SLayer models authored through
+  plan/apply.** The repository's SLayer model files are now written by dex as
+  reviewable plans rather than generated from dbt. Edits are whole files of the
+  `semantic_document` kind, keyed exactly as `semantic.slayer.models` names them;
+  a datasource file, `priority.yaml`, SLayer's search index or memories, an
+  unconfigured model, a path outside the storage root, and a model symlinked away
+  from `models/` are refused. The whole prospective set is validated with the
+  pinned `SlayerModel` before the plan is stored, with no warehouse connection
+  and no SLayer storage opened: the current format version (a stale one is
+  refused naming the version expected), unique names, path agreeing with name and
+  data source, joins resolving onto columns both sides have, and, for an edited
+  model, a `default_time_dimension` that names a column and saved-measure
+  formulas that SLayer's own parser accepts (a named skip without `[sql]`). Each
+  refusal names the file and the element. `transform apply` writes the authored
+  bytes exactly, staging every file before moving any into place, and a file
+  SLayer's own tooling rewrote after planning is a conflict whose hint says so.
+  The format-neutral `ApplyResult` gains an optional `conflict_hint` for that
+  message, and `SemanticSourceFile`/`SemanticDocumentView` move from
+  `ossie.authoring` to `edits` so both vendors share them. The skill wrapper now
+  installs `[slayer]` for `transform apply` where the config names that vendor.
+  The SLayer reader also now refuses a configured model that resolves outside the
+  storage root's `models/` directory, so a symlink to a datasource file inside the
+  storage root never reaches the parser. ([#616](https://github.com/exmergo/dex/pull/616))
+- **`maintain` under `semantic.vendor: slayer`.** Every drift axis now reads a
+  SLayer layer, without opening a SLayer datasource or SLayer storage. The
+  semantic baseline records the vendor, the SLayer release and the model format
+  version, and a change in any of them is reported first
+  (`semantic_vendor_changed`, `semantic_format_changed`) rather than as every
+  model changed. The grain axis measures every key a SLayer model declares,
+  single-column ones included, and each join's declared `cardinality`: a
+  `many_to_one` or `one_to_one` join whose key side is not unique is
+  `join_cardinality_exceeded`, and a join declaring none is named in `warnings`
+  as unchecked. The schema axis runs SLayer's own `validate-models` comparison
+  through its pure entry points on the metadata dex captured, reporting
+  `declared_column_missing`, `declared_type_conflict`,
+  `declared_relation_missing` and `declared_dependency_dropped`, each with the
+  model's whole removal as SLayer computes it. `maintain reconcile` cuts those
+  removals out of the model files, leaving every other byte as it was, and
+  stores them as a second plan through the `semantic slayer update` route
+  (`data.semantic_plan_id`); removing a whole model stays advisory. A new
+  `SemanticSchemaSource` capability is what a semantic source implements to take
+  part in the schema axis and reconcile this way. ([#618](https://github.com/exmergo/dex/pull/618))
+- **Grounding finds names dbt resolves that have no SQL file.** These are now
+  found through a new `ReferenceIndex.declarations_of`:
+
+  - a Python model, by its filename (the content is not read);
+  - the base name of a versioned model;
+  - a snapshot declared in YAML with `relation`.
+
+  A `ref()` to a package's seed or snapshot is reported with that kind rather than
+  as a model, so its manifest relation is found too. `transform references`,
+  `transform propagate` and the delete guard answer as before, because they answer
+  for the files dex can edit.
+
+  ([#622](https://github.com/exmergo/dex/pull/622))
+- **`transform ground` reports what nothing defines.** A `ref()` to a model that
+  does not exist used to ground exactly like a `ref()` to one that does: the same
+  `completeness`, nothing in `unresolved` or `limits`, and no `relation` on either,
+  because without a compiled manifest every relation is absent. Each dependency
+  now carries `defined`:
+
+  - `plan` when a file the plan writes defines it;
+  - `project` for a project file the plan leaves alone;
+  - `package` when only an installed package does, with `package` naming it;
+  - `missing` when nothing does.
+
+  A new top-level `missing` list, after `ambiguous`, names each missing model,
+  seed, snapshot, source, metric or measure and where the plan reads it.
+  `host.MissingReference` is its type, and a `grounding-missing` conformance
+  vector ships beside `grounding-unresolved`.
+
+  `missing` is never a guess. A name with no definition is left out of it, and a
+  limit names it, making the answer `partial`, when part of the project went
+  unread:
+
+  - a declared package is not installed;
+  - the plan changes the package set;
+  - a package fails to load;
+  - a YAML file does not parse.
+
+  A two-argument `ref('core', 'x')` is never reported missing, because it can name
+  another dbt project. `defined` is absent for columns, and for macros and vars the
+  project does not declare, because dbt's own macros and `--vars` are invisible to
+  a static read.
+
+  ([#622](https://github.com/exmergo/dex/pull/622))
+- **A documentation site build.** `scripts/build_docs_site.py` assembles a Mintlify
+  site from `docs/`, `references/`, the CLI parser and the latest releases in
+  `CHANGELOG.md`: every reference document is published at a stable route with a
+  title and description, links between references become site routes, and the CLI
+  reference is rendered from the same help text `dex --help` prints. The build
+  refuses a broken link or anchor, an unpublished reference, a page missing from
+  navigation, an em dash, or anything Mintlify could not parse. Pull requests that
+  touch those sources build and validate the site in CI, and each release deploys
+  it to a generated `docs-site` branch after PyPI publish.
+
+### Changed
+
+- **The transform and maintain skills describe SLayer.** Both skill descriptions
+  name SLayer, so a SLayer request triggers them. The transform skill picks the
+  semantic command from `semantic.vendor`, and its semantic-layer reference now
+  covers the SLayer config and `[slayer]` extra, the whole-file write surface,
+  what validation catches and what it does not, and what SLayer does not declare
+  (no entities, no aggregation on a saved measure, no per-measure time
+  dimension). It says dex owns the configured model files: they are not authored
+  with `slayer import-dbt` or rewritten by SLayer's own tooling. The maintain
+  skill gains a per-axis table for a SLayer layer, and says how to relay what
+  looks like drift and is not: a join with no declared `cardinality` is
+  undetermined rather than passing, the `declared_*` schema codes are not to be
+  confirmed with `slayer validate-models`, and a model file in another format
+  `version` is unreadable rather than every definition in it removed. ([#619](https://github.com/exmergo/dex/pull/619))
+- **A semantic model the plan adds no longer needs a compiled catalog.** Its own
+  entities, dimensions and measures are `defined: plan`, so grounding one in a
+  fresh checkout is `complete`, not `partial` with "the semantic catalog could not
+  be read". That limit is now raised only when the plan reads a metric or measure
+  defined outside it. ([#622](https://github.com/exmergo/dex/pull/622))
+- **A missing metric or measure no longer lowers `completeness`.** It used to be a
+  `limits` entry, which made the answer `partial`, while a missing model changed
+  nothing. Both are now reported in `missing`, and `completeness` says only whether
+  dex finished reading. `unresolved` and `limits` lower it; `ambiguous` and
+  `missing` do not. A host that admits a change on `completeness` alone must now
+  also require `missing: []`. A metric or measure that the source defines but the
+  compiled semantic catalog does not carry is still a limit, because dex could not
+  follow it to its models. ([#622](https://github.com/exmergo/dex/pull/622))
+- **Grounding conformance vectors carry their project and are replayed.** Each
+  grounding vector's `payload.project` holds the files it was grounded against.
+  The engine's suite now grounds every vector again and compares the result, where
+  before it only checked each vector against itself. The three existing vectors
+  are regenerated with `defined` and `missing`. ([#622](https://github.com/exmergo/dex/pull/622))
+- **`"cache"` is no longer in the grounding `ORIGINS` vocabulary.** It was
+  declared and never emitted, since grounding reads only the repository and opens
+  no connection. ([#622](https://github.com/exmergo/dex/pull/622))
+- **Snowflake estimates quote the idle tail on a running warehouse too.** The estimate and the settlement now apply one billing model. On a suspended warehouse that is the larger of the 60-second resume minimum and the `AUTO_SUSPEND` tail; on a running one it is the tail, where it used to be nothing. `transform build` and `transform test --mutate` show it as its own `(warehouse uptime)` line. A per-command ceiling below the pinned warehouse's `AUTO_SUSPEND` now refuses every billed command: Snowflake's default of 600 seconds bills a two-second query for ten minutes, and dex now says so before it runs. Lower `AUTO_SUSPEND` (60 seconds suits dex's short commands) or raise the budget. `connect test` reports `auto_suspend_seconds` and warns when auto-suspend is off.
+
+### Fixed
+
+- **`semantic slayer` refuses a key SLayer does not declare.** The pinned
+  `SlayerModel` and the models nested in it ignore unknown keys, so `entities`, a
+  measure's `agg` or `agg_time_dimension`, or a typo validated, were stored in the
+  plan, written byte for byte, and did nothing. Every mapping is now compared with
+  the fields the pinned release declares at its level (model, column and its
+  `format`, saved measure, aggregation and its `params`, join), and a key outside
+  them in an edited model refuses the plan as `unknown_key`, naming the file, the
+  element and the release, with what SLayer uses instead where the key is a
+  MetricFlow habit. The reader, and a configured model the plan does not edit,
+  report the same key as a warning, since SLayer reads the file. Every declared
+  field is still accepted, `meta` and a column's cached `sampled`,
+  `sampled_values` and `distinct_count` included. ([#621](https://github.com/exmergo/dex/pull/621))
+- **One dependency per metric and per semantic model.** A metric the plan read
+  appeared twice, once as read and once as resolved through the catalog. A
+  semantic model appeared once for each metric or measure that reached it. Both
+  are now merged, and `used_in` collects every path and route. ([#622](https://github.com/exmergo/dex/pull/622))
+- **`transform references` lists a YAML snapshot's `relation` and a Python model's reads.**
+  A dbt 1.9 snapshot with `relation: source('raw', 'orders')` was only a declaration,
+  so asking where `raw.orders` is used missed it. A Python model was declared from
+  its filename and its body was never read, so `dbt.ref()` and `dbt.source()` were
+  missing and the report could still call itself complete. Those calls are
+  occurrences now. A Python model dex cannot parse leaves model, source, seed, and
+  snapshot queries incomplete. ([#629](https://github.com/exmergo/dex/pull/629))
+- **Reference reports now flag malformed YAML as incomplete.** Model and column renames and removals refuse to proceed while a project YAML file cannot be parsed, rather than silently missing its references. ([#631](https://github.com/exmergo/dex/pull/631))
+- **`dbt parse` failures on `dbt-core` 1.12 keep their cause line.** `dbt-core`
+  1.12 prefixes its generic `Encountered an error:` header with `[ERROR]: `,
+  which stopped `_collect_messages` from recognizing the header and left only
+  `[ERROR]: Encountered an error:` in the reported message. A leading `[LEVEL]: `
+  tag is now accepted on generic headers so the underlying compilation or parse
+  error on the following lines is preserved. ([#633](https://github.com/exmergo/dex/pull/633))
+- **`transform rename seed` and `transform rename snapshot` rewrite `ref()`s that
+  read the renamed node.** The rewriter labels every `ref()` site with kind
+  `model`, while propagation matched only sites whose kind equaled the kind being
+  renamed, so renaming a seed or snapshot moved its file without rewriting the
+  `ref()` calls pointing at it and failed the delete guard. Propagation now
+  resolves node kinds through `ReferenceIndex.node_kind` when matching `ref()` and
+  YAML node sites. ([#634](https://github.com/exmergo/dex/pull/634))
+- **`explore map` data-quality notes no longer include cell values.** A
+  boolean-shaped flag note listed each encoding and its count, and an epoch
+  note appended a date range translated from the column min and max. `explore
+  map` copies those notes, so the values showed up in the map. The notes now
+  keep the finding and the count or fraction. The encodings stay on the column,
+  where `explore profile` returns them. ([#637](https://github.com/exmergo/dex/pull/637))
+- **`transform build` resolves `{{ env_var() }}` in `profiles.yml` before checking for dev-target drift.** A templated database, schema or path is now compared using its resolved environment variable value (including any default fallback). Unresolvable templates produce a warning instead of a false-positive `DevTargetError`. ([#638](https://github.com/exmergo/dex/pull/638))
+- **A versioned `ref()` names the model.** dex used to report
+  `ref('dim_orders', v=1)` and `ref('dim_orders', version=1)` as unresolved.
+  It treated the version keyword as an unread argument and used that value as
+  the model name. Keyword arguments are now omitted from the positional
+  arguments, so the model name is the reference.
+- **Snowflake spend settles as warehouse uptime, not statement time.** Snowflake bills a warehouse for being up: at least 60 seconds each time it resumes, then per second until `AUTO_SUSPEND` suspends it after idling. A `transform build` used to settle at the sum of dbt's per-node execution time, flagged `settled: true` (about 3 seconds for a build the account was billed about 160 for). Explore and maintain statements settled on wall-clock time, which does not include either charge. Every Snowflake command now also settles the uptime no statement reported, from a free `SHOW WAREHOUSES` once its last statement is done. That uptime is the time between its statements, floored at 60 seconds when the command resumed the warehouse, plus the `AUTO_SUSPEND` tail when it left the warehouse idle. A warning names what was added. The figure is still `settled: true`, because it is ledgered and binds both ceilings; it is a model of Snowflake's billing rules, and `WAREHOUSE_METERING_HISTORY` stays the authority. The statement timeout holds the pending uptime back, so the confirmed budget still covers the whole command, and a `transform build`'s spend now carries `credits_billed` like every other Snowflake command.
+
+</Update>
+
+<Update label="1.13.3" description="2026-10-15">
+
+### Changed
+
+- **`--help` now describes every command and flag.** Each subcommand carries a
+  one-line summary in its group's listing and a description, naming what it
+  costs, at the top of its own `--help`. Every option and positional has help
+  text, and positionals read as what they take (`plan-id`, `intent`, `column`)
+  rather than `argument`. The shared connection options are described from one
+  table, so the top-level copy and the per-subcommand copy cannot disagree. The
+  `dex --help` epilog no longer uses a double hyphen as a dash. A test fails on
+  any new subcommand or flag added without help. ([#613](https://github.com/exmergo/dex/pull/613))
+- **Changelog entries are fragments in `changelog.d/`, collected into this file
+  when a release is prepared** ([#623](https://github.com/exmergo/dex/issues/623)).
+  A pull request no longer edits `CHANGELOG.md`. It adds a file named for the pull
+  request and its Keep a Changelog category, such as `changelog.d/613.changed.md`,
+  and `scripts/prepare_release.sh` builds the release section from the pending
+  fragments with towncrier, then deletes them. Concurrent pull requests no longer
+  conflict on a shared `[Unreleased]` block, and an entry can no longer land in a
+  section that was already released: #613's entry merged into the 1.13.2 section
+  after 1.13.2 was tagged, and now ships in this release instead.
+
+  A new `Changelog` CI check requires a fragment, refuses a direct `CHANGELOG.md`
+  edit, and checks every fragment's name and that the notes render. A maintainer
+  applies the `no-changelog` label to a pull request that needs no entry. The
+  release workflow also refuses a tag whose `CHANGELOG.md` has no section for it.
+  An open pull request moves its `[Unreleased]` text into a fragment; the steps are
+  in `CONTRIBUTING.md` under "Changelog fragments".
+
+
+### Added
+
+- **`exmergo_dex_core.host` exports `Reason` and `reason_for`**
+  ([#582](https://github.com/exmergo/dex/issues/582)). A host that calls
+  `DexEngine` in process holds the exception rather than an envelope, and had no
+  public way to get the `reason` the CLI would have printed for it. Both names
+  are the envelope's own objects, so a host and the CLI classify a refusal with
+  the same function, and a test runs every row of the classification table
+  through the CLI to keep them together. `ConfirmationRequiredError` is the one
+  exception a host meets that is not a refusal: `reason_for` reads it as `guard`,
+  while the CLI answers it with `needs_confirmation` and no `reason`. The
+  docstring and `references/host-integration.md` say so, and also that the full
+  table needs the `sql` extra, which every warehouse connector extra brings.
+  Without it, a class listed only in the table's second tier reads its nearest
+  listed ancestor, so `CostGuardError` reads `request` rather than `guard`.
+
+- **`transform test --mutate` labels surviving mutants on Postgres too** ([#548](https://github.com/exmergo/dex/pull/548)).
+  Surviving mutants on Postgres are now checked for equivalence against the
+  unmutated baseline using `hashtextextended({alias}::text, 0)`, labeling them
+  as equivalent or distinguishable (including mutants that turn a column to NULL)
+  instead of reporting `not_checked`. The equivalence check remains opt-in via
+  `--check-equivalence` and is priced into the upfront compute-seconds estimate.
+
+</Update>
+
+<Update label="1.13.2" description="2026-10-14">
+
+### Added
+
+- **`semantic.vendor: slayer` configuration and a pinned `[slayer]` extra**
+  ([#596](https://github.com/exmergo/dex/issues/596)). The first step toward
+  SLayer as a third semantic vendor ([#595](https://github.com/exmergo/dex/issues/595)):
+  configuration and packaging only. The reader, authoring and drift land
+  separately. `semantic.slayer.base_dir` names SLayer's storage root inside the
+  repository, and `semantic.slayer.models` is an exact allowlist of
+  `models/<data_source>/<name>.yaml` files under it, with the same rules as
+  `semantic.ossie.files` (no globs, no absolute paths, no `..`, no duplicates).
+  SLayer datasource files and `priority.yaml` are refused, because a datasource
+  carries connection credentials. `[slayer]` pins `motley-slayer==1.2.0` exactly
+  and carries `[sql]`, so an install lands where SLayer's sqlglot floor and dex's
+  ceiling overlap (30.17 to 30.x). A new blocking CI job resolves the two
+  together. With `vendor: slayer` set and the extra absent, a command refuses with
+  `reason: prerequisite` and names the install, and MetricFlow semantic models
+  are not read in SLayer's place. The skill wrapper installs `[slayer]` for
+  `maintain` commands only where the config names that vendor.
+
+- **Manifests for Copilot CLI, Cursor, Kiro and Gemini CLI, and a listing name and
+  links in the Claude Code manifest** ([#607](https://github.com/exmergo/dex/pull/607)). Copilot CLI, Cursor Marketplace and
+  Kiro read an Agent Plugins 1.0 `plugin.json` at the plugin root. The Gemini CLI
+  extensions gallery lists only repositories that carry a `gemini-extension.json`.
+  dex shipped neither. Both now sit at the repository root with the name, version
+  and description of `.claude-plugin/plugin.json`; the Agent Plugins manifest also
+  carries its keywords. The Claude Code manifest gains
+  `displayName` ("Exmergo Dex", since another plugin named `dex` exists),
+  `privacyPolicyUrl` and `supportUrl`, which the Claude plugin directory reads for
+  its listing. `name` stays `dex`, since it is the install id and the `/dex:*`
+  namespace. `scripts/prepare_release.sh <engine> <plugin-semver>` now bumps the
+  version in all three manifests, and `tests/test_plugin_manifests.py` fails the
+  release gate when their name, version, description or keywords disagree.
+
+- **The README says what dex runs and connects to, and where it runs** ([#607](https://github.com/exmergo/dex/pull/607)).
+  A new section lists each download and connection:
+  - `uv` downloading the pinned `exmergo-dex-core` and its dependencies, plus a
+    managed Python when no 3.11 or newer is installed.
+  - The warehouse you configure, which gets read-only SQL.
+  - The hosted dbt Cloud Semantic Layer, when you enable it.
+  - The dbt commands dex runs, which are dbt-core's own: dbt-core sends its
+    anonymous usage statistics unless you turn them off, and `dbt deps` downloads
+    the packages `packages.yml` declares.
+  - Nothing to Exmergo.
+
+  It also says dex needs a coding agent with a local shell and does not run in
+  claude.ai chat, and it links the dex privacy policy. The `uv` prerequisite drops
+  its `curl | sh` installer line in favor of `brew install uv`, `pipx install uv`
+  and the uv installation docs, the advice the skill wrapper has printed since
+  [#530](https://github.com/exmergo/dex/pull/530). skills.sh's security audit flagged that line as downloading and running
+  remote code.
+
+- **Each skill names the engine package it runs, and states what it needs**
+  ([#607](https://github.com/exmergo/dex/pull/607)). Each SKILL.md's "Running the engine" section names `exmergo-dex-core`
+  on PyPI, at the version `scripts/run.py` pins, and links its source. Without
+  that, a reader of the skill alone could not tell what gets downloaded. The
+  frontmatter gains the Agent Skills `compatibility` field: a local shell and
+  `uv`, the engine fetched from PyPI on first use, and no claude.ai chat.
+  `claude plugin validate --strict`, `vally lint` and `npx skills` all accept it.
+
+- **`exmergo-dex-core` declares PyPI classifiers, connector keywords, and changelog
+  and issue URLs** ([#607](https://github.com/exmergo/dex/pull/607)). It had no classifiers, its keywords named no
+  connector other than DuckDB, and its only links were the homepage and the
+  repository. There is no `License ::` classifier, because under PEP 639 the SPDX
+  `license` field replaces it.
+
+### Changed
+
+- **Native semantic authoring validates through the configured layer, not
+  through Ossie by name** ([#597](https://github.com/exmergo/dex/issues/597)).
+  `semantic <vendor> define|update|plan` reaches one vendor-neutral route, and
+  the layer validates its own documents through a new
+  `SemanticEditTarget.validate_semantic_edits` method, which returns a
+  `SemanticEditValidation`. Ossie implements it by delegating to its existing
+  validator, so Ossie authoring behaves as before. A third-party semantic
+  source that implements `SemanticEditTarget` must add the method to stay
+  authorable. A subcommand that does not match `semantic.vendor` (for example
+  `semantic ossie plan` under `vendor: dbt`) is now refused before the edits
+  payload or any document is read, and a vendor that cannot author names the
+  vendors that can. `DexEngine.semantic_native(vendor, mode, intent, edits)` is
+  the library route; `DexEngine.semantic_ossie` remains and delegates to it.
+
+- **The three skill descriptions fit the Agent Skills 1,024-character cap**
+  ([#607](https://github.com/exmergo/dex/pull/607)). `explore` goes from 1,601 to 1,014 characters, `transform` from 1,617
+  to 1,002, and `maintain` from 1,600 to 1,015. The descriptions retain explore's
+  schema-verification precondition, transform's bug-fix scope and validation
+  before writing, and maintain's diagnostic and drift triggers, along with their
+  guardrails and sibling pointers. A frontmatter test holds the description cap
+  and the optional `compatibility` field's 500-character cap.
+
+### Fixed
+
+- **`dex config validate` reports a `dbt_project_dir` that holds no dbt
+  project** ([#590](https://github.com/exmergo/dex/pull/590)). A pin to a directory that does not exist, or to one with
+  no `dbt_project.yml`, passed validation, and the mistake surfaced later from
+  whichever command first needed the project, not always as a message about the
+  pin. It is now a non-fatal `project_not_found` problem on the pin's line, so
+  `explore map` and `explore query` still run and every command carries it in
+  `warnings`, the same as an `unknown_key`.
+
+- **`host.plan_digest` reads a plan document as a dict, JSON string or bytes**
+  ([#580](https://github.com/exmergo/dex/pull/580)). It accepted only a `PortablePlan`, so the dict that
+  `DexEngine.export_plan(...).plan` returns failed with a builtin
+  `AttributeError`. It now takes the same four forms as `verify_plan_document`,
+  returns the same digest for each, and raises `PlanDocumentError` for input
+  that is not a readable plan. It still runs none of the other checks, so a
+  caller can digest a document it has not verified yet.
+
+- **`maintain` again claims diagnosis without a prior snapshot or known change**
+  ([#607](https://github.com/exmergo/dex/pull/607)). Commit `7f9a0ba` reverted the description introduced by [#534](https://github.com/exmergo/dex/issues/534)
+  for [#233](https://github.com/exmergo/dex/pull/233), so 1.13.0 and 1.13.1 shipped the earlier drift-only description
+  despite the 1.13.0 changelog entry. The shortened description restores the
+  diagnostic intent, names `maintain verify` beside snapshot-based `check` and
+  `reconcile`, and includes requests such as "the project is broken" and
+  "diagnose why this test fails". Writing the fix remains transform's job.
+
+- **`Budget.paradigm` is removed; it validated and did nothing** ([#557](https://github.com/exmergo/dex/pull/557)). A
+  command's cost paradigm comes from its connector (`connect.paradigm_for`),
+  never from the budget, so the field was accepted, type-checked against the
+  `Paradigm` enum, and then read by nothing: the accepted-and-ignored shape
+  this codebase refuses everywhere else (see the `ClickHouseTarget` deployment
+  checks). A committed `budget.paradigm: bytes_scanned` looked like it declared
+  the project's cost paradigm and changed nothing. The field is gone, and a
+  committed `budget.paradigm` now rides every envelope's `warnings` as an
+  `unknown_key` (`dex config get`/`dex config validate`, [#547](https://github.com/exmergo/dex/pull/547)), the same as
+  any other key a later release retired, rather than silently doing nothing.
+
+</Update>
+
+<Update label="1.13.1" description="2026-10-13">
+
+### Added
+
+- **`explore query --across`: one probe over mirrored environments** ([#545](https://github.com/exmergo/dex/pull/545)).
+  Projects keep dev, qa and prod copies of the same datasets, and the question
+  asked most often during analysis is whether a pattern is a dev fixture artefact
+  or real in prod. Answering it meant writing the same probe once per dataset and
+  aligning the result sets by hand. Now each statement names its dataset as
+  `{ds}`, and `--across dev_raw,qa_raw,prod_raw` (comma-separated, repeatable)
+  runs it once per target in one call.
+
+  - The variants are ordinary statements to the firewall and the cost guard:
+    each is adjudicated against its own relation's profile and PII flags, and the
+    whole call is priced in one handshake and profiled once.
+  - Each entry in `data.results` carries `target` and `template`, the variants of
+    one probe sit together, and `data.across` lists the targets. A refusal names
+    its target, and the other targets still answer.
+  - A target must be a plain dataset name, since it is substituted into the SQL.
+    A statement with no `{ds}`, a repeated target, and statements times targets
+    over `query.max_statements` are refused before anything runs.
+  - `DexEngine.query_across(*sql, targets=[...])` is the library equivalent. A
+    call without `--across` returns exactly the payload it did before.
+
+- **`explore map` names the objects its rank cutoff did not profile** ([#540](https://github.com/exmergo/dex/pull/540)).
+  Past 50 objects the map profiles the top 25 by rank, and it said how many it
+  skipped but not which. On a 63-object map the 38 it skipped included staging
+  views the next probes needed, and each cost a round trip: the query refused as
+  unprofiled, then `explore profile`, then the retry. `data.skipped` now carries
+  `count`, `by_namespace` (records of `namespace` and `count`, largest first) and
+  `objects` in rank order, highest first, each list capped at 25 with the rest
+  counted in `elided_namespaces` and `elided`. The cutoff note names
+  `explore profile` with the highest-ranked skipped objects. The block is always
+  present, so a `--full` run reports `count: 0`, and nothing changes about which
+  objects are profiled or what the run is estimated at. Namespaces are records
+  rather than keys, because a warehouse name never becomes a JSON key in the
+  envelope.
+
+### Fixed
+
+- **An uncompiled project's composite keys and foreign keys are read when their
+  inputs sit under `arguments:`** ([#565](https://github.com/exmergo/dex/pull/565)). dbt has asked for a generic test's
+  inputs under `arguments:` since dbt Core 1.10.8, and dbt-utils documents
+  `unique_combination_of_columns` that way, but the schema-YAML reader dex
+  falls back to without a compiled `target/manifest.json` looked for
+  `combination_of_columns`, `to` and `field` only beside the test's name. A
+  test written the current way declared no key and no join, and nothing said
+  so. The compiled read was unaffected, because dbt merges `arguments:` into
+  the manifest's kwargs. The YAML reader now merges it the same way, with
+  `arguments` winning over a key beside it as in dbt, and also reads the
+  `test_name:` spelling (`- name: ...` with `test_name: unique`), which
+  declared nothing either. Checked against `dbt parse` on dbt-core 1.11.11:
+  across all four spellings, the compiled and uncompiled reads now agree on
+  every composite key, foreign key, and `unique`/`not_null` key.
+
+- **Nested MetricFlow schema errors identify the offending entity or measure**
+  ([#537](https://github.com/exmergo/dex/issues/537),
+  [#553](https://github.com/exmergo/dex/pull/553)). An invalid property previously
+  named only the semantic model, leaving the user to locate the element in the
+  YAML. The message now includes its index and name when available, for example
+  `semantic model 'orders' > entities[1] ('customer')`. Validation rules and
+  model-level error messages are unchanged.
+
+</Update>
+
+<Update label="1.13.0" description="2026-10-12">
+
+### Changed
+
+- **`maintain`'s description claims the diagnostic intent, and states its two
+  modes** ([#233](https://github.com/exmergo/dex/pull/233)). It opened on drift and said to reach for it "when something
+  that used to work has started failing", so a request that presupposes no
+  baseline and no change ("this model is wrong, work out why", "the numbers
+  look too high", "some rows are missing", "the project is broken", "check my
+  models against the warehouse") landed on no skill at all: not exploration,
+  since a project exists; not authoring, since the model exists; not drift,
+  since nothing is known to have moved. The description now opens on whether an
+  existing project is correct and why not, names `maintain verify` as the
+  no-baseline mode beside `check` and `reconcile` against the snapshot, carries
+  those phrasings, and restates the boundaries: writing the fix, or a model you
+  just edited and broke, is `transform`'s; a warehouse or data question with
+  no project in the picture is `explore`'s. The triggering suites gain the
+  phrasings as `maintain` positives and the mirror negatives in `transform`'s
+  and `explore`'s, and a test now holds every skill's frontmatter to parsing
+  as YAML with a string `description`, the property the 1.0.1 fix restored by
+  hand. Deliberately after [#224](https://github.com/exmergo/dex/pull/224) and [#231](https://github.com/exmergo/dex/pull/231) landed, as the issue required: a
+  description that triggers a skill which then refuses for want of a baseline
+  would be worse than one that does not trigger.
+
+- **The maintain skill says how to triage a large drift report** ([#544](https://github.com/exmergo/dex/pull/544)). A
+  `maintain check` against a week-old baseline returned hundreds of findings,
+  and the number that resolved the session came from the next command:
+  `maintain reconcile`'s `mechanical_count`, zero, beside `advisory_count`.
+  Mechanical proposals exist only where dex can author the fix itself, so zero
+  of them across hundreds of schema findings, with no dropped or retyped
+  columns or tables among the codes, means the baseline is behind the project
+  rather than the warehouse having moved. The result already returned both
+  counts and the skill defined both terms; nothing told the reader to use them
+  for triage. The *Reconcile proposals* section now opens with that heuristic
+  and points at the re-baseline discipline. Documentation only.
+
+### Fixed
+
+- **Answering the one-time ceiling ask no longer rewrites `.dex/config.yml`**
+  ([#547](https://github.com/exmergo/dex/pull/547)). `--session-ceiling` and `--no-session-ceiling` went through a full
+  YAML re-dump of the file, which dropped every comment, reordered the keys to
+  the schema's order, deleted any key the release did not read, rewrote `5` as
+  `5.0`, and dropped an explicit null, so `cluster.sample_seed` written as null
+  (a fresh draw per run) silently became the default `0`. The answer is now an
+  in-place edit of the budget lines alone, reported as the same `update` diff,
+  and the rest of the file is byte-for-byte what it was.
+
+- **The skill wrapper installs the `ossie` extra for every command that can
+  read a native Ossie semantic layer** ([#536](https://github.com/exmergo/dex/pull/536)). `_feature_extras` in
+  `skills/*/scripts/run.py` chose extras from the command and had branches for
+  `cluster` and the two semantic extras, none for Ossie, so with
+  `semantic.vendor: ossie` the engine was installed without `jsonschema` and
+  the loader refused by name. On BigQuery it worked by coincidence: that
+  connector's own dependency tree carries `jsonschema` at exactly the floor the
+  extra declares. `explore semantic`, `semantic ossie`, `maintain semantic`,
+  `maintain check` and `maintain snapshot` now resolve `ossie` on every
+  connector. Resolved from the command rather than from `semantic.vendor`,
+  which sits in a nested config block the stdlib-only wrapper does not parse;
+  the wrapper's own rule is to err toward a heavier install, and `jsonschema`
+  is small. One test per command, and a structural one over the wrapper's own
+  table of Ossie-reading commands.
+
+- **`maintain verify` resolves a declared grain column against the relation's
+  own spelling before quoting it** ([#483](https://github.com/exmergo/dex/pull/483)). `schema.yml` spells a column the
+  way dbt wrote it, ordinarily lowercase, and the built relation spells it the
+  way the warehouse folded it, which on Snowflake is uppercase. The declared
+  spelling went straight into `COUNT(DISTINCT "id")` against a relation holding
+  `ID`, and Snowflake refused it as an invalid identifier. Each declared column
+  is now matched case-insensitively to the relation's columns, the comparison
+  the column-contract check already makes, and the statement carries the
+  relation's spelling while the finding keeps the declaration's. A declared
+  column the relation does not have is named in `notes` and never sent.
+
+- **A grain statement the warehouse refuses no longer fails the whole
+  command** ([#483](https://github.com/exmergo/dex/pull/483)). The refusal propagated out of the grain class, so one
+  rejected `COUNT(DISTINCT)` turned every other finding into
+  `status: error`. It is now caught per model: that model's grain is reported
+  as unmeasured in `notes`, with the server's own words, and every other
+  model's grain and every other finding class still run.
+
+### Added
+
+- **`dex config get|validate|set` reads, checks and changes `.dex/config.yml`**
+  ([#547](https://github.com/exmergo/dex/pull/547)). Every change to the file was a hand edit, and nothing could check a
+  value or show the effective config without running a data command.
+  `config validate` lists every problem by setting and line: syntax, a value
+  the schema refuses, a key dex does not read (with the key it was probably
+  meant to be), a key written twice, a key that reads as a credential. Any
+  problem makes it an error, so it gates CI on its own. `config get [key]`
+  reports each setting's effective value and where it came from (`file`,
+  `default`, `derived` by a validator, or `environment`), with the line it is
+  written on, and withholds a value under a credential-like name.
+  `config set KEY VALUE [KEY VALUE ...]` is an in-place edit that keeps every
+  comment, the key order and every other line, verified by reloading the
+  result before anything is written. It answers `needs_confirmation` with the
+  diff and writes nothing; the same command with `--confirm` writes it, the
+  handshake a billed command already uses, so a change to a committed file is
+  reviewed before it lands. Several pairs make one change, for settings only
+  valid together. A change that would add a problem stopping commands is
+  refused; a problem already in the file is a warning, so a broken file can be
+  repaired one key at a time. The verbs run before any engine is built: no
+  connection, no store, no connector extra, which is what lets them work on a
+  config every other command refuses to start on. Per-run flags such as
+  `--connector` or `--budget` are refused by name rather than ignored.
+
+- **`dex config unset KEY [KEY ...]` removes a setting, including one dex does
+  not read** ([#556](https://github.com/exmergo/dex/pull/556)). `config validate` and every command's warnings name a
+  mistyped key, and `config set` can write the right one, but nothing removed
+  the wrong one, so fixing a typo still ended in a hand edit; setting it to
+  `null` is a value, not an absence. `unset` makes the same in-place edit
+  behind the same handshake as `set`: `needs_confirmation` with the diff,
+  written on `--confirm`. It takes a key the schema does not know and a whole
+  block, removes a block left with no keys rather than leaving a null, and
+  takes one of the blank lines that separated a removed block with it. A key
+  the file does not write is `ok` with a note naming the nearest key it does
+  write. A key inside one list item is refused, since a list changes as a whole
+  through `set`, and a removal that would add a problem stopping commands is
+  refused as a `set` is. The same change hardens every config diff: a value
+  under a credential-like name reads `<withheld>` in a `set`, `unset` or
+  ceiling-answer diff, context lines included. `set` refuses a credential-like
+  key inside a value as it already refused one in the key, and `data.changes`
+  reports one row per value, so a block holding a committed credential is
+  withheld rather than tripping the boundary scan after the file was written.
+
+- **A weekly run of the tier-1 unit tests on Windows** ([#487](https://github.com/exmergo/dex/pull/487), part 4). A new
+  workflow, `.github/workflows/windows.yml`, runs `uv run pytest -q` on
+  `windows-latest` every Monday and on `workflow_dispatch`, with the same
+  connector-extra sync `ci.yml`'s `tests` job uses. It is not a required check
+  and does not run per pull request: Windows is not a claimed platform, the
+  suite takes a quarter of an hour on a Windows workstation, and a Windows leg
+  on every pull request would make Windows-only flakiness a merge blocker. What
+  it buys is that the class of regression [#264](https://github.com/exmergo/dex/pull/264) and [#487](https://github.com/exmergo/dex/pull/487) were (a platform
+  separator in a path the engine prints, a test that assumes POSIX) is caught
+  within a week rather than when the next Windows user reports it. The job
+  sets `core.autocrlf false` before checkout: Git for Windows converts text
+  files to CRLF by default, which moves the bundled Ossie schema's recorded
+  hash, and the wheel ships LF. Nothing about the engine or the tests changes.
+  
+- **`maintain check` and `maintain schema` say so when the warehouse read and
+  the baseline cover different datasets** ([#543](https://github.com/exmergo/dex/pull/543)). Every object in a dataset
+  the baseline never covered was reported as `table_added`, and every object in
+  a dataset the read no longer lists as `table_dropped`, with nothing saying the
+  block was a difference of scope rather than the warehouse moving: a baseline
+  pinned when the map covered one environment's datasets, then a read that
+  lists another's, diluted the real drift in the same report. Both commands now
+  compare the dataset sets before reporting and carry one warning per
+  direction, naming the datasets and the number of findings they account for,
+  with the re-pin to make if the datasets belong in the baseline. The findings
+  themselves are unchanged, and the count the warning quotes honours the same
+  `<objects>` scope the findings do. Matching scopes add no warning.
+
+### Changed
+
+- **An invalid `.dex/config.yml` is `reason: configuration`, by setting and
+  line** ([#547](https://github.com/exmergo/dex/pull/547)). A value the schema refused surfaced as pydantic's own
+  multi-line text with `reason: request`, which reads as the caller's input
+  being wrong, and a file that did not parse escaped as `reason: internal`.
+  Both now refuse every command with `reason: configuration` and one line per
+  problem (`line 12: query.max_rows: ...`), pointing at `dex config validate`.
+  For a host on the Python API, `DexEngine.from_repo` raises
+  `InvalidConfigError`, a `ConfigurationError` exported from the package root,
+  instead of pydantic's `ValidationError`; both are `ValueError`s.
+- **A key dex does not read now warns on every command** ([#547](https://github.com/exmergo/dex/pull/547)). The loader
+  dropped unknown keys without a word, so a mistyped
+  `budget.session_celing` was a cumulative ceiling that silently did not
+  exist. Every envelope now carries a warning naming the key, its line, and
+  the key it was probably meant to be, and a key written twice warns the same
+  way. Neither refuses anything: a project carrying a key a later release
+  retired keeps working.
+
+</Update>
+
+<Update label="1.12.8" description="2026-10-11">
+
+### Fixed
+
+- **`dex demo` names its paths with forward slashes on Windows too** ([#487](https://github.com/exmergo/dex/pull/487)).
+  `data.path`, `data.created`, the `--repo-root` and `--path` its printed next
+  steps carry, and its two refusals that name a path all used the platform
+  separator, so on Windows the demo reported `.dex\config.yml` for the file
+  every other command and every document calls `.dex/config.yml`, and a
+  backslash path in a printed command came out in single quotes, which cmd
+  passes through as part of the path. Each is now spelled with forward slashes
+  on every platform, the rule `transform/dev_target.py` already follows for
+  the paths in its messages ([#264](https://github.com/exmergo/dex/pull/264)). The printed commands still go through
+  `shlex.quote`, applied to that form, so an ordinary path prints unquoted and
+  types the same into any shell. Nothing changes on macOS or Linux; on Windows,
+  a consumer comparing `data.created` with a native path should compare them
+  as paths, or through `as_posix()`.
+
+- **A `semantic.ossie.files` entry that is anchored on either platform is
+  refused where it is configured, on every platform** ([#487](https://github.com/exmergo/dex/pull/487)). The check
+  asked `Path.is_absolute()` and looked for `..` with the running platform's
+  rules: on Windows `/abs.ossie.yaml` has a root and no drive, so it is not
+  absolute and passed, and on Linux `\abs.ossie.yaml`, `C:abs.ossie.yaml` and
+  `..\out.ossie.yaml` are ordinary file names. A name that POSIX or Windows
+  path rules read as anchored, or as climbing out with `..`, is now refused
+  with the same message wherever the committed line is read. Nothing outside
+  the repository was ever read: the loader checks confinement on the resolved
+  path and still does. What changes is that such a line is refused where it is
+  written, and that `C:abs.ossie.yaml`, which Windows joins onto a repository
+  on drive `C:` as `abs.ossie.yaml` inside it and Linux reads as a file named
+  `C:abs.ossie.yaml`, no longer names a different file on each platform.
+
+- **A plan for a nested dbt project has one digest on every platform and applies
+  on any of them** ([#527](https://github.com/exmergo/dex/pull/527), reported by @catincloudlabs). A plan records where
+  the dbt project sits relative to the repository root, and `transform export`
+  carries it into the portable document as `project_dir`. It was written with
+  the platform separator, so a project pinned with `dbt_project_dir: wh/dbt` was
+  recorded as `wh\dbt` on Windows. The digest covers `project_dir`, so the same
+  plan digested differently on Windows and Linux, and a host that pinned
+  `--expect-digest` on one refused the plan exported on the other. A document
+  exported on Windows also did not apply on Linux or macOS, where `wh\dbt` is a
+  single directory name. `project_dir` is now recorded with forward slashes on
+  every platform, like every edit path. A document exported on Windows before
+  this still verifies against the digest taken over its backslash, and
+  `transform apply --plan-file` reads the backslash as a separator, so it
+  applies too. A plan already stored on Windows keeps the backslash until it is
+  planned again; it still applies in the checkout that stored it.
+
+- **`transform test --mutate` and `--scaffold` find a model the same way**
+  ([#528](https://github.com/exmergo/dex/pull/528), reported by @catincloudlabs). `--mutate` matched the model's path
+  against the configured `model-paths` entry stringified with the platform
+  separator, so on Windows a nested entry such as `src/models` never matched and
+  `--mutate` refused a model that `--scaffold` found. On every platform it had
+  no segment boundary, so with `model-paths: ['models']` an analysis under
+  `models_analysis/` could be taken for a model: `--mutate` gave it the
+  ephemeral header and ran `dbt compile` before refusing. `--scaffold` had the
+  boundary but refused `./models` and `models/`, which dbt reads as `models`.
+  Both now read one lookup, which decides membership by directory the way
+  containment does. A name that is not a model, or that two model files share,
+  is refused before any dbt run, with the same message and `reason: request`
+  from both flags.
+
+### Added
+
+- **A BigQuery statement refused before it ran says so in `data.stage`, apart
+  from one that ran and failed** ([#524](https://github.com/exmergo/dex/pull/524)). Since [#480](https://github.com/exmergo/dex/pull/480) both read
+  `execution_failure`, which stays true of both, and nothing structured told
+  them apart. A statement BigQuery would not plan (the dry run, or the job
+  insert, answered 400) ran nothing, billed nothing, and will be refused again
+  until it changes; one that planned and then failed at `job.result()` may have
+  billed and can fail on the data. A host had to search the message for the
+  request line google-api-core puts in front of the first, which depends on how
+  a client library renders an HTTP error and is not a contract.
+  `WarehouseQueryError` now carries `stage` (`StatementStage.PLAN` or
+  `StatementStage.RUN`, importable from `exmergo_dex_core`), set at BigQuery's
+  three raise sites and kept by `naming()`, and `error_for` puts it in the error
+  envelope's `data.stage`, so every command and the CLI's catch-all carry it. A
+  multi-statement `explore query` carries it per statement, beside that
+  statement's `reason`. Downstream-visible and additive: `reason` and the error
+  text are unchanged, the key is absent on every other error envelope and every
+  other connector, and the profile's own aggregate statements still degrade on a
+  refused dry run rather than raising.
+
+### Security
+
+- **The skill wrapper finds the engine from its own location and withholds
+  credentials the engine never reads** ([#520](https://github.com/exmergo/dex/pull/520)). `run.py` located the local
+  `packages/dex-core` through `CLAUDE_SKILL_DIR`, so whatever controlled the
+  environment could point uv at a different tree to build and run; it now uses
+  the directory the script itself lives in, which is where the harness already
+  found it. The engine (and the warm-up's uv) now runs with a copy of the
+  environment that leaves out `CLICKHOUSE_CLOUD_API_KEY`,
+  `CLICKHOUSE_CLOUD_API_SECRET`, `DEX_TEST_CH_CLOUD_API_KEY`,
+  `DEX_TEST_CH_CLOUD_API_SECRET`, `GITHUB_TOKEN`, `GH_TOKEN`, and `GHRS_TOKEN`,
+  plus `VIRTUAL_ENV` as before, and the wrapper no longer edits its own
+  environment to do it. Every connector discovery variable still passes. One
+  consequence: a private dbt package whose `packages.yml` authenticates with
+  `env_var('GITHUB_TOKEN')` no longer resolves when `transform build` runs
+  `dbt deps` through the skill; dbt's own `DBT_ENV_SECRET_GIT_CREDENTIAL` passes
+  through and is the variable to use. The missing-uv refusal now leads with
+  `brew install uv` and `pipx install uv` and links the uv docs instead of
+  printing a `curl ... | sh` an agent might run, and each `SKILL.md` and
+  `AGENTS.md` tell the agent to relay the install command, never run an
+  installer itself. Reported by Sthenos Security.
+
+- **`profiles.yml` is written owner-only, and a Snowflake private key file
+  other accounts can read is refused** ([#523](https://github.com/exmergo/dex/pull/523)). `transform init` and every
+  apply that rewrites a `profiles.yml` now write it `0600` whatever the umask
+  says, tightening an existing one too. dex renders only `env_var()` references
+  and key paths there, but it is the file a password gets pasted into, and at
+  the usual `0644` every account on the machine could read it. Snowflake
+  discovery now refuses a `private_key_file` or `private_key_path` with any
+  group or other permission bit, the rule `ssh` applies, naming the file, its
+  mode, and the `chmod 600` that fixes it, before any connection is attempted.
+  `connect test` reports it as `configuration`, and `transform init` refuses
+  before rendering a profile. A path that does not resolve is left to the
+  connector's own error, and Windows is not checked because its mode bits are
+  synthesized. Reported by Sthenos Security.
+
+- **Integration CI hands each long-lived credential to the one step or command
+  that reads it, not to a whole job** ([#519](https://github.com/exmergo/dex/pull/519)). The ClickHouse Cloud API key
+  and secret sat in the `clickhouse_cloud` job's environment, and
+  `preflight.sh` exported them again, so uv, pytest, dbt, and the engine all
+  inherited a control-plane key only `clickhousectl` uses. One step now writes
+  the key to owner-only files on `/dev/shm`, and the new
+  `scripts/clickhouse_cloud/secrets.sh` hands them to each `clickhousectl` call
+  (and to curl through a private config pipe) as a variable on that one
+  command; a final step removes them. The scripts read the operator's bootstrap
+  admin key and password the same way, from files named apart from the CI key's
+  so neither can stand in for the other, and unset any copies still exported in
+  the calling shell. Setup proves a newly minted key against a secrets
+  directory of its own, so its readiness check and `--dogfood` run cannot pass
+  on admin scope. The database passwords and the Snowflake dbt key pair moved
+  the same way: Cloud's DSN and dev password and Redshift's `dbt_dev` password
+  ride only on the step whose tests read them, and the Snowflake PEM is written
+  to a file by a step of its own, so the transform suite's step holds only the
+  path. Missing credentials still refuse the job rather than letting a suite
+  skip green, and `preflight.sh` exits 2 naming the file it lacks. Reported by
+  Sthenos Security.
+
+- **The dogfood databases run digest-pinned with every capability dropped**
+  ([#521](https://github.com/exmergo/dex/pull/521)). `scripts/setup_postgres_dev.sh`, `scripts/setup_clickhouse_dev.sh`,
+  and the Postgres job's service container now pin their image by multi-arch
+  index digest and run with `--cap-drop ALL`, `no-new-privileges`, and pid and
+  memory limits. The local containers run as the image's own user, so they need
+  no capability at all; the CI service container keeps its root entrypoint and
+  adds back only `SETUID` and `SETGID`, which that entrypoint needs to drop to
+  `postgres`. ClickHouse's limits are measured rather than copied (it starts
+  about 675 threads before serving a query and peaked near 1.9 GiB over the
+  suite, so it gets 2048 pids and 4 GiB). The new
+  `scripts/check_container_hardening.sh` checks fixed invariants with
+  `docker inspect`, so a container missing any one, including one an older
+  script left behind, is refused rather than reused (remove it with `--down`).
+  Reported by Sthenos Security.
+
+</Update>
+
+<Update label="1.12.7" description="2026-10-08">
+
+### Changed
+
+- **The skill bodies open with the procedure, and lookup detail moved into
+  per-skill reference files** ([#489](https://github.com/exmergo/dex/pull/489)). Each `SKILL.md` now starts with the
+  explore, transform, maintain procedure and keeps every rule that changes what
+  an agent does; per-flag and per-connector detail moved to
+  `skills/<skill>/references/`. The Ossie `unknown_key` diagnostic now names the
+  pinned spec version and carries both fixes inline instead of pointing at
+  `PROVENANCE.md`, and the PyPI project description's links now resolve.
+
+- **dex writes its PII stamp under `config.meta` and its tests under
+  `data_tests:`** ([#490](https://github.com/exmergo/dex/pull/490)). dbt moved `meta` under `config:`: a top-level `meta`
+  still parses in dbt-core 1.11 but is deprecated, dbt Fusion rejects it, and the
+  deprecation warning only fires when every adapter in the project is BigQuery,
+  Databricks, Redshift, or Snowflake, so a DuckDB, Postgres, or ClickHouse project
+  never saw it. A model entry carrying both forms is a dbt parse error, so a
+  staging model dex scaffolded with a PII column broke `dbt parse` as soon as
+  anyone added `config: {meta: ...}` to it.
+
+  - `transform plan --scaffold` and `maintain reconcile` now stamp
+    `contains_pii` and `pii_category` under model and column `config.meta`. The
+    key names are unchanged, because tools outside dex read them.
+  - Every reader of the stamp accepts both locations, preferring `config.meta`,
+    so a project scaffolded by an older dex keeps working without a rewrite.
+  - A `schema_yml` edit that leaves one model, seed, or snapshot entry with both
+    a top-level `meta` and `config.meta`, or one entry or column with both
+    `tests` and `data_tests`, is refused at plan time with the fix named rather
+    than reaching `dbt parse`.
+  - The scaffold writes `data_tests:`, dbt's current key. A test dex adds to a
+    column that already has a list keeps that list's key; a column with no list
+    takes the spelling the file already uses, and `data_tests` when it has none.
+  - The keys the writers emit and the keys the semantic request gate accepts now
+    come from one list. The gate also reads `pii_category` for the category it
+    names in a refusal.
+  - Messages that told a user to mark a dimension with `meta: {pii: ...}` now say
+    `config: {meta: {pii: ...}}`. 
+
+### Fixed
+
+- **BigQuery's per-table billing floor no longer counts CTE names as tables**
+  ([#508](https://github.com/exmergo/dex/pull/508)). `query_estimate` floors a statement at 10 MB per distinct table it
+  references, because that is BigQuery's minimum per table. A reference to a
+  CTE parsed as a table too, so one physical table read through five CTEs
+  floored at 60 MB, and every dbt data test on an ephemeral model, which dbt
+  wraps in `__dbt__cte__` blocks, was priced the same way; on small dev data
+  that inflation was the whole estimate, and it could push a run over a budget
+  it fit. The names a statement defines as CTEs, at any depth, are now excluded
+  before counting. A reference that carries a dataset or project is still a
+  table whatever it is called, and a statement that reads no physical table
+  still floors at one. The estimate stays an upper bound on what BigQuery
+  bills: a statement never prices below its real floor, and no longer prices
+  above it for the CTEs it names.
+  
+- **`transform plan --scaffold` says in `reason` what clears each refusal**
+  ([#514](https://github.com/exmergo/dex/pull/514)). Every scaffold refusal was one class, `ScaffoldError`, classified
+  `request`, so a host branching on `reason` could not tell "run `explore map`
+  first" from "qualify the name" from "edit the sources file" without parsing
+  the message. The three setup refusals (no exploration cache, an object the
+  cache does not hold, a table with no column profile) are now
+  `ScaffoldPrerequisiteError`, a `PrerequisiteError`, and read `prerequisite`,
+  as the same condition already did from `explore`. The sources-file refusals
+  (a `_dex_sources.yml` the merge will not rewrite: invalid YAML, flow style,
+  anchors and aliases, duplicate keys, a shape it does not expect) are
+  `SourcesFileError`, a `ConfigurationError`, and read `configuration`: the
+  call's input is fine and a person edits the file. An ambiguous name and an
+  unknown macro stay `request`. Both subclasses are still `ScaffoldError`, so an
+  existing `except ScaffoldError` catches what it did, and all three classes are
+  importable from `exmergo_dex_core` rather than from the module that raises
+  them.
+
+</Update>
+
+<Update label="1.12.6" description="2026-10-06">
+
+### Added
+
+- **`transform test --mutate` says which survivors the dev data could ever tell
+  apart** ([#466](https://github.com/exmergo/dex/pull/466)). A surviving mutant is a defect no test caught, and for some
+  survivors no test against today's data could have: an inner join where every
+  key resolves, a window frame no partition is long enough to reach, a dropped
+  status filter whose rows a join removes anyway. Those need a fixture that
+  reaches the case, not another assertion, and the report could not say which
+  was which. Each survivor is now compared with the unmutated model on the dev
+  target and labelled in `equivalence`: `equivalent` when they produce the same
+  rows, `distinguishable` when the data already differs, with the counts that
+  established it (`only_in_mutant`, `only_in_baseline`, `mutant_rows`,
+  `baseline_rows`). Distinguishable survivors are listed first, and
+  `suggested_test` follows the label: a fixture for an equivalent survivor, an
+  assertion over the data for a distinguishable one. Both kinds still count as
+  survived in `score`, since a fixture can catch either.
+
+  **Counts only, never a row.** The comparison fingerprints every row of each
+  side, counts the fingerprints as a multiset, so a mutant that only duplicates
+  rows still differs, and returns four integers. It runs through `dbt show` on
+  the same dev target the tests ran on, and anything back other than exactly
+  those four counts is treated as a comparison that did not run.
+
+  **The model has to reproduce itself first.** Before any survivor is compared,
+  the unmutated model is compared with itself. A `random()`, a uuid or a
+  `row_number()` over ties fails that self-check, and no survivor is labelled
+  rather than every one reading as different. `data.equivalence` reports the
+  self-check and the tally.
+
+  **Free on DuckDB, opt-in and priced once elsewhere.** On DuckDB it runs
+  unasked. On BigQuery and Snowflake it needs `--check-equivalence`, and the
+  comparisons join the batch's one estimate, priced as if every mutant survives,
+  so the run still confirms once. `--no-check-equivalence` turns it off
+  anywhere. Postgres, Databricks, ClickHouse and Redshift report survivors as
+  `not_checked` until dex has a verified whole-row comparison for them. Also
+  available as `DexEngine.test_mutations(model, check_equivalence=...)`.
+
+### Fixed
+
+- **`transform test --mutate` prices each mutant as its own statement** ([#466](https://github.com/exmergo/dex/pull/466)).
+  The batch estimate was meant to splice each mutant into each test's compiled
+  SQL, so a mutant that widens a scan prices higher than the model it came from.
+  It spliced the mutant's dbt file instead, whose `{% raw %}` blocks and
+  `{{ ref() }}` calls no SQL parser reads, so every mutant fell back to the
+  baseline's price: the BigQuery estimates showed one identical line per
+  mutant. Live, on a date-partitioned source, dropping the partition filter now
+  prices at 202 MB and negating it at 229 MB, against a 136 MB baseline.
+
+- **Snowflake quotes the 60-second resume minimum once per command, not once
+  per priced statement** ([#466](https://github.com/exmergo/dex/pull/466)). A command that priced several statements
+  against a suspended warehouse added the floor to every one of them. Mutation
+  coverage prices every test of every mutant, so a 39-statement batch quoted
+  2,379 seconds, of which 2,340 were floors, and was refused at a 300-second
+  budget it fit in. The same fix Redshift already carries for its wake minimum:
+  the floor is quoted once, and charged once, by whichever statement runs first.
+
+- **`dex demo` writes into `--repo-root`, not the directory it was run from**
+  ([#509](https://github.com/exmergo/dex/pull/509)). The demo built its target from the positional argument alone, so
+  `dex --repo-root R demo` wrote `dex_demo.duckdb` and `.dex/config.yml` into the
+  process's current directory and never touched `R`. Nothing reported it: the
+  envelope's `path` and `created` were relative and read as correct, and a
+  checkout that ignores both files kept `git status` clean.
+
+  A relative target now resolves against the `--repo-root` directory, on either
+  side of `demo`, so the command writes what `cd R && dex demo` would. That is
+  the directory as given, not the project root dex walks up to, so a config
+  above `R` is still left alone with a warning rather than shadowed. `path`,
+  `created`, and the config diff stay relative to that directory, the way
+  `transform init` reports its files. The printed next steps carry the same
+  `--repo-root`, because without it the cache `explore map` writes would land in
+  the current directory one command later, and any `--path` they name is
+  spelled from the caller's shell. An absolute target, and `dex demo` with no
+  `--repo-root`, behave as before.
+
+</Update>
+
+<Update label="1.12.5" description="2026-10-02">
+
+### Fixed
+
+- **`transform build --verify` judges the dev schema a first build creates, and
+  judges a rebuild on the row counts dbt just wrote** ([#484](https://github.com/exmergo/dex/pull/484)). `--verify` reads
+  the dev namespace dbt writes into, and dex resolved and listed it while
+  pricing, before dbt had run. Measured on Snowflake:
+
+  - A dev schema that did not exist yet failed to resolve, and every node of
+    the build was reported as unpriced, including nodes that read only
+    sources. The estimate came to 0 seconds. Once confirmed, dbt built and
+    billed, and the listing raised: the envelope said `error`, `data` was
+    empty, and the build's seconds never reached the spend ledger.
+  - A dev schema that existed but was empty was listed empty, and row
+    population was suppressed as "outside dex's read scope" for relations
+    that were in it.
+  - A rebuild was judged on the catalog row counts listed before dbt rebuilt
+    the table. A rebuild that introduced a fanout (4 customers to 6 rows) read
+    clean, and the rebuild that fixed it was still reported as `row_fanout`.
+
+  The same timing affected Databricks, Redshift, ClickHouse, and Postgres
+  wherever pricing lists the inventory. On BigQuery, pricing is a dry run and
+  the listing is not cached, so only a `dev_dataset` no model lands in (every
+  model built into a custom schema) failed, raising after the build.
+
+  The dev namespace is now held apart from the committed allowlist and read for
+  the one command that asks. It need not exist: before a first build it reads
+  as empty, and a committed entry that names nothing is still refused. Once dbt
+  has run, the adapter forgets what it listed, so the sweep judges what dbt
+  wrote. A listing that still fails after the build becomes a row-population
+  suppression rather than an error, so the build's result and spend are always
+  reported. An allowlist that already covers the dev namespace (the whole dev
+  database) reads it once, where before it was appended as text and failed on
+  a first build. `--scope` narrows the sources and no longer drops the dev
+  namespace from a verified build.
+
+  Two behaviors change. `--scope` naming the dev namespace is now outside the
+  committed allowlist like any other namespace, so a verified build given one
+  reports the refusal as its row-population suppression. The suppression for
+  relations dex cannot see no longer advises adding the dev namespace to the
+  source allowlist: `--verify` reads it without that. A dev namespace added to
+  `<connector>.databases`, `schemas`, `catalogs` or `datasets` on that advice
+  can be removed, and while it stays it is a committed entry, refused whenever
+  it names nothing.
+
+- **`explore profile` no longer reports a key of short codes as mixing value
+  shapes because some of them are spelt in the letters A to F** ([#481](https://github.com/exmergo/dex/pull/481)). A
+  table keyed by day and ISO country code was reported as *"country is a
+  candidate key but mixes value shapes: 11% 2-character hexadecimal, 89%
+  other"*, on a column where every value is a two-letter code. Fifteen codes
+  (AD, AE, AF, BA, BE, CA, DE, EC and seven more) use only the letters A to F,
+  and the hexadecimal shape tested the character set alone, so they counted
+  as hex. The same went for airline seats (`12A` through `40K`), grid
+  references, and three-letter currency codes such as `CAD`. A value now counts
+  as hexadecimal only at 8 characters or more. Below that, ordinary codes are
+  spelt in the hex alphabet by chance often enough to clear the 5% share the
+  note reports from (a random two-letter code is 5.3% of the time); at 8 the
+  chance is 0.15%, and 8 hex characters (32 bits) is the shortest hex id in
+  common use. md5, sha1, sha256, dashless UUIDs and mixed-length hex columns
+  are reported exactly as before.
+
+  A hex value shorter than 8 characters now counts as `other` instead, so a
+  population of short hashes (7-character git short SHAs, say) mixed into a
+  numeric key is still reported, as `90% numeric, 10% other` rather than `90%
+  numeric, 10% 7-character hexadecimal`. The only mix that stops being reported
+  is a short code split across the two groups by its spelling.
+
+  The note's consequence clause now follows the groups it reports. *"casting to
+  a number or comparing numerically will silently drop the non-numeric
+  group(s)"* is kept, word for word, whenever a numeric group is one of them. A
+  mix with no numeric group (md5 hashes beside slugs, UUIDs beside sha1 hashes)
+  had the same warning about a cast nobody makes, and now ends with *"a join or
+  filter written for one shape will silently miss the other group(s)"*.
+
+- **`maintain verify` runs its relation-existence and grain checks on a project
+  format that is not dbt** ([#479](https://github.com/exmergo/dex/pull/479)). `verify` resolved the dbt project
+  directory before it consulted the project format, so a repository configured
+  with another format (`dagster-dex`, say) and no dbt project had every check
+  suppressed with *"maintain verify needs a dbt project"*. The command answered
+  `ok` with no findings, and a model the format declared but the warehouse did
+  not hold went unreported, although `maintain snapshot` read the same format on
+  the same root. `no_relation` and `grain` were already computed from the
+  format's declarations, past the one call that refused.
+
+  `verify` now reads the project format first. For a format other than dbt,
+  `no_relation` and `grain` run from the model relations it declares, and the
+  five checks that read dbt's `target/` artifacts (`compile`, `build_status`,
+  `row_population`, `column_contract`, `join_contract`) are suppressed with
+  *"the '&lt;name>' project format does not provide dbt target/ artifacts"*. On a
+  dbt project the checks run as before, and `warnings` now also carries the
+  project's declaration notes, such as a manifest older than the model sources.
+
+  A repository on the dbt format with no dbt project still has every check
+  suppressed, under new reasons: the five artifact checks report *"dbt target/
+  artifacts are unavailable"* with the project error, and `no_relation` and
+  `grain` report *"the project format returned no readable project
+  declarations"*. `row_population` is now listed among them, where before it was
+  missing from `suppressed`.
+
+</Update>
+
+<Update label="1.12.4" description="2026-09-30">
+
+### Security
+
+- **The `clickhouse_cloud` integration job installs `clickhousectl` from a
+  pinned, checksum-verified GitHub release asset instead of piping
+  `https://clickhouse.com/cli` into a shell** ([#471](https://github.com/exmergo/dex/pull/471)). The job's environment
+  holds four ClickHouse Cloud secrets, and the old installer ran whatever that
+  URL returned, unpinned, since it also resolved `releases/latest` from the
+  GitHub API at run time. The install step now downloads the pinned version's
+  bare `x86_64-unknown-linux-musl` binary from its GitHub release URL,
+  verifies its sha256 (read from the release's own asset digest, committed in
+  the workflow as `CLICKHOUSECTL_SHA256`) with `sha256sum -c` before doing
+  anything else with it, and only then installs it to `$HOME/.local/bin` and
+  adds that to `PATH`, exactly as before. No tarball, so no extraction step
+  either. Bumping the pinned version is a deliberate two-value edit
+  (`CLICKHOUSECTL_VERSION` and `CLICKHOUSECTL_SHA256`, the latter re-read from
+  the release rather than copied from anywhere else); Dependabot does not
+  track a version held in an `env:` key, so nothing proposes this bump
+  automatically. The job's trigger, repository gate, environment binding, and
+  inherited permissions are unchanged; only the install step is touched.
+  Reported by Sthenos Security in the same CI/CD supply-chain review as
+  [#472](https://github.com/exmergo/dex/pull/472).
+
+- **Every third-party GitHub Action is pinned to a full commit SHA, with
+  Dependabot proposing the bumps** ([#472](https://github.com/exmergo/dex/pull/472)). A mutable tag (`actions/checkout@v4`,
+  `astral-sh/setup-uv@v5`, and five others, 41 occurrences across
+  `.github/workflows/`) can be moved to different code by the action's owner or
+  by anyone who compromises them, and the next run executes that code with the
+  job's token, secrets, and OIDC permissions. `release.yml`'s `publish` and
+  `publish-stub` jobs (PyPI Trusted Publishing) and `integration.yml`'s cloud
+  jobs (OIDC federation into GCP, Snowflake, Databricks, and AWS, plus four
+  ClickHouse Cloud secrets) carried the highest exposure, but every workflow is
+  pinned so the rule has no exceptions. Each `uses:` now names a 40-character
+  SHA with the tag it resolves from kept as a trailing comment (`@<sha> # v4`);
+  `.github/dependabot.yml` adds the `github-actions` ecosystem on a weekly
+  schedule, grouped into one PR so a week of pin bumps does not arrive as a
+  dozen. No workflow's triggers, permissions, or environment bindings changed,
+  and no action was upgraded: this is a pin, not a version bump. Reported by
+  Sthenos Security in a CI/CD supply-chain review of v1.12.3.
+
+### Fixed
+
+- **A versioned dbt model is verified as its own model, and named with its
+  version, in `transform build --verify` and `maintain verify`** ([#478](https://github.com/exmergo/dex/pull/478)). dbt
+  writes a versioned model's id as `model.shop.dim_customers.v2` and keeps its
+  `name` as `dim_customers` across every version. dex read a model's name off
+  the last segment of that id in some places and off the shared `name` in
+  others, and neither tells two versions apart.
+
+  Reading the last segment put `v2` in the `--verify` scope, which matches no
+  model, so the version dropped out of row population without a note. A build
+  of only versioned models was then suppressed as "no model this build ran
+  could be lined up against a driving parent", which names the wrong cause.
+  Measured on dbt 1.11 against DuckDB, BigQuery and Snowflake: a `dim_customers`
+  v2 that fans out 4 rows to 5 was reported by none of them, and was reported
+  as `row_fanout` on `dim_customers.v2` once fixed.
+
+  Reading the shared `name` collapsed the versions onto one entry, and the last
+  one read won. With `dim_customers_v1` dropped from the warehouse, whole-project
+  `maintain verify` reported no `no_relation` finding at all, because v1 was
+  being checked against v2's relation. Two versions in one compile overwrote
+  each other in the per-node build estimate, so the breakdown summed to less
+  than the total. Findings and notes named `dim_customers` without saying which
+  version.
+
+  A versioned model is now labelled `dim_customers.v2` wherever a model is
+  named: the build's `nodes`, the per-node estimate, the `--verify` scope,
+  finding identifiers, notes and build evidence. This is dbt's own spelling,
+  from `fqn`, `dbt ls` and `--select`. The latest version carries its version
+  too, since two versions are two relations. Unversioned models read exactly
+  as before. The `--verify` sweep is scoped by unique id, so a build of
+  `dim_customers.v2` never judges `dim_customers.v1`. As with dbt's own
+  selector, `maintain verify dim_customers` selects every version and
+  `maintain verify dim_customers.v2` selects one. A relationships test written
+  `to: ref('dim_customers')` resolves to the version dbt resolved it to (the
+  latest), read from the test's dependencies rather than from the string.
+
+- **`explore query` on BigQuery reports a statement the warehouse will not plan
+  as `execution_failure` with BigQuery's own message, not as `internal`**
+  ([#480](https://github.com/exmergo/dex/pull/480)). The execution door already typed the refusal it meets from
+  `job.result()`, so an invalid statement that got as far as running answered
+  `execution_failure`. A statement BigQuery refuses to plan never gets that far:
+  it fails on the free dry run first, during the cost handshake, where the
+  `BadRequest` left the adapter untyped, reached the CLI's last-resort handler,
+  and was classified `internal`, "not a deliberate dex refusal". A host
+  branching on `reason`, as the enum invites, could not tell BigQuery refusing
+  the statement from a crash, and retried it. The dry run behind
+  `query_estimate` and the preflight inside `run_query` now raise the same
+  typed refusal `_run` does. The profile's own aggregate statements are
+  unchanged: their callers degrade to metadata on a refused dry run rather
+  than failing the profile, and still do.
+
+- Databricks `from_json()` inside an unnest remains supported when SQLGlot
+  parses it as `FromJson`, as in 30.19.0. Older parser versions remain
+  supported, and PII, nested subqueries, and unapproved functions retain
+  their existing firewall checks.
+
+- **`transform plan --scaffold` merges into the shared sources file instead of
+  reprinting it, so scaffolding a source one table per call no longer drops the
+  ones an earlier call added** ([#439](https://github.com/exmergo/dex/pull/439)). `_sources_edit` built
+  `models/staging/_dex_sources.yml`'s whole body from only the current call's
+  tables and emitted it as a full-file replacement, so a second `--scaffold`
+  call for a different table produced a plan whose diff declared that table
+  alone. The earlier tables' staging models still `ref()`'d sources the file no
+  longer declared, and the next build refused with a dangling `source()`.
+  Passing several tables to one call was always correct (`--scaffold` is
+  `action="append"`); only the sequential shape, natural for an agent
+  scaffolding a project table by table, lost them, and the deletion sat
+  beneath a routine-looking create in the same diff, easy to approve past.
+
+  Missing declarations are inserted into the existing YAML, preserving source
+  names, database settings, table identifiers, tests, comments, and ordering.
+  Sources sharing a physical schema remain separate. Invalid YAML and shapes
+  that cannot be safely extended are refused rather than regenerated.
+  Re-scaffolding a table the file already declares now produces no edit for it
+  at all, not even a reordering. A `--scaffold` run before any dbt project
+  exists is unaffected: there is nothing yet to merge with.
+
+### Added
+
+- **`explore profile` adds a severity-ordered `findings` array so a column
+  worth acting on is no longer indistinguishable from every other column's own
+  `null_fraction`** ([#291](https://github.com/exmergo/dex/pull/291)). On a reference 107-column staging table, 89
+  columns had a non-zero null fraction and 11 sat at exactly 1.0; every one of
+  those 89 was reported identically, as a number on a column object, with no
+  ordering and no verdict. A 103-trial agent run showed the cost: the string
+  `null_fraction` appeared 438 times across one task's transcript, and the
+  task still failed on a NULL in a required output column, because dex had
+  the answer and never said which of the 89 numbers it was.
+
+  Three checks, each producing a `ProfileFinding` (`column`, `code`,
+  `severity`, `detail`): a column **entirely** NULL in a table that has rows
+  (`fully_null_column`, high severity, the visible symptom of a join that
+  matched nothing or a rename that missed); a column **mostly** but not
+  entirely NULL, at or above `profile_high_null_fraction` (default 0.95,
+  configurable in `.dex/config.yml`) (`mostly_null_column`, low severity, a
+  quieter band since a near-miss is frequently legitimate sparse data); and a
+  column the detected or declared **grain** depends on that the warehouse
+  still allows to be NULL (`nullable_grain_column`, medium severity, a
+  structural risk to that grain regardless of whether any row is null today).
+  The list is sorted high severity first, so a caller reading only the front
+  of it still sees what matters most.
+
+  Deliberately additive: every column's own `null_fraction` is unchanged, and
+  `findings` sits beside `data_quality`'s free-text notes rather than
+  replacing them. Shared with `explore map`'s annotation pass, so the same
+  three checks run wherever grain is detected, though only `profile`
+  serializes them today.
+
+  `CACHE_SCHEMA_VERSION` moves to 5. An older engine reads a version-5 cache
+  fine (an unknown key is ignored); a current engine handed a pre-5 profile
+  would read an empty `findings` as "nothing found" rather than "never
+  computed", so a pre-5 profile is treated as stale and re-profiled once, the
+  same way the version-4 upgrade healed itself.
+
+- **`maintain verify` reports a model's own equality joins whose keys have no
+  value overlap** ([#228](https://github.com/exmergo/dex/pull/228)). Every equality join reachable from a selected
+  model's compiled SQL, not only ones on its single driving-parent chain
+  (a join inside a CTE that is itself joined in later is visited too), is
+  measured with the exact overlap probe `explore relationships --verify`
+  already runs (`explore.relationships.verify_relationships`), applied to a
+  join the project actually wrote rather than one dex inferred or declared.
+  A join at or near a complete orphan rate is `join_zero_overlap` (high
+  severity, the most damaging and least visible defect this sweep can
+  report); one with real but non-catastrophic orphans is `join_orphans`
+  (medium), which is also where a left join whose right side is legitimately
+  sparse lands, reported at its measured fraction rather than characterized
+  as broken. `JOIN ... USING (col)` is recognized as the equality it implies,
+  the same as a written `ON`. A join whose condition is not a plain
+  conjunction of column-to-column equalities (an `OR`, a range predicate, a
+  condition mixing a real equality with something else) is skipped rather
+  than probed as a partial key, since a probe built from only part of the
+  real condition can under- or over-report the true orphan rate; the skip is
+  named in `warnings` rather than silent. A composite equality (`ON a.x =
+  b.x AND a.y = b.y`) is measured as one combined key, not two independent
+  single-column probes, which would answer a different and generally wrong
+  question. A self-join is only excluded when both sides are the literal
+  same key on the same relation (`t.col = t.col`, which matches every row
+  against itself by construction); one on different columns (`employees.
+  manager_id = managers.id`, both reading `employees`) is a real, checkable
+  join. A join whose key passes through a CTE that renames or computes it
+  (`select customer_id as cid from orders`), or that projects it from a
+  relation the CTE itself joins rather than its FROM (`select o.order_id,
+  c.region_id from orders o join customers c on ...`), is resolved to the
+  physical relation and column the rename or projection actually reads,
+  through as many CTE or inline-subquery hops as it takes, rather than
+  probing a column name the wrong relation does not have; a computed
+  projection, or a `select *` spanning more than one relation a plain name
+  could have come from, is unresolvable and the join is skipped instead of
+  guessed. If any one column in a composite key cannot be resolved this way,
+  the whole join is skipped, not just that column: probing the pairs that
+  did resolve is a narrower, different question from the join's real
+  condition, and can read a genuinely broken join as healthy. A join inside
+  an inline subquery (`select * from (select ... join ...) x`), not only one
+  inside a named CTE, is visited too. `JOIN ... USING` is only turned into a
+  candidate when exactly one relation is already in scope to pair it
+  against; chained (`... JOIN b USING (x) JOIN c USING (y)`, where `y` is
+  `b`'s own column, not the original FROM's), which relation actually
+  carries the column is a schema question the SQL text alone cannot answer,
+  so it is skipped rather than guessed against the original FROM table.
+
+  A table reference sharing a CTE's own short name but qualified with a
+  schema or database (``main.orders`` beside a CTE literally named
+  ``orders``) is never mistaken for a self-reference back into that CTE,
+  since a CTE can only ever be referenced unqualified. A model's compiled
+  SQL that is itself a `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` has every
+  branch walked for its own joins independently, not only the outermost
+  scope (which a set operation does not have a FROM/JOIN of its own to
+  read); the same is true one level down, when a CTE or an inline subquery's
+  own body is itself a set operation (`with x as (select ... join ... union
+  all select ...) select * from x`) rather than a plain SELECT, since a join
+  written inside one of its branches is a join the project wrote regardless
+  of what the CTE as a whole looks like. A CTE or subquery that filters or
+  aggregates before a join reads it (`select * from customers where active
+  = true`) is resolved no further and the join is skipped: probing the
+  whole physical table when the project's own SQL joins against only a
+  subset of it can report a join healthy that has zero real overlap once
+  the filter is honored. A column read directly off a set-operation CTE
+  (rather than a join written inside one of its branches) is unresolvable
+  the same way: different branches can read the "same" output column from
+  entirely different relations, so there is no single physical source to
+  resolve it to. `join_contract_plan` parses each model's compiled SQL in
+  the connector's own dialect, `row_population_plan`'s existing parameter
+  and existing reasoning: compiled SQL is written in the project's real
+  warehouse dialect, and parsing it as DuckDB regardless on every other
+  connector is silently wrong at best, a parse failure at worst.
+
+  `sql_shape.equality_column_pairs` is a new shared primitive (the raw
+  columns behind `equality_columns`'s existing rendered-text pairs), and
+  `sql_shape.conjunctive_equality_pairs` builds on it to also respect the
+  condition's Boolean structure, both needed because attributing a join
+  predicate to the two relations and columns it actually equates needs more
+  than rendered text.
+
+  The overlap probe is a real warehouse scan, priced and offered the same
+  way row population's row counts already are, not taken outright. Since
+  `VerifyResult.pending_offer` holds only one offer and both row population
+  and join contract can each need a scan on a metered connector, the two
+  share one combined handshake naming both axes, so confirming buys what the
+  estimate actually described instead of a metered connector silently seeing
+  only whichever axis asked last.
+
+### Changed
+
+- **`ProjectDefinitions` keeps models and sources in separate maps** ([#478](https://github.com/exmergo/dex/pull/478)).
+  `model_relations` now holds only what the project builds, keyed by the model's
+  label, and a new `source_relations` holds what it reads (`source.table` for
+  dbt). A dot in a key used to be what told a source from a model, and
+  `maintain verify` dropped every dotted key before checking models, which a
+  versioned model's label would have been caught by. The Ossie semantic
+  source's datasets, which a document reads and never builds, now arrive in
+  `source_relations` as well. A third-party project format that put sources
+  into `model_relations` should move them to `source_relations`, or `maintain
+  verify` will check them as models.
+
+</Update>
+
+Older releases are in the full [CHANGELOG.md](https://github.com/exmergo/dex/blob/main/CHANGELOG.md) and on [GitHub Releases](https://github.com/exmergo/dex/releases).

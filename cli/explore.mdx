@@ -1,0 +1,185 @@
+---
+title: dex explore
+sidebarTitle: explore
+description: 'Reference for dex explore: every read-only subcommand for inventory, profiling, joins, diagrams, guarded queries, clustering, and semantic layers, with flags.'
+---
+
+make sense of a warehouse: rank objects, profile columns, infer joins
+
+## dex explore inventory
+
+Summarize the objects in scope from metadata. `--rank` orders them by what matters and caps the list. Free metadata on every connector.
+
+```text
+dex explore inventory [--rank] [--limit N] [--all]
+```
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--rank` | order objects by what matters, capped at 30 by default |  |
+| `--limit N` | widen the ranked list to N objects (with `--rank`) |  |
+| `--all` | lift the ranked list's cap (with `--rank`) |  |
+
+## dex explore profile
+
+Profile the named objects from aggregates, never rows: candidate keys, grain, PII flags and data-quality findings. Billed on metered connectors, so it quotes the cost first.
+
+```text
+dex explore profile [--check-cumulative] [--columns {all}] [--refresh]
+    [--use-project] <object> [<object> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `<object> [<object> ...]` | table or view to profile, as the connector qualifies it |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--check-cumulative` | detect running totals and snapshots with a window scan (billed) |  |
+| `--columns {all}` | return every column, not only those with a finding |  |
+| `--refresh` | re-profile even when the cached profile is fresh |  |
+| `--use-project` | fold in the project's declared joins, grain and semantics |  |
+
+## dex explore relationships
+
+Infer join edges with confidences. `--verify` measures each join with an overlap probe, which is billed on metered connectors.
+
+```text
+dex explore relationships [--verify] [--infer-by-overlap] [--refresh]
+    [--use-project] [--use-hosted-semantic-layer]
+```
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--verify` | measure each join with an overlap probe (billed) |  |
+| `--infer-by-overlap` | also find joins by value overlap of key-shaped columns (billed) |  |
+| `--refresh` | re-profile even when the cached profile is fresh |  |
+| `--use-project` | fold in the project's declared joins, grain and semantics |  |
+| `--use-hosted-semantic-layer` | also read the configured hosted semantic layer's catalog |  |
+
+## dex explore map
+
+Build or refresh the draft map in .dex/: the top-ranked objects with grain, keys and PII flags, plus the join edges. Billed on metered connectors, so it quotes the cost first.
+
+```text
+dex explore map [--full] [--detail] [--verify] [--infer-by-overlap]
+    [--refresh] [--use-project] [--use-hosted-semantic-layer]
+```
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--full` | profile every object, not only the top-ranked (billed) |  |
+| `--detail` | return every column and unprofiled object; scans nothing more |  |
+| `--verify` | measure each join with an overlap probe (billed) |  |
+| `--infer-by-overlap` | also find joins by value overlap of key-shaped columns (billed) |  |
+| `--refresh` | re-profile even when the cached profile is fresh |  |
+| `--use-project` | fold in the project's declared joins, grain and semantics |  |
+| `--use-hosted-semantic-layer` | also read the configured hosted semantic layer's catalog |  |
+
+## dex explore diagram
+
+Serialize the .dex/ map as a Mermaid erDiagram. Free and connectionless: it reads only the cache.
+
+```text
+dex explore diagram [--full]
+```
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--full` | draw every eligible object and column |  |
+
+## dex explore query
+
+Run one or more SELECT statements through the query firewall, which returns values only from profiled columns cleared of PII. Billed on metered connectors.
+
+```text
+dex explore query [--sql-file FILE] [--across DATASETS] [--no-auto-profile]
+    [<statement> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<statement> ...]` | one SELECT per argument; each is checked and run on its own |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--sql-file FILE` | read statements from a file, one per line or ;-separated |  |
+| `--across DATASETS` | run each statement once per dataset, substituted for \{ds\} |  |
+| `--no-auto-profile` | refuse unprofiled objects instead of profiling them first |  |
+
+## dex explore cluster
+
+Cluster one object's numeric columns from a bounded sample and return sizes, centroids and silhouette, never rows. Needs the [cluster] extra; billed on metered connectors.
+
+```text
+dex explore cluster [--no-auto-profile] [--features COLUMNS] [--clusters N]
+    <object>
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `<object>` | table or view to cluster |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--no-auto-profile` | refuse unprofiled objects instead of profiling them first |  |
+| `--features COLUMNS` | numeric columns to cluster on, comma-separated |  |
+| `-k`, `--clusters N` | number of clusters (chosen automatically when omitted) |  |
+
+## dex explore semantic
+
+Discover the semantic layer's metrics, dimensions and entities (list), read one dimension's values (values), or run a governed metric query (query). Listing is free; values and query run SQL.
+
+```text
+dex explore semantic [--metric METRICS] [--for-dimension DIMENSIONS]
+    [--search TERM] [--full] [--group-by DIMENSIONS] [--where FILTER]
+    [--order-by COLUMNS] [--grain GRAIN] [--limit N] [--local] [--api]
+    [{list,values,query}] [<name> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[{list,values,query}]` | list the catalog (default), read values, or run a query | `list` |
+| `[<name> ...]` | metrics, comma-separated; in values mode, the one dimension |  |
+
+**Options**
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--metric METRICS` | metrics to query or scope to, comma-separated; repeatable |  |
+| `--for-dimension DIMENSIONS` | list mode: metrics groupable by all these dimensions |  |
+| `--search TERM` | list mode: match names, labels and descriptions |  |
+| `--full` | list mode: lift the catalog's payload caps |  |
+| `--group-by DIMENSIONS` | query mode: dimensions to group by, comma-separated |  |
+| `--where FILTER` | query mode: a filter in the layer's own dialect |  |
+| `--order-by COLUMNS` | query mode: columns to order by, comma-separated |  |
+| `--grain GRAIN` | query mode: time grain, checked against the layer |  |
+| `--limit N` | query mode: return at most N rows |  |
+| `--local` | dex renders and runs the SQL, under the cost guard |  |
+| `--api` | dbt Cloud runs the query; no cost guard applies |  |
+
+Every command here also accepts the [global options](/cli/overview#global-options).
+
+Source: [`packages/dex-core/src/exmergo_dex_core/cli.py`](https://github.com/exmergo/dex/blob/v1.14.0/packages/dex-core/src/exmergo_dex_core/cli.py) ([edit on main](https://github.com/exmergo/dex/edit/main/packages/dex-core/src/exmergo_dex_core/cli.py)). This page is generated; change the source, not the site.

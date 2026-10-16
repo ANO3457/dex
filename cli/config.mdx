@@ -1,0 +1,61 @@
+---
+title: dex config
+sidebarTitle: config
+description: 'Reference for dex config: read every effective setting, validate .dex/config.yml by line, and set or unset keys as reviewable in-place edits that keep comments.'
+---
+
+read, check and change .dex/config.yml, as reviewable diffs
+
+## dex config get
+
+Print every setting, or those under a key, with its value and source. Reads only the file: no connection, no extra needed.
+
+```text
+dex config get [<key>]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<key>]` | show only the settings under this key |  |
+
+## dex config validate
+
+Report syntax errors, refused values, unknown or duplicated keys and credential-like keys, by setting and line. Free.
+
+```text
+dex config validate
+```
+
+## dex config set
+
+Propose the change as a diff that keeps every comment, and write it with `--confirm`. Refuses credential-like keys and values. Free.
+
+```text
+dex config set [<key value> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<key value> ...]` | one or more key and YAML value pairs, applied as one change |  |
+
+## dex config unset
+
+Propose removing keys, including ones dex does not read, as a diff, and write it with `--confirm`. Free.
+
+```text
+dex config unset [<key> ...]
+```
+
+**Arguments**
+
+| Argument | Description | Default |
+| --- | --- | --- |
+| `[<key> ...]` | setting or block to remove, including keys dex does not read |  |
+
+Every command here also accepts the [global options](/cli/overview#global-options).
+
+Source: [`packages/dex-core/src/exmergo_dex_core/cli.py`](https://github.com/exmergo/dex/blob/v1.14.0/packages/dex-core/src/exmergo_dex_core/cli.py) ([edit on main](https://github.com/exmergo/dex/edit/main/packages/dex-core/src/exmergo_dex_core/cli.py)). This page is generated; change the source, not the site.
