@@ -108,7 +108,11 @@ _UNSUPPORTED: dict[str, list[str]] = {
     ],
     "snowflake": [
         "no bytes-scanned cap: the guarded quantity is warehouse time, so a "
-        "statement that reads more than expected inside its timeout is not refused"
+        "statement that reads more than expected inside its timeout is not refused",
+        "the warehouse bills uptime rather than statement time: a 60-second "
+        "minimum each time it resumes, then every second until AUTO_SUSPEND "
+        "suspends it after idling, which no statement-level control avoids; dex "
+        "settles that from a model of Snowflake's billing rules, not a meter",
     ],
     "databricks": [
         "no bytes-scanned cap, and the estimate is a floor rather than a "

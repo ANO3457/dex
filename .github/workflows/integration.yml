@@ -221,15 +221,22 @@ jobs:
         working-directory: packages/dex-core
     env:
       DATABRICKS_HOST: ${{ vars.DEX_TEST_DATABRICKS_HOST }}
+      # The exchanged token expires during longer suites. Explicitly select
+      # the SDK's renewable GitHub provider over its default PAT preference,
+      # including when dbt constructs Config(host=..., token=...).
+      DATABRICKS_AUTH_TYPE: github-oidc
+      DATABRICKS_CLIENT_ID: ${{ vars.DEX_TEST_DATABRICKS_CLIENT_ID }}
+      # setup_databricks_ci.sh pins the federation policy to this audience.
+      DATABRICKS_TOKEN_AUDIENCE: ${{ vars.DEX_TEST_DATABRICKS_HOST }}
       DEX_TEST_DATABRICKS_WAREHOUSE: ${{ vars.DEX_TEST_DATABRICKS_WAREHOUSE }}
       DEX_TEST_DATABRICKS_CATALOG: ${{ vars.DEX_TEST_DATABRICKS_CATALOG }}
       DEX_TEST_DATABRICKS_MAX_SECONDS: "60"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Exchange the GitHub OIDC token for a Databricks OAuth token through
-      # the service principal's federation policy, then hand it to the engine
-      # and dbt through the same DATABRICKS_TOKEN discovery path a PAT would
-      # use: no CI special-casing anywhere downstream.
+      # dbt needs a token to select its SDK-backed token branch instead of an
+      # interactive browser flow. Keep this bootstrap exchange; the explicit
+      # github-oidc auth type above makes both clients acquire fresh tokens
+      # through the SDK rather than keep sending this short-lived token.
       - name: Exchange GitHub OIDC token for a Databricks token
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:

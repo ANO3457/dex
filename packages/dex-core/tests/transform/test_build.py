@@ -2816,6 +2816,10 @@ def _snowflake_build(
     empty_dev_schema: bool = False,
     databases: tuple[str, ...] = ("RAW.PUBLIC",),
     listing_fails: bool = False,
+    warehouse_state: str = "SUSPENDED",
+    auto_suspend: int | None = 60,
+    others_running: int = 0,
+    returncode: int = 0,
 ) -> _SnowflakeBuild:
     """One project, one model, and a warehouse dbt is about to write into.
 
@@ -2823,6 +2827,10 @@ def _snowflake_build(
     more rows than the 4 customers is a fanout. ``rows_before`` is a relation
     an earlier build left behind; without it the dev schema does not exist
     until dbt creates it, unless ``empty_dev_schema`` says it was created empty.
+
+    dbt reports 1.5 seconds of node time spread over a 4-second run, and wakes
+    the warehouse the way a real build does. ``others_running`` is other
+    sessions' load, still there when the build finishes.
     """
 
     pytest.importorskip("snowflake.connector")
@@ -2840,7 +2848,15 @@ def _snowflake_build(
         tables.append(_sf_table("DEV", "DBT_DEV", "DIM_CUSTOMERS", rows_before))
     connection = FakeSnowflakeConnection(
         tables=tables,
-        warehouses=[FakeWarehouse(name="DEX_WH", size="X-Small", state="SUSPENDED")],
+        warehouses=[
+            FakeWarehouse(
+                name="DEX_WH",
+                size="X-Small",
+                state=warehouse_state,
+                auto_suspend=auto_suspend,
+                running=others_running,
+            )
+        ],
         empty_databases=["DEV"],
         empty_schemas=["DEV.DBT_DEV"] if empty_dev_schema else [],
     )
@@ -2920,6 +2936,10 @@ def _snowflake_build(
     def dbt_writes(argv: list[str]) -> None:
         if "build" not in argv:
             return
+        warehouse = connection.warehouses[0]
+        if warehouse.state != "STARTED":
+            warehouse.state = "STARTED"
+            warehouse.resumed_on = "2026-01-01T00:01:00.000-08:00"
         connection.tables[:] = [
             t for t in connection.tables if t.identifier.upper() != _SF_RELATION
         ]
@@ -2929,18 +2949,19 @@ def _snowflake_build(
 
     dbt = _fake_runner_factory(
         monkeypatch,
-        returncode=0,
+        returncode=returncode,
         run_results_json=(
             target / "run_results.json",
             json.dumps(
                 {
+                    "elapsed_time": 4.0,
                     "results": [
                         {
                             "unique_id": _SF_MODEL,
-                            "status": "success",
+                            "status": "success" if returncode == 0 else "error",
                             "execution_time": 1.5,
                         }
-                    ]
+                    ],
                 }
             ),
         ),
@@ -2999,8 +3020,9 @@ def test_a_first_verified_snowflake_build_judges_the_schema_it_created(
         "RAW.PUBLIC",
         "DEV.DBT_DEV",
     ]
-    assert envelope["data"]["spend"]["seconds_billed"] == pytest.approx(1.5)
-    assert _settled_seconds(run.ledger) == pytest.approx(1.5)
+    # The 4-second run plus the 60-second idle tail, on a warehouse it resumed.
+    assert envelope["data"]["spend"]["seconds_billed"] == pytest.approx(64.0)
+    assert _settled_seconds(run.ledger) == pytest.approx(64.0)
     assert run.connection.data_statements == [], "the counts came from the catalog"
 
 
@@ -3065,8 +3087,130 @@ def test_a_verified_build_whose_listing_fails_still_settles_and_ledgers_its_spen
     assert envelope["status"] == "ok"
     reason = envelope["data"]["verification"]["suppressed"]["row_population"]
     assert reason.startswith("the relations this build wrote could not be listed")
-    assert envelope["data"]["spend"]["seconds_billed"] == pytest.approx(1.5)
-    assert _settled_seconds(run.ledger) == pytest.approx(1.5)
+    assert envelope["data"]["spend"]["seconds_billed"] == pytest.approx(64.0)
+    assert _settled_seconds(run.ledger) == pytest.approx(64.0)
+
+
+def test_a_snowflake_build_settled_without_the_uptime_model_says_it_is_a_floor():
+    """Pricing degrades to no adapter when no connection opens, and then nothing
+    read the warehouse, so dbt's statement time is all the settlement has. That
+    figure is a floor, and a caller enforcing a ceiling against it has to know."""
+
+    from exmergo_dex_core.envelope import Cost
+    from exmergo_dex_core.storage.memory import MemoryStore
+    from exmergo_dex_core.transform.commands import _shape_build_result
+
+    summary = {
+        "target": "dev",
+        "success": True,
+        "returncode": 0,
+        "nodes": [{"unique_id": _SF_MODEL, "status": "success", "execution_time": 1.5}],
+        "counts": {"success": 1},
+        "messages": [],
+        "elapsed_seconds": 4.0,
+    }
+    cost = Cost(paradigm=Paradigm.COMPUTE_TIME, estimate=None, ceiling=600.0)
+    result = _shape_build_result(
+        summary, cost, Paradigm.COMPUTE_TIME, "snowflake", MemoryStore(), adapter=None
+    )
+    assert result.spend["seconds_billed"] == pytest.approx(1.5)
+    assert any("which is a lower bound" in w for w in result.warnings)
+    assert "elapsed_seconds" not in result.data()
+
+
+def _sf_build(repo: Path, capsys, *, confirm: bool = True):
+    argv = ["--repo-root", str(repo)]
+    if confirm:
+        argv += ["--confirm", "--budget", "600"]
+    return _run([*argv, "transform", "build"], capsys)
+
+
+def _uptime_notes(envelope: dict) -> list[str]:
+    return [w for w in envelope["warnings"] if "no statement reported" in w]
+
+
+def test_a_build_that_resumed_the_warehouse_settles_its_uptime(
+    dbt_project_dir: Path, tmp_path: Path, capsys, monkeypatch
+):
+    """Snowflake bills uptime: the resume, the whole run, and the idle tail
+    until AUTO_SUSPEND. dbt's 1.5 seconds of node time was what used to settle,
+    flagged as settled."""
+
+    run = _snowflake_build(monkeypatch, dbt_project_dir, tmp_path, built_rows=4)
+    rc, priced = _sf_build(tmp_path, capsys, confirm=False)
+    assert priced["status"] == "needs_confirmation"
+    assert priced["data"]["per_table_seconds"]["(warehouse uptime)"] == 60
+    assert any("first statement resumes it" in n for n in priced["data"]["notes"])
+
+    rc, envelope = _sf_build(tmp_path, capsys)
+    assert rc == 0, envelope
+    spend = envelope["data"]["spend"]
+    assert spend["seconds_billed"] == pytest.approx(64.0)
+    assert spend["seconds_billed"] >= 60
+    assert spend["settled"] is True
+    assert spend["credits_billed"] == pytest.approx(64.0 / 3600, abs=1e-6)
+    assert _settled_seconds(run.ledger) == pytest.approx(64.0)
+    rows = [json.loads(line) for line in run.ledger.read_text().splitlines()]
+    settlements = [r for r in rows if r["entry"] == "settlement"]
+    assert len(settlements) == 1, "the uptime joins dbt's row, keeping one ratio"
+    assert settlements[0]["reservation_id"] is None
+    [note] = _uptime_notes(envelope)
+    assert "This command resumed DEX_WH" in note
+    assert "elapsed_seconds" not in envelope["data"]
+
+
+def test_a_build_on_a_running_warehouse_pays_its_idle_tail_and_no_minimum(
+    dbt_project_dir: Path, tmp_path: Path, capsys, monkeypatch
+):
+    run = _snowflake_build(
+        monkeypatch,
+        dbt_project_dir,
+        tmp_path,
+        built_rows=4,
+        warehouse_state="STARTED",
+        auto_suspend=10,
+    )
+    rc, envelope = _sf_build(tmp_path, capsys)
+    assert rc == 0, envelope
+    # The 4-second run and a 10-second tail; nothing was resumed.
+    assert envelope["data"]["spend"]["seconds_billed"] == pytest.approx(14.0)
+    assert _settled_seconds(run.ledger) == pytest.approx(14.0)
+    assert "DEX_WH was already running" in _uptime_notes(envelope)[0]
+
+
+def test_a_build_on_a_warehouse_others_keep_busy_charges_no_idle_tail(
+    dbt_project_dir: Path, tmp_path: Path, capsys, monkeypatch
+):
+    _snowflake_build(
+        monkeypatch,
+        dbt_project_dir,
+        tmp_path,
+        built_rows=4,
+        warehouse_state="STARTED",
+        others_running=1,
+    )
+    rc, envelope = _sf_build(tmp_path, capsys)
+    assert rc == 0, envelope
+    # The run's own wall time, and no tail: the build is not the last user.
+    assert envelope["data"]["spend"]["seconds_billed"] == pytest.approx(4.0)
+    assert "no idle tail is charged" in _uptime_notes(envelope)[0]
+
+
+def test_a_failed_build_reports_the_uptime_it_ledgered_and_counts_it_once(
+    dbt_project_dir: Path, tmp_path: Path, capsys, monkeypatch
+):
+    run = _snowflake_build(
+        monkeypatch, dbt_project_dir, tmp_path, built_rows=4, returncode=1
+    )
+    rc, envelope = _sf_build(tmp_path, capsys)
+    assert rc != 0
+    assert envelope["status"] == "error"
+    assert envelope["data"]["spend"]["seconds_billed"] == pytest.approx(64.0)
+    assert _settled_seconds(run.ledger) == pytest.approx(64.0)
+    rows = [json.loads(line) for line in run.ledger.read_text().splitlines()]
+    assert sum(
+        float(r.get("billed_seconds") or 0) for r in rows if r["entry"] == "settlement"
+    ) == pytest.approx(64.0)
 
 
 def test_a_verified_build_narrowed_by_a_scope_flag_still_reads_its_dev_target(

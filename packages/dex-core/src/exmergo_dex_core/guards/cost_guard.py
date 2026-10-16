@@ -726,13 +726,15 @@ def preflight(
     return cost
 
 
-def _cap_shortfall(remaining: int, floor: int, unit: str) -> str:
+def _cap_shortfall(remaining: int, floor: int, unit: str, reserve: float = 0.0) -> str:
     """The refusal :meth:`CostGate.statement_cap` raises when what is left of
     the budget cannot be expressed as a cap the server will honour.
 
     Two sentences rather than one per connector: the shortfall is the same
     event whether the floor is one second of statement timeout or BigQuery's
     per-query billing minimum, and the caller's move is the same either way.
+    A reserve is named when there is one, because then the budget is not gone:
+    it is spoken for by spend the command will owe after its statements.
     """
 
     shortfall = (
@@ -743,6 +745,11 @@ def _cap_shortfall(remaining: int, floor: int, unit: str) -> str:
             f"{floor:,}-{unit} minimum this connector can cap a statement at"
         )
     )
+    if reserve > 0:
+        shortfall = (
+            f"{shortfall} once {reserve:,.0f} {unit}s are held back for what the "
+            "warehouse bills outside any statement"
+        )
     return f"{shortfall}; raise --budget or narrow the work"
 
 
@@ -831,6 +838,14 @@ class CostGate:
         # Nothing is admitted or refused on it, which is why a store without
         # `spend_entries` simply passes None here and loses a sentence.
         self._history = history
+        # Spend the warehouse bills for the command as a whole rather than for
+        # any statement in it (Snowflake's resume minimum and idle tail), set by
+        # the adapter that owns this gate the way `estimate_quality` is.
+        # `settle` books it, so every settlement funnel carries it. Returns the
+        # amount and the notes that explain it, which land in
+        # `settlement_notes` for the command to report.
+        self.settle_overhead: Callable[[], tuple[float, list[str]]] | None = None
+        self.settlement_notes: list[str] = []
         self._estimated = 0.0
         self._billed = 0.0
         self._command_estimate: float | None = None
@@ -885,13 +900,13 @@ class CostGate:
 
     @property
     def billed(self) -> float:
-        """What statements issued through this gate have actually charged.
+        """What this gate has actually charged: its statements, plus whatever
+        :meth:`settle` booked for the command as a whole.
 
-        ``settle`` releases the reservation and folds this into the ledger, so a
-        caller that needs the figure for its own reporting has to read it first.
-        The one caller that does is ``transform build``, where dbt's spend is
-        billed outside the gate entirely and this therefore holds exactly what
-        the folded verification phase charged on top of it.
+        Read it after ``settle`` to have the whole figure. ``transform build``
+        is the caller that needs it for its own reporting, because dbt's spend
+        is billed outside the gate entirely, so this holds exactly what the
+        folded verification phase charged on top of it.
         """
 
         return self._billed
@@ -1275,7 +1290,9 @@ class CostGate:
             return False
         return True
 
-    def statement_cap(self, *, unit: str, minimum: int = 1) -> int | None:
+    def statement_cap(
+        self, *, unit: str, minimum: int = 1, reserve: float = 0.0
+    ) -> int | None:
         """The server-side cap to hand the warehouse for the next statement, in
         the paradigm's unit (bytes for ``maximum_bytes_billed``, seconds for a
         statement timeout), or ``None`` when no ceiling applies at all.
@@ -1299,18 +1316,25 @@ class CostGate:
         refused by the server rather than bounded by it. ``unit`` names that unit
         in the refusal in the connector's own vocabulary (a "database-second", a
         "byte"), because it is what the caller has to raise ``--budget`` in.
+
+        ``reserve`` is spend the command will owe after this statement that no
+        statement will report, held out of the cap so the server stops the
+        statement while the whole command still fits the confirmed budget:
+        Snowflake bills a resumed warehouse's 60-second minimum and its idle
+        tail until auto-suspend, and a statement allowed to run to the ceiling
+        would leave the tail over it.
         """
 
         floor = max(minimum, 1)
-        remaining = self._remaining_for_statement()
+        remaining = self._remaining_for_statement(reserve)
         if remaining is not None and remaining < floor:
             raise OverCeilingError(
-                _cap_shortfall(remaining, floor, unit),
+                _cap_shortfall(remaining, floor, unit, reserve),
                 cost=self._cost(self._estimated),
             )
         return remaining
 
-    def _remaining_for_statement(self) -> int | None:
+    def _remaining_for_statement(self, reserve: float = 0.0) -> int | None:
         """What remains of the effective ceiling after everything already
         charged, as the integer every connector's cap setting takes: ``None``
         when nothing bounds the statement, 0 when the budget is exhausted, and
@@ -1339,10 +1363,17 @@ class CostGate:
         ``session_ceiling`` was set, since that is what creates a reservation at
         all. So the exhaustion test reads the ceiling, and the booking is only
         ever allowed to *tighten* the cap, never to turn it into a refusal.
+
+        **The reserve comes off the ceiling term only.** The ceiling is the
+        promise, so what the command will owe after its statements has to fit
+        under it. The booking is the estimate, and the estimate already carries
+        that same overhead as one of its lines; taking it off the booking a
+        second time would leave a statement capped at its bare heuristic, which
+        on a warehouse that has just resumed is a cap the resume alone can hit.
         """
 
         ceiling = self.effective_ceiling()
-        remaining = None if ceiling is None else ceiling - self._billed
+        remaining = None if ceiling is None else ceiling - self._billed - reserve
         if remaining is not None and remaining < 1:
             return 0
         if self._reserved:
@@ -1425,21 +1456,35 @@ class CostGate:
         expiry: expiring a hold would mean teaching every backend's
         ``spend_since`` to tell the entry kinds apart and reason about time,
         which is a protocol change for a case the three funnels already cover.
+
+        **What the warehouse bills for the command as a whole is booked here
+        first**, through ``settle_overhead``, as one more settlement row inside
+        this command's reservation group. Here because this is the one moment
+        every funnel shares, a failed or interrupted command included, and
+        because the overhead is only knowable once the last statement is done.
+        It runs outside the admission section, since it may ask the warehouse a
+        question, and the release runs even when it fails.
         """
 
         if self._settled:
             return
         self._settled = True
-        # Entering the section re-reads the day, which is what makes
-        # `spend_summary` report the true total rather than this command's view
-        # of it. Releasing after that needs no second read: the release lowers
-        # the live total and this gate's own written total by the same amount,
-        # so the difference between them, which is what `session_spent` holds,
-        # does not move.
-        with self._admission(strict=False):
-            if self._reserved:
-                self._append("release", -self._reserved)
-                self._reserved = 0.0
+        try:
+            if self.settle_overhead is not None:
+                overhead, self.settlement_notes = self.settle_overhead()
+                if overhead > 0:
+                    self.record_billed(overhead)
+        finally:
+            # Entering the section re-reads the day, which is what makes
+            # `spend_summary` report the true total rather than this command's
+            # view of it. Releasing after that needs no second read: the release
+            # lowers the live total and this gate's own written total by the
+            # same amount, so the difference between them, which is what
+            # `session_spent` holds, does not move.
+            with self._admission(strict=False):
+                if self._reserved:
+                    self._append("release", -self._reserved)
+                    self._reserved = 0.0
 
     def cost(self) -> Cost:
         """The preflight cost to stamp into the envelope: the whole-command
@@ -1480,7 +1525,9 @@ class CostGate:
                 else None
             ),
             # A gate settles from figures the warehouse handed back statement by
-            # statement, so what it reports is always settled. The flag is
+            # statement, plus any overhead the adapter booked at settlement from
+            # the warehouse's billing rules (named in `settlement_notes`), so what
+            # it reports is always a ledgered figure and always settled. The flag is
             # reported anyway, and always, because a key present on some spend
             # blocks and absent on others reads as a default rather than as a key
             # to look for elsewhere. `transform build` is where it varies: dbt

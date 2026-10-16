@@ -151,12 +151,17 @@ def test_profile_estimate_is_heuristic_and_carries_the_resume_floor(
     assert data_statements(fake_sf_connection) == []
 
 
-def test_no_resume_floor_on_a_running_warehouse(fake_sf_connection):
+def test_a_running_warehouse_quotes_its_idle_tail_and_no_resume_minimum(
+    fake_sf_connection,
+):
+    """Nothing resumes a running warehouse, but the last statement still
+    leaves it idling for AUTO_SUSPEND, and that bills."""
+
     fake_sf_connection.warehouses[0].state = "STARTED"
-    fake_sf_connection.warehouse_resumes_pending = False
+    fake_sf_connection.warehouses[0].auto_suspend = 10
     adapter = make_adapter(fake_sf_connection)
     total, per_table = adapter.profile_estimate(["SHOP.PUBLIC.CUSTOMERS"])
-    assert total == pytest.approx(per_table["SHOP.PUBLIC.CUSTOMERS"])
+    assert total == pytest.approx(per_table["SHOP.PUBLIC.CUSTOMERS"] + 10)
 
 
 def _wide_blob_table():
@@ -186,20 +191,23 @@ def test_profile_estimate_accepts_include_blobs_without_crashing(fake_sf_connect
 
 def test_profile_estimate_excludes_blob_columns_from_batch_count(fake_sf_connection):
     fake_sf_connection.warehouses[0].state = "STARTED"
-    fake_sf_connection.warehouse_resumes_pending = False
     fake_sf_connection.tables.append(_wide_blob_table())
     adapter = make_adapter(fake_sf_connection)
-    total_excluded, _per_table = adapter.profile_estimate(["SHOP.PUBLIC.SESSIONS"])
-    total_included, _per_table = adapter.profile_estimate(
+    total_excluded, per_excluded = adapter.profile_estimate(["SHOP.PUBLIC.SESSIONS"])
+    total_included, per_included = adapter.profile_estimate(
         ["SHOP.PUBLIC.SESSIONS"], include_blobs={"shop.public.sessions.payload"}
     )
-    # 1 batch (50 cols) vs 2 batches (51 cols), no resume floor to muddy the ratio.
-    assert total_included == pytest.approx(2 * total_excluded)
+    # 1 batch (50 cols) vs 2 batches (51 cols). The idle tail is quoted once,
+    # into the first estimate only, so the ratio is read off the scans.
+    assert per_included["SHOP.PUBLIC.SESSIONS"] == pytest.approx(
+        2 * per_excluded["SHOP.PUBLIC.SESSIONS"]
+    )
+    assert total_excluded == pytest.approx(per_excluded["SHOP.PUBLIC.SESSIONS"] + 60)
+    assert total_included == pytest.approx(per_included["SHOP.PUBLIC.SESSIONS"])
 
 
 def test_query_estimate_sums_referenced_tables(fake_sf_connection):
     fake_sf_connection.warehouses[0].state = "STARTED"
-    fake_sf_connection.warehouse_resumes_pending = False
     adapter = make_adapter(fake_sf_connection)
     single = adapter.query_estimate('SELECT COUNT(*) FROM "SHOP"."PUBLIC"."CUSTOMERS"')
     joined = adapter.query_estimate(
@@ -329,7 +337,6 @@ def test_server_side_timeout_translates_when_the_estimate_drifts(fake_sf_connect
     # The estimate says seconds; the statement 'runs' far longer than the
     # remaining budget, and the simulated server kills it at the timeout.
     fake_sf_connection.warehouses[0].state = "STARTED"
-    fake_sf_connection.warehouse_resumes_pending = False
     fake_sf_connection.row_resolver = lambda sql: FakeResult(
         rows=[{"n": 1}], seconds=10_000.0
     )
@@ -345,7 +352,6 @@ def test_server_side_timeout_translates_when_the_estimate_drifts(fake_sf_connect
 
 def test_wall_timeout_translates_to_timeout_error(fake_sf_connection):
     fake_sf_connection.warehouses[0].state = "STARTED"
-    fake_sf_connection.warehouse_resumes_pending = False
     fake_sf_connection.row_resolver = lambda sql: FakeResult(
         rows=[{"n": 1}], seconds=50.0
     )
@@ -361,7 +367,6 @@ def test_wall_timeout_translates_to_timeout_error(fake_sf_connection):
 def test_actual_seconds_land_in_the_ledger(fake_sf_connection):
     entries: list[dict] = []
     fake_sf_connection.warehouses[0].state = "STARTED"
-    fake_sf_connection.warehouse_resumes_pending = False
     fake_sf_connection.row_resolver = lambda sql: FakeResult(
         rows=[{"n": 1}], seconds=2.5
     )
@@ -378,19 +383,238 @@ def test_actual_seconds_land_in_the_ledger(fake_sf_connection):
     assert "SELECT" not in str(entries[0].values())
 
 
-def test_resume_time_is_billed_to_the_first_statement(fake_sf_connection):
+# --- settlement: warehouse uptime, not statement time ---------------------------
+
+
+def _one_query(adapter, **kwargs) -> None:
+    adapter.run_query(
+        'SELECT COUNT(*) AS n FROM "SHOP"."PUBLIC"."CUSTOMERS"',
+        max_rows=10,
+        timeout_seconds=200,
+        **kwargs,
+    )
+
+
+def _settled(adapter) -> tuple[float, list[str]]:
+    adapter.cost_gate.settle()
+    return adapter.cost_gate.billed, adapter.cost_gate.settlement_notes
+
+
+def test_a_command_that_resumed_the_warehouse_settles_its_uptime(fake_sf_connection):
+    """A resume takes a moment of wall time and bills at least 60 seconds, and
+    the warehouse then idles for AUTO_SUSPEND before it suspends. Statement
+    time alone reported one second of that."""
+
+    entries: list[dict] = []
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = make_adapter(
+        fake_sf_connection,
+        record=entries.append,
+        target=SnowflakeTarget(warehouse="DEX_WH", credit_price_usd=3.0),
+    )
+    _one_query(adapter)
+    assert entries[0]["billed_seconds"] == pytest.approx(1.0)
+
+    billed, notes = _settled(adapter)
+    # max(60, 1 second of uptime + the 60-second idle tail).
+    assert billed == pytest.approx(61.0)
+    uptime = entries[-1]
+    assert uptime["entry"] == "settlement"
+    assert uptime["billed_seconds"] == pytest.approx(60.0)
+    assert uptime["statement_sha256"] is None
+    assert uptime["reservation_id"] == entries[0]["reservation_id"]
+    spend = adapter.cost_gate.spend_summary()
+    assert spend["settled"] is True
+    assert spend["unknown_settlement"] is False
+    assert adapter.spend_display()["credits_billed"] == pytest.approx(
+        61.0 * 1.0 / 3600, abs=1e-6
+    )
+    assert len(notes) == 1
+    assert "This command resumed DEX_WH" in notes[0]
+    assert "60-second AUTO_SUSPEND" in notes[0]
+    assert "WAREHOUSE_METERING_HISTORY is the authority" in notes[0]
+
+
+def test_a_running_warehouse_left_idle_pays_its_tail_and_no_resume_minimum(
+    fake_sf_connection,
+):
+    fake_sf_connection.warehouses[0].state = "STARTED"
+    fake_sf_connection.warehouses[0].auto_suspend = 10
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = make_adapter(fake_sf_connection)
+    _one_query(adapter)
+    billed, notes = _settled(adapter)
+    assert billed == pytest.approx(11.0)
+    assert "DEX_WH was already running" in notes[0]
+
+
+def test_a_warehouse_other_queries_keep_busy_charges_no_idle_tail(
+    fake_sf_connection,
+):
+    """The tail belongs to whoever leaves the warehouse idle, and a command
+    that finishes while others are still running does not."""
+
+    fake_sf_connection.warehouses[0].state = "STARTED"
+    fake_sf_connection.warehouses[0].running = 2
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = make_adapter(fake_sf_connection)
+    _one_query(adapter)
+    billed, notes = _settled(adapter)
+    assert billed == pytest.approx(1.0)
+    assert "no idle tail is charged" in notes[0]
+
+
+def test_a_statement_that_never_woke_the_warehouse_adds_no_uptime(
+    fake_sf_connection,
+):
+    """A result-cache hit or a count served from metadata runs without a
+    warehouse, so a suspended one stays suspended and bills nothing."""
+
+    entries: list[dict] = []
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=0.2, wakes_warehouse=False
+    )
+    adapter = make_adapter(fake_sf_connection, record=entries.append)
+    _one_query(adapter)
+    billed, notes = _settled(adapter)
+    assert billed == pytest.approx(0.2)
+    assert notes == []
+    assert len(entries) == 1
+
+
+def test_a_warehouse_that_already_suspended_again_still_bills_its_tail(
+    fake_sf_connection,
+):
+    """Seen suspended after the command means the tail has already been
+    billed, not that the warehouse never ran: ``resumed_on`` moved."""
+
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = make_adapter(fake_sf_connection)
+    _one_query(adapter)
+    fake_sf_connection.warehouses[0].state = "SUSPENDED"
+    billed, _notes = _settled(adapter)
+    assert billed == pytest.approx(61.0)
+
+
+def test_a_warehouse_that_never_suspends_settles_as_a_lower_bound(
+    fake_sf_connection,
+):
+    fake_sf_connection.warehouses[0].auto_suspend = None
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = make_adapter(fake_sf_connection)
+    _one_query(adapter)
+    billed, notes = _settled(adapter)
+    assert billed == pytest.approx(60.0)
+    assert "AUTO_SUSPEND is off" in notes[0]
+    assert "lower bound" in notes[0]
+
+
+def test_a_warehouse_that_cannot_be_read_afterwards_is_charged_its_tail(
+    fake_sf_connection,
+):
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = make_adapter(fake_sf_connection)
+    _one_query(adapter)
+    fake_sf_connection.warehouses.clear()
+    billed, notes = _settled(adapter)
+    assert billed == pytest.approx(61.0)
+    assert "could not be read" in notes[0]
+
+
+def test_uptime_is_booked_once_per_command_and_afresh_for_the_next(
+    fake_sf_connection,
+):
+    """A held engine keeps its adapter and swaps the gate, and a resume the
+    first command paid for must not be remembered by the second."""
+
     entries: list[dict] = []
     fake_sf_connection.row_resolver = lambda sql: FakeResult(
         rows=[{"n": 1}], seconds=1.0
     )
     adapter = make_adapter(fake_sf_connection, record=entries.append)
-    adapter.run_query(
-        'SELECT COUNT(*) AS n FROM "SHOP"."PUBLIC"."CUSTOMERS"',
-        max_rows=10,
-        timeout_seconds=200,
+    _one_query(adapter)
+    adapter.cost_gate.settle()
+    adapter.cost_gate.settle()
+    assert len(entries) == 2
+
+    adapter.cost_gate = CostGate(
+        paradigm=Paradigm.COMPUTE_TIME,
+        ceiling=600.0,
+        session_ceiling=None,
+        session_spent=0.0,
+        confirmed=True,
+        connector="snowflake",
+        command="explore query",
+        record=entries.append,
     )
-    # The suspended warehouse resumed: 60s minimum + 1s of work on the clock.
-    assert entries[0]["billed_seconds"] == pytest.approx(61.0)
+    sql = 'SELECT COUNT(*) AS n FROM "SHOP"."PUBLIC"."CUSTOMERS"'
+    # The warehouse is running now: the second command quotes the tail alone.
+    assert adapter.query_estimate(sql) == pytest.approx(
+        adapter._statement_estimate(sql) + 60
+    )
+    _one_query(adapter)
+    billed, notes = _settled(adapter)
+    assert billed == pytest.approx(61.0)
+    assert "DEX_WH was already running" in notes[0]
+
+
+def test_the_statement_timeout_holds_back_the_uptime_still_owed(fake_sf_connection):
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = make_adapter(fake_sf_connection, ceiling=200.0)
+    _one_query(adapter)
+    # 200 confirmed, less the 60 seconds the warehouse will bill once the
+    # statement is done (resumed, then idle until AUTO_SUSPEND).
+    assert fake_sf_connection.session_parameters["STATEMENT_TIMEOUT_IN_SECONDS"] == 140
+
+
+def test_a_budget_under_the_idle_tail_refuses_before_anything_runs(
+    fake_sf_connection,
+):
+    fake_sf_connection.warehouses[0].state = "STARTED"
+    adapter = make_adapter(fake_sf_connection, ceiling=30.0)
+    with pytest.raises(OverCeilingError):
+        _one_query(adapter)
+    assert data_statements(fake_sf_connection) == []
+
+
+def test_the_estimate_says_what_its_uptime_line_is(fake_sf_connection):
+    adapter = make_adapter(fake_sf_connection)
+    estimate = adapter.query_estimate(
+        'SELECT COUNT(*) AS n FROM "SHOP"."PUBLIC"."CUSTOMERS"'
+    )
+    notes = adapter.describe_estimate(estimate)["notes"]
+    assert any(
+        "DEX_WH is suspended, so the first statement resumes it" in n for n in notes
+    )
+    assert any("idles 60 seconds (AUTO_SUSPEND)" in n for n in notes)
+
+
+def test_capabilities_report_auto_suspend_and_warn_when_it_is_off(
+    fake_sf_connection,
+):
+    caps = make_adapter(fake_sf_connection).capabilities()
+    assert caps["budget"]["warehouse"]["auto_suspend_seconds"] == 60
+    assert caps["budget"]["warehouse"]["state"] == "SUSPENDED"
+    assert "warnings" not in caps
+
+    fake_sf_connection.warehouses[0].auto_suspend = None
+    caps = make_adapter(fake_sf_connection).capabilities()
+    assert caps["budget"]["warehouse"]["auto_suspend_seconds"] is None
+    assert any("AUTO_SUSPEND is off on DEX_WH" in w for w in caps["warnings"])
 
 
 def test_session_remainder_binds_across_commands(fake_sf_connection):
@@ -411,7 +635,6 @@ def test_session_remainder_binds_across_commands(fake_sf_connection):
 
 def test_run_query_truncates_and_shapes_columnar(fake_sf_connection):
     fake_sf_connection.warehouses[0].state = "STARTED"
-    fake_sf_connection.warehouse_resumes_pending = False
     fake_sf_connection.row_resolver = lambda sql: [{"id": i} for i in range(5)]
     adapter = make_adapter(fake_sf_connection)
     result = adapter.run_query(
@@ -1206,18 +1429,20 @@ def test_forgetting_metadata_lists_what_was_written_since(multi_db_connection):
     assert data_statements(multi_db_connection) == []
 
 
-def test_forgetting_metadata_keeps_the_session_and_the_resume_charge(
+def test_forgetting_metadata_keeps_the_session_and_the_uptime_quote(
     fake_sf_connection,
 ):
     """What a forget keeps is what the command has paid for: re-preparing the
-    session or re-quoting the resume minimum would bill a second time for a
-    warehouse the build already woke."""
+    session or re-quoting the uptime would bill a second time for a warehouse
+    the build already woke."""
 
     fake_sf_connection.row_resolver = lambda sql: [{"n": 1}]
     adapter = make_adapter(fake_sf_connection)
     sql = 'SELECT COUNT(*) AS n FROM "SHOP"."PUBLIC"."CUSTOMERS"'
+    first = adapter.query_estimate(sql)
     adapter.run_query(sql, max_rows=10, timeout_seconds=200)
     warm = adapter.query_estimate(sql)
+    assert first == pytest.approx(warm + 60)
 
     adapter.forget_metadata()
     assert adapter.query_estimate(sql) == pytest.approx(warm)

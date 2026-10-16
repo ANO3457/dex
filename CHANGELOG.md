@@ -14,6 +14,215 @@ pending fragments into a new section below. See
 
 <!-- towncrier release notes start -->
 
+## [1.14.0] - 2026-10-16
+
+### Added
+
+- **SLayer models read into the semantic catalog.** Under
+  `semantic.vendor: slayer`, `explore semantic list` reads the configured model
+  files with no warehouse connection. Each file is validated by the pinned
+  release's own `SlayerModel`, and SLayer's storage is never opened, because
+  opening it moves and renames files. A file in any format version but the pinned
+  release's current one (15) is refused before SLayer can migrate it, as are a
+  model filed under another name, a name declared twice, and a join to a model or
+  column the set does not hold, each naming the file and the element. Each model
+  is a semantic model, each column a dimension keyed `model.column`, and each saved
+  measure a `formula` metric; measures and entities are declared in `unavailable`
+  rather than invented, and `query` and `values` refuse by name. Declared keys
+  (composite primary keys kept whole) and joins (every ordered pair) reach
+  `explore map`, `relationships` and `profile` through `--use-project`, and
+  `maintain snapshot` fingerprints the layer. Values SLayer caches in a model file
+  (`sampled_values`) are never read. The skill wrapper now also installs
+  `[slayer]` for `explore semantic` and for `explore` commands run with
+  `--use-project` where the config names that vendor. ([#611](https://github.com/exmergo/dex/pull/611))
+- **`semantic slayer define|update|plan`: SLayer models authored through
+  plan/apply.** The repository's SLayer model files are now written by dex as
+  reviewable plans rather than generated from dbt. Edits are whole files of the
+  `semantic_document` kind, keyed exactly as `semantic.slayer.models` names them;
+  a datasource file, `priority.yaml`, SLayer's search index or memories, an
+  unconfigured model, a path outside the storage root, and a model symlinked away
+  from `models/` are refused. The whole prospective set is validated with the
+  pinned `SlayerModel` before the plan is stored, with no warehouse connection
+  and no SLayer storage opened: the current format version (a stale one is
+  refused naming the version expected), unique names, path agreeing with name and
+  data source, joins resolving onto columns both sides have, and, for an edited
+  model, a `default_time_dimension` that names a column and saved-measure
+  formulas that SLayer's own parser accepts (a named skip without `[sql]`). Each
+  refusal names the file and the element. `transform apply` writes the authored
+  bytes exactly, staging every file before moving any into place, and a file
+  SLayer's own tooling rewrote after planning is a conflict whose hint says so.
+  The format-neutral `ApplyResult` gains an optional `conflict_hint` for that
+  message, and `SemanticSourceFile`/`SemanticDocumentView` move from
+  `ossie.authoring` to `edits` so both vendors share them. The skill wrapper now
+  installs `[slayer]` for `transform apply` where the config names that vendor.
+  The SLayer reader also now refuses a configured model that resolves outside the
+  storage root's `models/` directory, so a symlink to a datasource file inside the
+  storage root never reaches the parser. ([#616](https://github.com/exmergo/dex/pull/616))
+- **`maintain` under `semantic.vendor: slayer`.** Every drift axis now reads a
+  SLayer layer, without opening a SLayer datasource or SLayer storage. The
+  semantic baseline records the vendor, the SLayer release and the model format
+  version, and a change in any of them is reported first
+  (`semantic_vendor_changed`, `semantic_format_changed`) rather than as every
+  model changed. The grain axis measures every key a SLayer model declares,
+  single-column ones included, and each join's declared `cardinality`: a
+  `many_to_one` or `one_to_one` join whose key side is not unique is
+  `join_cardinality_exceeded`, and a join declaring none is named in `warnings`
+  as unchecked. The schema axis runs SLayer's own `validate-models` comparison
+  through its pure entry points on the metadata dex captured, reporting
+  `declared_column_missing`, `declared_type_conflict`,
+  `declared_relation_missing` and `declared_dependency_dropped`, each with the
+  model's whole removal as SLayer computes it. `maintain reconcile` cuts those
+  removals out of the model files, leaving every other byte as it was, and
+  stores them as a second plan through the `semantic slayer update` route
+  (`data.semantic_plan_id`); removing a whole model stays advisory. A new
+  `SemanticSchemaSource` capability is what a semantic source implements to take
+  part in the schema axis and reconcile this way. ([#618](https://github.com/exmergo/dex/pull/618))
+- **Grounding finds names dbt resolves that have no SQL file.** These are now
+  found through a new `ReferenceIndex.declarations_of`:
+
+  - a Python model, by its filename (the content is not read);
+  - the base name of a versioned model;
+  - a snapshot declared in YAML with `relation`.
+
+  A `ref()` to a package's seed or snapshot is reported with that kind rather than
+  as a model, so its manifest relation is found too. `transform references`,
+  `transform propagate` and the delete guard answer as before, because they answer
+  for the files dex can edit.
+
+  ([#622](https://github.com/exmergo/dex/pull/622))
+- **`transform ground` reports what nothing defines.** A `ref()` to a model that
+  does not exist used to ground exactly like a `ref()` to one that does: the same
+  `completeness`, nothing in `unresolved` or `limits`, and no `relation` on either,
+  because without a compiled manifest every relation is absent. Each dependency
+  now carries `defined`:
+
+  - `plan` when a file the plan writes defines it;
+  - `project` for a project file the plan leaves alone;
+  - `package` when only an installed package does, with `package` naming it;
+  - `missing` when nothing does.
+
+  A new top-level `missing` list, after `ambiguous`, names each missing model,
+  seed, snapshot, source, metric or measure and where the plan reads it.
+  `host.MissingReference` is its type, and a `grounding-missing` conformance
+  vector ships beside `grounding-unresolved`.
+
+  `missing` is never a guess. A name with no definition is left out of it, and a
+  limit names it, making the answer `partial`, when part of the project went
+  unread:
+
+  - a declared package is not installed;
+  - the plan changes the package set;
+  - a package fails to load;
+  - a YAML file does not parse.
+
+  A two-argument `ref('core', 'x')` is never reported missing, because it can name
+  another dbt project. `defined` is absent for columns, and for macros and vars the
+  project does not declare, because dbt's own macros and `--vars` are invisible to
+  a static read.
+
+  ([#622](https://github.com/exmergo/dex/pull/622))
+- **A documentation site build.** `scripts/build_docs_site.py` assembles a Mintlify
+  site from `docs/`, `references/`, the CLI parser and the latest releases in
+  `CHANGELOG.md`: every reference document is published at a stable route with a
+  title and description, links between references become site routes, and the CLI
+  reference is rendered from the same help text `dex --help` prints. The build
+  refuses a broken link or anchor, an unpublished reference, a page missing from
+  navigation, an em dash, or anything Mintlify could not parse. Pull requests that
+  touch those sources build and validate the site in CI, and each release deploys
+  it to a generated `docs-site` branch after PyPI publish.
+
+### Changed
+
+- **The transform and maintain skills describe SLayer.** Both skill descriptions
+  name SLayer, so a SLayer request triggers them. The transform skill picks the
+  semantic command from `semantic.vendor`, and its semantic-layer reference now
+  covers the SLayer config and `[slayer]` extra, the whole-file write surface,
+  what validation catches and what it does not, and what SLayer does not declare
+  (no entities, no aggregation on a saved measure, no per-measure time
+  dimension). It says dex owns the configured model files: they are not authored
+  with `slayer import-dbt` or rewritten by SLayer's own tooling. The maintain
+  skill gains a per-axis table for a SLayer layer, and says how to relay what
+  looks like drift and is not: a join with no declared `cardinality` is
+  undetermined rather than passing, the `declared_*` schema codes are not to be
+  confirmed with `slayer validate-models`, and a model file in another format
+  `version` is unreadable rather than every definition in it removed. ([#619](https://github.com/exmergo/dex/pull/619))
+- **A semantic model the plan adds no longer needs a compiled catalog.** Its own
+  entities, dimensions and measures are `defined: plan`, so grounding one in a
+  fresh checkout is `complete`, not `partial` with "the semantic catalog could not
+  be read". That limit is now raised only when the plan reads a metric or measure
+  defined outside it. ([#622](https://github.com/exmergo/dex/pull/622))
+- **A missing metric or measure no longer lowers `completeness`.** It used to be a
+  `limits` entry, which made the answer `partial`, while a missing model changed
+  nothing. Both are now reported in `missing`, and `completeness` says only whether
+  dex finished reading. `unresolved` and `limits` lower it; `ambiguous` and
+  `missing` do not. A host that admits a change on `completeness` alone must now
+  also require `missing: []`. A metric or measure that the source defines but the
+  compiled semantic catalog does not carry is still a limit, because dex could not
+  follow it to its models. ([#622](https://github.com/exmergo/dex/pull/622))
+- **Grounding conformance vectors carry their project and are replayed.** Each
+  grounding vector's `payload.project` holds the files it was grounded against.
+  The engine's suite now grounds every vector again and compares the result, where
+  before it only checked each vector against itself. The three existing vectors
+  are regenerated with `defined` and `missing`. ([#622](https://github.com/exmergo/dex/pull/622))
+- **`"cache"` is no longer in the grounding `ORIGINS` vocabulary.** It was
+  declared and never emitted, since grounding reads only the repository and opens
+  no connection. ([#622](https://github.com/exmergo/dex/pull/622))
+- **Snowflake estimates quote the idle tail on a running warehouse too.** The estimate and the settlement now apply one billing model. On a suspended warehouse that is the larger of the 60-second resume minimum and the `AUTO_SUSPEND` tail; on a running one it is the tail, where it used to be nothing. `transform build` and `transform test --mutate` show it as its own `(warehouse uptime)` line. A per-command ceiling below the pinned warehouse's `AUTO_SUSPEND` now refuses every billed command: Snowflake's default of 600 seconds bills a two-second query for ten minutes, and dex now says so before it runs. Lower `AUTO_SUSPEND` (60 seconds suits dex's short commands) or raise the budget. `connect test` reports `auto_suspend_seconds` and warns when auto-suspend is off.
+
+### Fixed
+
+- **`semantic slayer` refuses a key SLayer does not declare.** The pinned
+  `SlayerModel` and the models nested in it ignore unknown keys, so `entities`, a
+  measure's `agg` or `agg_time_dimension`, or a typo validated, were stored in the
+  plan, written byte for byte, and did nothing. Every mapping is now compared with
+  the fields the pinned release declares at its level (model, column and its
+  `format`, saved measure, aggregation and its `params`, join), and a key outside
+  them in an edited model refuses the plan as `unknown_key`, naming the file, the
+  element and the release, with what SLayer uses instead where the key is a
+  MetricFlow habit. The reader, and a configured model the plan does not edit,
+  report the same key as a warning, since SLayer reads the file. Every declared
+  field is still accepted, `meta` and a column's cached `sampled`,
+  `sampled_values` and `distinct_count` included. ([#621](https://github.com/exmergo/dex/pull/621))
+- **One dependency per metric and per semantic model.** A metric the plan read
+  appeared twice, once as read and once as resolved through the catalog. A
+  semantic model appeared once for each metric or measure that reached it. Both
+  are now merged, and `used_in` collects every path and route. ([#622](https://github.com/exmergo/dex/pull/622))
+- **`transform references` lists a YAML snapshot's `relation` and a Python model's reads.**
+  A dbt 1.9 snapshot with `relation: source('raw', 'orders')` was only a declaration,
+  so asking where `raw.orders` is used missed it. A Python model was declared from
+  its filename and its body was never read, so `dbt.ref()` and `dbt.source()` were
+  missing and the report could still call itself complete. Those calls are
+  occurrences now. A Python model dex cannot parse leaves model, source, seed, and
+  snapshot queries incomplete. ([#629](https://github.com/exmergo/dex/pull/629))
+- **Reference reports now flag malformed YAML as incomplete.** Model and column renames and removals refuse to proceed while a project YAML file cannot be parsed, rather than silently missing its references. ([#631](https://github.com/exmergo/dex/pull/631))
+- **`dbt parse` failures on `dbt-core` 1.12 keep their cause line.** `dbt-core`
+  1.12 prefixes its generic `Encountered an error:` header with `[ERROR]: `,
+  which stopped `_collect_messages` from recognizing the header and left only
+  `[ERROR]: Encountered an error:` in the reported message. A leading `[LEVEL]: `
+  tag is now accepted on generic headers so the underlying compilation or parse
+  error on the following lines is preserved. ([#633](https://github.com/exmergo/dex/pull/633))
+- **`transform rename seed` and `transform rename snapshot` rewrite `ref()`s that
+  read the renamed node.** The rewriter labels every `ref()` site with kind
+  `model`, while propagation matched only sites whose kind equaled the kind being
+  renamed, so renaming a seed or snapshot moved its file without rewriting the
+  `ref()` calls pointing at it and failed the delete guard. Propagation now
+  resolves node kinds through `ReferenceIndex.node_kind` when matching `ref()` and
+  YAML node sites. ([#634](https://github.com/exmergo/dex/pull/634))
+- **`explore map` data-quality notes no longer include cell values.** A
+  boolean-shaped flag note listed each encoding and its count, and an epoch
+  note appended a date range translated from the column min and max. `explore
+  map` copies those notes, so the values showed up in the map. The notes now
+  keep the finding and the count or fraction. The encodings stay on the column,
+  where `explore profile` returns them. ([#637](https://github.com/exmergo/dex/pull/637))
+- **`transform build` resolves `{{ env_var() }}` in `profiles.yml` before checking for dev-target drift.** A templated database, schema or path is now compared using its resolved environment variable value (including any default fallback). Unresolvable templates produce a warning instead of a false-positive `DevTargetError`. ([#638](https://github.com/exmergo/dex/pull/638))
+- **A versioned `ref()` names the model.** dex used to report
+  `ref('dim_orders', v=1)` and `ref('dim_orders', version=1)` as unresolved.
+  It treated the version keyword as an unread argument and used that value as
+  the model name. Keyword arguments are now omitted from the positional
+  arguments, so the model name is the reference.
+- **Snowflake spend settles as warehouse uptime, not statement time.** Snowflake bills a warehouse for being up: at least 60 seconds each time it resumes, then per second until `AUTO_SUSPEND` suspends it after idling. A `transform build` used to settle at the sum of dbt's per-node execution time, flagged `settled: true` (about 3 seconds for a build the account was billed about 160 for). Explore and maintain statements settled on wall-clock time, which does not include either charge. Every Snowflake command now also settles the uptime no statement reported, from a free `SHOW WAREHOUSES` once its last statement is done. That uptime is the time between its statements, floored at 60 seconds when the command resumed the warehouse, plus the `AUTO_SUSPEND` tail when it left the warehouse idle. A warning names what was added. The figure is still `settled: true`, because it is ledgered and binds both ceilings; it is a model of Snowflake's billing rules, and `WAREHOUSE_METERING_HISTORY` stays the authority. The statement timeout holds the pending uptime back, so the confirmed budget still covers the whole command, and a `transform build`'s spend now carries `credits_billed` like every other Snowflake command.
+
+
 ## [1.13.3] - 2026-10-15
 
 ### Changed

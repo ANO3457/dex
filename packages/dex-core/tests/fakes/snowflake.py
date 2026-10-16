@@ -7,8 +7,11 @@ clock, so timing assertions are deterministic), tracks the session parameters
 the adapter sets, and enforces ``STATEMENT_TIMEOUT_IN_SECONDS`` the way the
 service does: a real ``ProgrammingError`` naming the statement timeout, raised
 at execute, with the elapsed time capped at the timeout (a killed statement
-still bills what ran). Tests assert against observable behavior (statement
-ordering, session state, ledger effects), not call signatures.
+still bills what ran). A data statement resumes a suspended warehouse the way
+the service does, flipping its state and moving ``resumed_on`` at a moment's
+wall time; what a resume bills is the adapter's model, not the clock. Tests
+assert against observable behavior (statement ordering, session state, ledger
+effects), not call signatures.
 """
 
 from __future__ import annotations
@@ -73,10 +76,20 @@ class FakeSnowflakeTable:
 
 @dataclass
 class FakeWarehouse:
+    """One warehouse as SHOW WAREHOUSES reports it. A data statement on one
+    that is not STARTED resumes it the way the service does: the state flips to
+    STARTED and ``resumed_on`` moves. ``running`` and ``queued`` are other
+    sessions' load, which a test sets to model a shared warehouse."""
+
     name: str
     size: str = "X-Small"
     state: str = "SUSPENDED"
     resource_constraint: str = ""
+    auto_suspend: int | None = 60
+    running: int = 0
+    queued: int = 0
+    resumed_on: str | None = "2026-01-01T00:00:00.000-08:00"
+    resumes: int = 0
 
 
 @dataclass
@@ -93,6 +106,10 @@ class FakeResult:
 
     rows: list[dict]
     seconds: float = DEFAULT_STATEMENT_SECONDS
+    # False for a statement the service answers without a running warehouse
+    # (a result-cache hit, a count served from metadata), which bills nothing
+    # and leaves a suspended warehouse suspended.
+    wakes_warehouse: bool = True
 
 
 class FakeCursor:
@@ -128,10 +145,14 @@ class FakeCursor:
             "STATEMENT_TIMEOUT_IN_SECONDS"
         )
         seconds = result.seconds
-        if self._conn.warehouse_resumes_pending:
-            # First data statement after a suspended start pays the resume.
+        warehouse = self._conn.current_warehouse()
+        if result.wakes_warehouse and warehouse.state != "STARTED":
+            # A resume takes a moment of wall time; what it bills is the
+            # adapter's business, not the clock's.
             seconds += self._conn.resume_seconds
-            self._conn.warehouse_resumes_pending = False
+            warehouse.state = "STARTED"
+            warehouse.resumes += 1
+            warehouse.resumed_on = f"2026-01-01T00:{warehouse.resumes:02d}:00.000-08:00"
         if session_timeout is not None and seconds > session_timeout:
             self._conn.clock.now += float(session_timeout)
             raise sf_errors.ProgrammingError(
@@ -222,6 +243,10 @@ class FakeCursor:
                     "size": w.size,
                     "state": w.state,
                     "resource_constraint": w.resource_constraint,
+                    "auto_suspend": w.auto_suspend,
+                    "running": w.running,
+                    "queued": w.queued,
+                    "resumed_on": w.resumed_on,
                 }
                 for w in self._conn.warehouses
                 if like is None or w.name.upper() == like.upper()
@@ -327,7 +352,7 @@ class FakeSnowflakeConnection:
         warehouses: list[FakeWarehouse] | None = None,
         clock: FakeClock | None = None,
         row_resolver: Callable[[str], FakeResult | list[dict]] | None = None,
-        resume_seconds: float = 60.0,
+        resume_seconds: float = 0.0,
         empty_databases: list[str] | None = None,
         empty_schemas: list[str] | None = None,
     ):
@@ -352,14 +377,20 @@ class FakeSnowflakeConnection:
         self.session_parameters: dict[str, Any] = {}
         self.execute_count = 0
         self.closed = False
-        # Set when the (single) fake warehouse starts suspended: the first
-        # data statement pays the resume on the clock.
-        self.warehouse_resumes_pending = any(
-            w.state != "STARTED" for w in self.warehouses
-        )
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
+
+    def current_warehouse(self) -> FakeWarehouse:
+        """The warehouse the session last chose with USE WAREHOUSE, else the
+        first one registered."""
+
+        for statement in reversed(self.used):
+            name = statement.split(None, 2)[-1].strip().strip('"').upper()
+            for warehouse in self.warehouses:
+                if warehouse.name.upper() == name:
+                    return warehouse
+        return self.warehouses[0]
 
     def resolve(self, sql: str) -> FakeResult:
         if self.row_resolver is None:
