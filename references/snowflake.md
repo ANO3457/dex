@@ -62,7 +62,11 @@ budget:
 and a missing or unpinned warehouse refuses with the fix named. Pin the
 smallest warehouse that works (X-Small with 60s auto-suspend is the intended
 shape; `scripts/setup_snowflake_ci.sh` provisions exactly that plus a resource
-monitor as the hard monthly backstop).
+monitor as the hard monthly backstop). Auto-suspend matters as much as size:
+every billed command that leaves the warehouse idle is charged the idle time
+until it suspends (see **Warehouse uptime** below), and Snowflake's default
+for a new warehouse is 600 seconds, which bills a two-second query for ten
+minutes.
 
 ## Scoping a command
 
@@ -138,11 +142,13 @@ price: no API exposes your contract rate.
 **Estimates are a heuristic, honestly labeled.** Snowflake has no dry-run, so
 the estimate is derived from table bytes over a conservative scan rate, and
 every handshake payload carries `estimate_quality: "heuristic"`. The estimate
-also floors in the **60-second resume minimum** when the pinned warehouse is
-suspended (Snowflake bills at least 60 seconds per resume), so a two-second
-probe against a cold warehouse is quoted at what the account will actually
-see. The same estimator prices `transform build`: each compiled model,
-snapshot, and test is estimated and summed into the build's upfront cost.
+also quotes, once per command, the **warehouse uptime** no statement will
+report: the 60-second resume minimum when the pinned warehouse is suspended,
+and the idle tail until auto-suspend either way, with a note saying which. So
+a two-second probe against a cold warehouse is quoted at what the account will
+actually see. The same estimator prices `transform build`: each compiled
+model, snapshot, and test is estimated and summed into the build's upfront
+cost, with the uptime as a line of its own, `(warehouse uptime)`.
 
 `transform build --verify` costs only where the warehouse keeps no row
 count, so a table's count is free metadata; how the counts are priced into
@@ -154,8 +160,13 @@ heuristic the rest of this connector uses rather than from a dry run, so the
 estimate carries `estimate_quality: heuristic` and the resume minimum floors it
 like any other billed command here. One estimate and one confirmation cover
 every mutant; a budget that runs out partway stops the run and reports the rest
-as `not_run`. Settlement is the sum of the per-node execution seconds each run
-reports, ledgered under `command: "transform test"`. Nothing is materialized,
+as `not_run`. Each run settles at the per-node execution seconds it reports,
+ledgered under `command: "transform test"`, and the batch's warehouse uptime
+settles once at the end as one more row under the same command. The stop rule
+counts that uptime before admitting the next run, and it includes the time
+between runs, while dbt starts and parses with the warehouse up, which no
+estimate prices: a batch confirmed at exactly its estimate can stop a run
+early. Nothing is materialized,
 because a mutant builds as an ephemeral model, so `snowflake.dev_database` holds
 exactly the objects it held before the run.
 
@@ -177,10 +188,50 @@ build, and dex lists it after dbt has run. How that read is bounded is under
 
 **The budget is hard-enforced regardless of estimate quality.** Before every
 billed statement the session's `STATEMENT_TIMEOUT_IN_SECONDS` is set to the
-remaining budget, so a wrong heuristic cannot overrun the ceiling: Snowflake
-kills the statement and dex reports the over-ceiling refusal. Actual spend is
-wall-clock seconds per statement (including any resume the statement caused),
-recorded as `billed_seconds` in the ledger. Every session is tagged `QUERY_TAG = 'dex'` for attribution.
+remaining budget, less the uptime the command will still owe once its
+statements are done, so a wrong heuristic cannot overrun the ceiling: Snowflake
+kills the statement and dex reports the over-ceiling refusal. Every session is
+tagged `QUERY_TAG = 'dex'` for attribution.
+
+## Warehouse uptime
+
+Snowflake bills a warehouse for being up, not for running statements: at least
+60 seconds each time a suspended warehouse resumes, then per second until it has
+idled for its `AUTO_SUSPEND`. Statement time alone under-reports exactly the
+small commands an agent runs most (a three-second build on a warehouse with a
+60-second auto-suspend bills over a minute), so a command's actual spend has two
+parts, both recorded as `billed_seconds` in the ledger:
+
+- **Statement time.** Wall-clock seconds per statement dex runs, and dbt's
+  per-node execution seconds for a build.
+- **Uptime no statement reported**, settled once the command's last statement
+  is done, from a free `SHOW WAREHOUSES`: the time between the command's own
+  statements, floored at 60 seconds when it found the warehouse suspended, plus
+  the `AUTO_SUSPEND` tail when it left the warehouse idle. A build folds this
+  into its own settlement row; other commands record it as one more row in
+  their `reservation_id` group, with no statement hash. A warning names what
+  was added and why.
+
+The rules that decide the figure:
+
+- **The last user pays the tail.** A command that finishes while other queries
+  are still running or queued on the warehouse is charged no tail; one that
+  leaves it idle is charged all of it. Commands run within one tail of each
+  other each claim it, so their sum can overstate one shared warehouse cycle,
+  which is the direction a cost guard may round.
+- **A command that never woke the warehouse owes no uptime.** Snowflake answers
+  a result-cache hit or a count served from metadata without resuming it.
+- **`AUTO_SUSPEND` off means unbounded.** The warehouse bills until someone
+  suspends it, so no tail is charged, the warning says the figure is a lower
+  bound, and `connect test` warns.
+- **It is a model of Snowflake's billing rules, not a meter.** Snowflake's
+  suspend check runs about every 30 seconds, so a tail can run up to that much
+  longer than `AUTO_SUSPEND`, most likely when the setting is not a multiple of
+  30; multi-cluster scale-out and resizes are not modeled.
+  `SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY` is the authority, and the
+  resource monitor the backstop. dex cannot settle from that view instead: it
+  reports hourly buckets that mix in other users, lags up to three hours, and is
+  readable only with ACCOUNTADMIN or MONITOR USAGE.
 
 The estimate carries its credit translation; the handshake itself is in
 [`cost-controls.md`](cost-controls.md).
@@ -220,8 +271,9 @@ rather than guessing at the scale behind it.
 ## Testing
 
 Offline: a stateful fake connection (`tests/fakes/snowflake.py`) that records
-statement ordering, simulates timing on an injected clock, and enforces the
-statement timeout with the connector's real error types. Live: an env-gated
+statement ordering, simulates timing on an injected clock, resumes a suspended
+warehouse the way the service does, and enforces the statement timeout with the
+connector's real error types. Live: an env-gated
 integration suite (`DEX_TEST_SNOWFLAKE_*`) reading `SNOWFLAKE_SAMPLE_DATA`
 and writing only to the transient scratch database, run in CI on a schedule
 via workload identity federation (no stored keys), never as a merge or

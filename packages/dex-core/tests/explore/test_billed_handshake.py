@@ -1427,6 +1427,49 @@ def test_budget_exhaustion_carries_both_the_ceiling_and_the_spend(
     assert envelope.data["spend"]["bytes_billed"] == 5_000
 
 
+def test_budget_exhaustion_reports_the_settled_spend_a_finished_command_would(
+    fake_sf_connection, tmp_path
+):
+    """What the attempt cost includes what the warehouse bills for it as a
+    whole, and in the unit it bills in, exactly as a finished command's spend
+    does: reading the gate's running total instead left a Snowflake resume and
+    idle tail out of the number a caller sizes the re-run by."""
+
+    from fakes.snowflake import FakeResult
+
+    from exmergo_dex_core.adapters.snowflake import SnowflakeAdapter
+    from exmergo_dex_core.config import SnowflakeTarget
+    from exmergo_dex_core.explore import commands as cmds
+    from exmergo_dex_core.guards.cost_guard import CostGate
+
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = SnowflakeAdapter(
+        connection=fake_sf_connection,
+        cost_gate=CostGate(
+            paradigm=Paradigm.COMPUTE_TIME,
+            ceiling=600.0,
+            session_ceiling=None,
+            session_spent=0.0,
+            confirmed=True,
+            connector="snowflake",
+            command="explore profile",
+        ),
+        target=SnowflakeTarget(warehouse="DEX_WH"),
+        clock=fake_sf_connection.clock,
+    )
+    adapter.run_query(
+        'SELECT COUNT(*) AS n FROM "SHOP"."PUBLIC"."CUSTOMERS"',
+        max_rows=10,
+        timeout_seconds=200,
+    )
+    error = cmds._budget_exhausted(FilesystemStore(tmp_path), adapter, [], 3)
+    assert error.spend["seconds_billed"] == pytest.approx(61.0)
+    assert error.spend["credits_billed"] > 0
+    assert error.spend["reserved"] is None
+
+
 # --- the cumulative cap that was never set ---------------------------------------
 #
 # `effective_ceiling()` returns the tighter of the per-command and the remaining

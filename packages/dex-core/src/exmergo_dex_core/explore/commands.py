@@ -4533,11 +4533,14 @@ def _budget_exhausted(
     Because ``charge()`` fires before an object's ``Dataset`` is appended,
     ``accumulated`` holds only fully-profiled objects, so the "N of M" is
     truthful. The spend rides along because a caller deciding how much to raise
-    the budget by needs to know what the attempt already cost.
+    the budget by needs to know what the attempt already cost, so it is the
+    settled figure, with whatever the warehouse bills for the command as a
+    whole and the connector's translation, exactly as a finished command
+    reports it.
     """
 
     gate = command_args.cost_gate(adapter)
-    spend = gate.spend_summary() if gate is not None else None
+    spend = command_args.settled_spend(adapter)
     cost = gate.cost() if gate is not None else None
     n = len(accumulated)
     if n == 0:

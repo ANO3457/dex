@@ -336,7 +336,9 @@ class DexEngine:
         A rebuild settles the outgoing gate first. It has normally settled
         itself already, on its own way out; this covers the command that raised
         past that point, so the headroom it booked is released by the next
-        command rather than held until the UTC rollover.
+        command rather than held until the UTC rollover, and what the warehouse
+        billed it beyond its statements (Snowflake's resume minimum and idle
+        tail) is booked before the next command's gate starts afresh.
 
         ``reads_dev_target`` is per call for the same reason the gate is. A
         verified build judges the relations dbt writes into the dev namespace,
@@ -1519,9 +1521,11 @@ class DexEngine:
         Idempotent. The CLI closes from a ``finally``, so this is the funnel that
         catches a command interrupted partway: without it, a gate that had been
         admitted but never settled would hold its estimate against the day's
-        cumulative ceiling until the UTC rollover. Releasing must not be able to
-        stop the connection closing, so a store that cannot be reached at this
-        point loses the release rather than leaking the connection.
+        cumulative ceiling until the UTC rollover, and the warehouse time it
+        settles beyond the statements would never reach the ledger. Releasing
+        must not be able to stop the connection closing, so a store that cannot
+        be reached at this point loses the release rather than leaking the
+        connection.
         """
 
         adapter = self._adapter_instance

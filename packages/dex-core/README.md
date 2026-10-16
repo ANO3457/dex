@@ -377,10 +377,12 @@ Snowflake: connects through discovered credentials (`connections.toml`,
 password). The cost inversion from BigQuery: metadata is free (SHOW commands,
 no warehouse), while scans bill warehouse time, so budgets are
 **warehouse-seconds** with credits shown alongside. Estimates are an honestly
-labeled heuristic (Snowflake has no dry-run), floored by the 60-second resume
-minimum on a cold warehouse; the budget is hard-enforced anyway by a
-per-statement server-side `STATEMENT_TIMEOUT_IN_SECONDS`, and actual seconds
-land in the same `.dex/spend.jsonl` ledger. Billed work runs only on the
+labeled heuristic (Snowflake has no dry-run); the budget is hard-enforced anyway
+by a per-statement server-side `STATEMENT_TIMEOUT_IN_SECONDS`, and actual
+seconds land in the same `.dex/spend.jsonl` ledger. Snowflake bills warehouse
+uptime rather than statement time, so estimates and settled spend, builds
+included, both carry the 60-second resume minimum on a cold warehouse and the
+idle tail until auto-suspend. Billed work runs only on the
 warehouse the config pins. dbt builds go to a dedicated dev database.schema
 via dbt-snowflake, which the `[snowflake]` extra carries. See
 [`references/snowflake.md`](https://github.com/exmergo/dex/blob/main/references/snowflake.md).

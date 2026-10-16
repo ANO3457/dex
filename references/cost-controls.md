@@ -111,7 +111,7 @@ parses to a stable schema and no reader has to interpret an absent key.
 | `billed_bytes` or `billed_seconds` | the magnitude, in the connector's unit. Signed |
 | `estimate` | the whole-command preflight figure the settlement was admitted on. `null` on the other two kinds, and on a settlement whose pricing degraded to no estimate at all |
 | `job_id` | the warehouse's identifier for the job, where it has one |
-| `statement_sha256` | a hash of the statement. Never its text, never a value |
+| `statement_sha256` | a hash of the statement. Never its text, never a value. `null` on a settlement for spend no single statement produced, such as a build's dbt run or Snowflake's warehouse uptime |
 
 **Settled spend is the `entry == "settlement"` filter**, summed over one
 connector's unit. That is not the same number as `session_spent_today` whenever
