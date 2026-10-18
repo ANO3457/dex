@@ -233,6 +233,67 @@ def test_refused_shape_and_resolution(sql: str, fragment: str, cache: DexCache):
     assert fragment.lower() in _refusal(sql, cache).lower()
 
 
+# --- refused: reading a table as it was --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT ID FROM db.main.RAW_LISTINGS FOR VERSION AS OF 3",
+        "SELECT l.ID FROM db.main.RAW_LISTINGS l "
+        "JOIN db.main.RAW_HOSTS FOR VERSION AS OF 3 h ON l.HOST_ID = h.ID",
+        "WITH old AS (SELECT ID FROM db.main.RAW_LISTINGS FOR VERSION AS OF 3) "
+        "SELECT ID FROM old",
+        "SELECT ID FROM db.main.RAW_LISTINGS WHERE EXISTS "
+        "(SELECT 1 FROM db.main.RAW_HOSTS FOR VERSION AS OF 3 WHERE NAME = 'x')",
+        "SELECT ID FROM db.main.RAW_LISTINGS UNION ALL "
+        "SELECT ID FROM db.main.RAW_LISTINGS FOR VERSION AS OF 3",
+    ],
+)
+def test_time_travel_is_refused_in_every_position(sql: str, cache: DexCache):
+    """A WHERE subquery projects nothing, but it can still test an old snapshot's
+    values one predicate at a time, so the refusal does not wait for the
+    projection to carry anything."""
+
+    with pytest.raises(QueryRefusedError, match="time travel is not permitted"):
+        inspect_query(sql, cache, LIMITS, dialect="trino")
+    plain = sql.replace(" FOR VERSION AS OF 3", "")
+    inspect_query(plain, cache, LIMITS, dialect="trino")
+
+
+def test_time_travel_refusal_names_the_table_and_the_fix(cache: DexCache):
+    with pytest.raises(QueryRefusedError) as excinfo:
+        inspect_query(
+            "SELECT * FROM db.main.RAW_LISTINGS VERSION AS OF 3",
+            cache,
+            LIMITS,
+            dialect="databricks",
+        )
+    message = str(excinfo.value)
+    assert "db.main.RAW_LISTINGS" in message
+    assert "Query the current table" in message
+
+
+def test_the_databricks_at_shorthand_never_reaches_the_warehouse_as_time_travel(
+    cache: DexCache,
+):
+    """sqlglot reads Delta's `table@v3` shorthand as a parameter alias, not a
+    version, and the firewall always sends its own re-rendering. Either the
+    shorthand is refused or what is sent no longer asks for a version."""
+
+    try:
+        inspected = inspect_query(
+            "SELECT ID FROM db.main.RAW_LISTINGS@v3",
+            cache,
+            LIMITS,
+            dialect="databricks",
+        )
+    except QueryRefusedError:
+        return
+    assert "@" not in inspected.sql
+    assert "VERSION" not in inspected.sql.upper()
+
+
 # --- LIMIT rewriting -------------------------------------------------------------
 
 

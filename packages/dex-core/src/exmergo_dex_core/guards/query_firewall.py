@@ -390,6 +390,14 @@ def _override_suggestion(taint: _Taint, cache: DexCache) -> str:
     return clause
 
 
+# The table arguments that turn a read of a table into a read of its past.
+# sqlglot keeps FOR VERSION/TIMESTAMP/SYSTEM_TIME AS OF (Trino, Databricks,
+# BigQuery) in `version`, AT/BEFORE (Snowflake) and AT (VERSION => ...) (DuckDB)
+# in `when`, and Snowflake's CHANGES stream in `changes`. Matching the node shape
+# rather than the dialect is what lets a newly added dialect inherit the refusal.
+_HISTORICAL_READ_ARGS = ("version", "when", "changes")
+
+
 def assert_query_shape(sql: str, *, dialect: str = "duckdb") -> exp.Expression:
     """Prove a statement is one read-only SELECT and return its parsed root.
 
@@ -400,7 +408,9 @@ def assert_query_shape(sql: str, *, dialect: str = "duckdb") -> exp.Expression:
     warehouse on its behalf.
 
     Cache-independent by construction, which is what makes it safe to run early;
-    everything that needs the cache stays in :func:`inspect_query`.
+    everything that needs the cache stays in :func:`inspect_query`. Time travel
+    is refused here too: it needs no cache to recognize, and no relation should be
+    profiled on behalf of a statement that was always going to be refused.
     """
 
     try:
@@ -416,6 +426,21 @@ def assert_query_shape(sql: str, *, dialect: str = "duckdb") -> exp.Expression:
             f"only SELECT queries may run here, got {type(root).__name__}; use "
             "`explore inventory` / `explore profile` for introspection"
         )
+    # Refused wherever it appears, a WHERE subquery included, because the cache
+    # and every PII verdict in it describe each table as it is now. A past
+    # snapshot keeps the schema it had then, so a column dropped since (and so
+    # never profiled) comes back from SELECT *, and a change stream returns rows
+    # the current table no longer holds.
+    for table in root.find_all(exp.Table):
+        if any(table.args.get(key) for key in _HISTORICAL_READ_ARGS):
+            name = ".".join(p for p in (table.catalog, table.db, table.name) if p)
+            raise QueryRefusedError(
+                f"time travel is not permitted: {name} is read as of an earlier "
+                "version or point in time, or as a change stream. The exploration "
+                "cache and its PII verdicts describe the table as it is now, and a "
+                "past snapshot can carry columns or values that were never "
+                "profiled. Query the current table"
+            )
     return root
 
 

@@ -1546,6 +1546,55 @@ def test_query_firewall_unnest_reshapes_but_never_smuggles():
             inspect_query(flagged, cache, QueryLimits(), dialect=dialect)
 
 
+def test_query_firewall_never_reads_a_past_version_of_a_table():
+    # The cache and its PII verdicts describe each table as it is now. A past
+    # snapshot keeps the schema it had then, so SELECT * over one returns a
+    # column dropped since and never profiled, and a change stream returns rows
+    # the table no longer holds. Every dialect's time-travel spelling is refused,
+    # inside a subquery too, while the plain read beside it is admitted.
+    from exmergo_dex_core.cache import ColumnProfile, Dataset, DexCache
+    from exmergo_dex_core.config import QueryLimits
+    from exmergo_dex_core.guards.query_firewall import (
+        QueryRefusedError,
+        inspect_query,
+    )
+
+    cache = DexCache(
+        datasets=[
+            Dataset(
+                identifier="db.main.events",
+                columns=[ColumnProfile(name="id", data_type="INTEGER")],
+            )
+        ]
+    )
+    spellings = {
+        "trino": (
+            "FOR VERSION AS OF 3",
+            "FOR TIMESTAMP AS OF TIMESTAMP '2026-01-01 00:00:00 UTC'",
+        ),
+        "databricks": ("VERSION AS OF 3", "TIMESTAMP AS OF '2026-01-01'"),
+        "bigquery": ("FOR SYSTEM_TIME AS OF TIMESTAMP '2026-01-01'",),
+        "snowflake": (
+            "AT(OFFSET => -60)",
+            "BEFORE(STATEMENT => '8e5d0ca9-005e-44e6-b858-a8f5b37c5726')",
+            "CHANGES(INFORMATION => DEFAULT) AT(OFFSET => -60)",
+        ),
+        "duckdb": ("AT (VERSION => 3)",),
+    }
+    for dialect, clauses in spellings.items():
+        inspect_query(
+            "SELECT id FROM db.main.events", cache, QueryLimits(), dialect=dialect
+        )
+        for clause in clauses:
+            for sql in (
+                f"SELECT * FROM db.main.events {clause}",  # noqa: S608
+                "SELECT id FROM db.main.events WHERE id IN "  # noqa: S608
+                f"(SELECT id FROM db.main.events {clause})",
+            ):
+                with pytest.raises(QueryRefusedError, match="time travel"):
+                    inspect_query(sql, cache, QueryLimits(), dialect=dialect)
+
+
 def test_firewall_block_threshold_is_a_hard_coded_engine_constant():
     # The threshold is engine policy, not configuration: a config edit must
     # never be able to widen the PII boundary. Its value is load-bearing (every
