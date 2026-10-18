@@ -45,6 +45,7 @@ from ..cache import (
     DexCache,
     Relationship,
     RelationshipKind,
+    mask_overridden,
     match_identifier,
     relation_verdict,
 )
@@ -170,25 +171,6 @@ def _override_mismatches(
                     f"'{entry.column_name}' in {len(matched)} matched dataset(s)"
                 )
     return warnings
-
-
-def _mask_overridden(cache: DexCache, override_paths: set[str]) -> DexCache:
-    """Apply config overrides to a loaded cache in memory, so an override takes
-    effect at query time immediately instead of demanding a re-profile (a billed
-    scan on metered connectors). The persisted cache is untouched; the next
-    profile writes the override through durably."""
-
-    if not override_paths:
-        return cache
-    for dataset in cache.datasets:
-        for column in dataset.columns:
-            if (
-                column.pii is not None
-                and f"{dataset.identifier}.{column.name}".lower() in override_paths
-            ):
-                column.pii_overridden = column.pii.category
-                column.pii = None
-    return cache
 
 
 def _profile_estimate(
@@ -1456,10 +1438,10 @@ def _run_statements(
         )
 
     if cache is not None:
-        # After the cache write, never before: _mask_overridden edits the datasets
+        # After the cache write, never before: mask_overridden edits the datasets
         # in place, and masking first would persist an in-memory override onto
         # objects this run never re-profiled.
-        cache = _mask_overridden(cache, pii_override_paths(config.pii_overrides))
+        cache = mask_overridden(cache, pii_override_paths(config.pii_overrides))
     for statement in batch:
         if not statement.live:
             continue
