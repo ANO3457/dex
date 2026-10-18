@@ -46,6 +46,12 @@ Every refusal is a :class:`SemanticBackendError` naming the token it refused.
 
 from __future__ import annotations
 
+# First, before any SLayer import: importing SLayer rewrites sqlglot's reserved
+# keywords process-wide, and this module undoes that (see `sqlglot_keywords`).
+from . import sqlglot_keywords  # noqa: F401
+
+# isort: split
+
 import re
 from collections.abc import Iterable
 

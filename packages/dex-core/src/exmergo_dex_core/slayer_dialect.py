@@ -42,6 +42,12 @@ installed.
 
 from __future__ import annotations
 
+# First, before any SLayer import: importing SLayer rewrites sqlglot's reserved
+# keywords process-wide, and this module undoes that (see `sqlglot_keywords`).
+from .slayer import sqlglot_keywords  # noqa: F401
+
+# isort: split
+
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
 
