@@ -101,6 +101,82 @@ def test_countif_allowed_on_bigquery(cache: DexCache):
 
 
 @pytest.mark.parametrize(
+    "dialect",
+    ["duckdb", "postgres", "snowflake", "databricks", "bigquery", "redshift", "trino"],
+)
+@pytest.mark.parametrize(
+    "aggregate",
+    ["BOOL_AND(NAME IS NULL)", "BOOL_OR(NAME LIKE 'A%')"],
+)
+def test_boolean_aggregates_over_a_flagged_column_measure(
+    aggregate: str, dialect: str, cache: DexCache
+):
+    """sqlglot parses bool_and and bool_or into LogicalAnd and LogicalOr on every
+    dialect, whose canonical names are logical_and and logical_or. With only
+    the SQL spellings registered, every one of them was refused as carrying the
+    flagged column, although each reduces it to a single boolean."""
+
+    inspected = inspect_query(
+        f"SELECT {aggregate} FROM RAW_HOSTS",  # noqa: S608
+        cache,
+        LIMITS,
+        dialect=dialect,
+    )
+    assert inspected.sql
+
+
+@pytest.mark.parametrize(
+    "aggregate", ["EVERY(NAME IS NULL)", "GEOMETRIC_MEAN(LENGTH(NAME))"]
+)
+def test_trino_measuring_aggregates_over_a_flagged_column(
+    aggregate: str, cache: DexCache
+):
+    inspected = inspect_query(
+        f"SELECT {aggregate} FROM RAW_HOSTS",  # noqa: S608
+        cache,
+        LIMITS,
+        dialect="trino",
+    )
+    assert inspected.sql
+    # The sibling that returns a value from a row still carries the flag.
+    assert "PII" in _refusal_in("SELECT ARBITRARY(NAME) FROM RAW_HOSTS", cache, "trino")
+
+
+def _refusal_in(sql: str, cache: DexCache, dialect: str) -> str:
+    with pytest.raises(QueryRefusedError) as excinfo:
+        inspect_query(sql, cache, LIMITS, dialect=dialect)
+    return str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("sql", "name"),
+    [
+        (
+            "SELECT * FROM TABLE(pg.system.query(query => 'SELECT 1'))",
+            "pg.system.query",
+        ),
+        (
+            "SELECT * FROM TABLE(exclude_columns(input => TABLE(db.main.RAW_HOSTS), "
+            "columns => DESCRIPTOR(NAME)))",
+            "EXCLUDE_COLUMNS",
+        ),
+    ],
+)
+def test_a_table_function_is_refused_by_name(sql: str, name: str, cache: DexCache):
+    """TABLE(...) returns rows the cache never profiled, and Trino's
+    system.query passes its text to a federated database unread. The refusal
+    names the function, where it used to say "unnest of Anonymous"."""
+
+    message = _refusal_in(sql, cache, "trino")
+    assert f"table function {name} is not permitted" in message
+    assert "Anonymous" not in message
+    # The sibling the refusal points at is admitted.
+    inspect_query(
+        "SELECT COUNT(*) FROM db.main.RAW_LISTINGS", cache, LIMITS, dialect="trino"
+    )
+
+
+@pytest.mark.parametrize(
     ("sql", "expected_tables"),
     [
         (

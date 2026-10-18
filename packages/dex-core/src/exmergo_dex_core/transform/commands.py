@@ -131,6 +131,11 @@ _DB_LOAD_CAP_NOTES = {
         "max_bytes_to_read set from the ceiling (injected through the "
         "profile's custom_settings env_var references)"
     ),
+    "trino": (
+        "each statement was capped server-side by query_max_run_time and "
+        "query_max_scan_physical_bytes set from the ceiling (injected through "
+        "the profile's session_properties env_var references)"
+    ),
 }
 _UNCAPPED_BUILD_NOTE = (
     "this build ran without a dex-injected server-side cap: the confirmed "
@@ -2423,6 +2428,7 @@ def build(
         evidence=_build_evidence(
             engine, project, target, select, for_plan, for_plan_document
         ),
+        uncapped=bool(dev_target.missing_cap_references(project, target, connector)),
     )
 
 
@@ -2788,6 +2794,7 @@ def _settle_dbt_spend(
     gate_billed: float = 0.0,
     uptime_seconds: float = 0.0,
     command: str = "transform build",
+    uncapped: bool = False,
 ) -> tuple[dict[str, float | None] | None, list[str]]:
     """What one finished dbt run cost, ledgered, with the note that explains it.
 
@@ -2806,6 +2813,10 @@ def _settle_dbt_spend(
     statements (Snowflake's resume minimum and idle tail, from the adapter's
     uptime model), folded into this run's row rather than written as a row of
     its own, so the build keeps one estimate-to-billed ratio for calibration.
+
+    ``uncapped`` says the profile lacks the references the connector's cap rides
+    on (see ``dev_target.missing_cap_references``), so the note says the build
+    ran uncapped instead of naming a cap that was never applied.
     """
 
     from ..envelope import Paradigm
@@ -2858,8 +2869,10 @@ def _settle_dbt_spend(
             command=command,
         )
     elif paradigm is Paradigm.COMPUTE_TIME:
-        cap_note = _COMPUTE_TIME_CAP_NOTES.get(
-            connector, _DEFAULT_COMPUTE_TIME_CAP_NOTE
+        cap_note = (
+            _UNCAPPED_BUILD_NOTE
+            if uncapped
+            else _COMPUTE_TIME_CAP_NOTES.get(connector, _DEFAULT_COMPUTE_TIME_CAP_NOTE)
         )
         notes = [cap_note, *notes]
         # dbt-snowflake, dbt-databricks, and dbt-redshift report no billing
@@ -2887,7 +2900,12 @@ def _settle_dbt_spend(
             # reported total, so the gate's share is translated too.
             spend.update(translate(spend[spend_field(paradigm)] or 0.0))
     elif paradigm is Paradigm.DB_LOAD:
-        notes = [_DB_LOAD_CAP_NOTES.get(connector, _UNCAPPED_BUILD_NOTE), *notes]
+        cap_note = (
+            _UNCAPPED_BUILD_NOTE
+            if uncapped
+            else _DB_LOAD_CAP_NOTES.get(connector, _UNCAPPED_BUILD_NOTE)
+        )
+        notes = [cap_note, *notes]
         # The db-load dbt adapters report no billing figure; per-node execution
         # time is the honest database-seconds actual.
         seconds = _execution_seconds(summary)
@@ -3089,6 +3107,7 @@ def _shape_build_result(
     adapter=None,
     evidence: dict | None = None,
     verification: BuildVerification | None = None,
+    uncapped: bool = False,
 ) -> BuildResult:
     """Shape a finished dbt run per paradigm, and ledger what it actually cost.
 
@@ -3166,6 +3185,7 @@ def _shape_build_result(
         adapter=adapter,
         gate_billed=gate_billed,
         uptime_seconds=uptime_seconds,
+        uncapped=uncapped,
     )
     notes = [
         *notes,

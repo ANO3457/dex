@@ -114,6 +114,13 @@ _MEASURING = frozenset(
         "covar_samp",
         "bool_and",
         "bool_or",
+        # sqlglot parses bool_and/bool_or into LogicalAnd/LogicalOr on every
+        # dialect, and those canonical names are what reach this set, so the
+        # spellings above alone never matched. every is Trino's bool_and.
+        "logical_and",
+        "logical_or",
+        "every",
+        "geometric_mean",
         "entropy",
         "kurtosis",
         "skewness",
@@ -234,6 +241,26 @@ _UNNEST_FUNCS: dict[str, tuple[tuple[type, ...], frozenset[str]]] = {
     "duckdb": (
         (exp.JSONKeys, exp.JSONExtract, exp.JSONExtractScalar, exp.ParseJSON),
         frozenset({"json_each"}),
+    ),
+    # Trino unnests arrays and maps, so a JSON document is reached by parsing it
+    # and casting it to one: the canonical idiom is
+    # UNNEST(CAST(json_parse(c) AS ARRAY(JSON))), which is why a top-level Cast
+    # is admitted here (a nested one already is, everywhere). map_keys,
+    # map_values and map_entries reach into a map column. sequence and split
+    # are deliberately absent: they synthesize rows from a scalar.
+    "trino": (
+        tuple(
+            cls
+            for cls in (
+                exp.Cast,
+                exp.JSONExtract,
+                exp.JSONExtractScalar,
+                exp.ParseJSON,
+                getattr(exp, "MapKeys", None),
+            )
+            if isinstance(cls, type)
+        ),
+        frozenset({"map_keys", "map_values", "map_entries"}),
     ),
 }
 
@@ -839,6 +866,7 @@ def _unnest_source(
         table_alias = node.args.get("alias")
         offset = None
     elif isinstance(node, exp.Table):
+        _refuse_table_function(node, dialect)
         inner = [node.this]
         table_alias = node.args.get("alias")
         offset = node.args.get("ordinality")
@@ -903,6 +931,33 @@ def _unnest_source(
 
     key = (alias_name or columns[0]).lower()
     return key, {name.lower(): set(taint) for name in columns if name}
+
+
+def _refuse_table_function(node: exp.Table, dialect: str) -> None:
+    """Refuse ``TABLE(fn(...))`` by name.
+
+    sqlglot parses the standard table-function call as a table whose body is an
+    anonymous ``TABLE`` call. It was already refused as an unnest of nothing
+    permitted, which is the right decision for the wrong reason: the refusal has
+    to say what was actually asked. On Trino the table functions include
+    ``system.query``, which sends its argument to a federated database as opaque
+    SQL, and the polymorphic ones that reshape a whole relation, so none of them
+    is a source the cache profiled. A Postgres set-returning function in FROM is
+    a different shape (the function itself is the table body) and is not
+    touched here.
+    """
+
+    body = node.this
+    if not (isinstance(body, exp.Anonymous) and str(body.this).upper() == "TABLE"):
+        return
+    called = body.expressions[0].sql(dialect=dialect) if body.expressions else ""
+    name = called.split("(", 1)[0] or "TABLE(...)"
+    raise QueryRefusedError(
+        f"table function {name} is not permitted: TABLE(...) returns rows the "
+        "exploration cache never profiled, and some table functions pass their "
+        "argument to another database unread. Query cached tables and views, or "
+        "unnest a column of one with UNNEST(...)"
+    )
 
 
 def _unnest_taint(

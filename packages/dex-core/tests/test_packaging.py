@@ -153,7 +153,8 @@ def test_importing_the_package_pulls_in_no_connector_client(wheel: str):
         "before={m.split('.')[0] for m in sys.modules};"
         "import exmergo_dex_core;"
         "clients={'google','snowflake','databricks','psycopg','redshift_connector',"
-        "'clickhouse_connect','duckdb','sqlglot','sklearn','httpx','metricflow'};"
+        "'clickhouse_connect','trino','duckdb','sqlglot','sklearn','httpx',"
+        "'metricflow'};"
         "print(sorted(({m.split('.')[0] for m in sys.modules} - before) & clients))",
     )
     assert done.returncode == 0, done.stderr
@@ -341,11 +342,11 @@ def test_the_all_extra_installs_every_optional_capability(wheel: str):
         wheel,
         "import duckdb, google.cloud.bigquery, snowflake.connector, psycopg;"
         "import redshift_connector, databricks.sql, sklearn, httpx, metricflow;"
-        "import clickhouse_connect;"
+        "import clickhouse_connect, trino;"
         "import sqlglot, slayer.core.models;"
         "import dbt.adapters.duckdb, dbt.adapters.bigquery, dbt.adapters.snowflake;"
         "import dbt.adapters.postgres, dbt.adapters.redshift, dbt.adapters.databricks;"
-        "import dbt.adapters.clickhouse;"
+        "import dbt.adapters.clickhouse, dbt.adapters.trino;"
         "from exmergo_dex_core.explore.semantic.hosted import HostedDbtCloudBackend;"
         "from exmergo_dex_core.explore.semantic.local import LocalMetricFlowBackend;"
         "print('every capability imported')",

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exmergo_dex_core.cli import main
 from exmergo_dex_core.envelope import Paradigm
@@ -1481,6 +1482,45 @@ def test_build_env_caps_clickhouse_statements_via_custom_settings(monkeypatch):
     assert _build_env("clickhouse", Paradigm.FREE_LOCAL, 120.0) is None
 
 
+def test_build_env_caps_trino_statements_via_session_properties(monkeypatch):
+    """dbt-trino sends the profile's session_properties with every statement, so
+    the ceiling becomes both caps in the units Trino's properties take. The
+    Postgres and ClickHouse tests above are the siblings that keep this from
+    passing by a dispatch table that hands every connector the same variables."""
+
+    from exmergo_dex_core.transform import init
+    from exmergo_dex_core.transform.build import (
+        _TRINO_SCAN_BYTES_PER_SECOND,
+        _build_env,
+    )
+
+    env = _build_env("trino", Paradigm.DB_LOAD, 120.0)
+    assert env is not None
+    assert env[init.TRINO_QUERY_MAX_RUN_TIME_ENV] == "120s"
+    assert env[init.TRINO_QUERY_MAX_SCAN_BYTES_ENV] == (
+        f"{120 * _TRINO_SCAN_BYTES_PER_SECOND}B"
+    )
+    assert init.CH_MAX_EXECUTION_TIME_ENV not in env or (
+        env[init.CH_MAX_EXECUTION_TIME_ENV]
+        == os.environ.get(init.CH_MAX_EXECUTION_TIME_ENV)
+    )
+    # A sub-second ceiling is floored to one second, never rendered as 0s,
+    # which Trino reads as "fail at once" rather than "unlimited".
+    assert (
+        _build_env("trino", Paradigm.DB_LOAD, 0.4)[init.TRINO_QUERY_MAX_RUN_TIME_ENV]
+        == "1s"
+    )
+    assert _build_env("trino", Paradigm.DB_LOAD, None) is None
+    assert _build_env("trino", Paradigm.FREE_LOCAL, 120.0) is None
+
+
+def test_the_trino_byte_cap_inverts_the_estimate_s_own_rate():
+    from exmergo_dex_core.adapters import trino as trino_adapter
+    from exmergo_dex_core.transform.build import _TRINO_SCAN_BYTES_PER_SECOND
+
+    assert _TRINO_SCAN_BYTES_PER_SECOND == trino_adapter._SCAN_BYTES_PER_SECOND
+
+
 def test_an_uncapped_db_load_connector_gets_no_cap_and_claims_none(monkeypatch):
     """The degradation and the non-degraded path, asserted together.
 
@@ -1505,9 +1545,107 @@ def test_an_uncapped_db_load_connector_gets_no_cap_and_claims_none(monkeypatch):
     )
     # And every connector that does register a mechanism has a note describing
     # it, so the pair can never drift into claiming a cap it did not inject.
+    from exmergo_dex_core.guards.execution import _BUDGET_CONTROLS
     from exmergo_dex_core.transform.build import _CAP_ENV_BUILDERS
 
     assert set(_CAP_ENV_BUILDERS) == set(_DB_LOAD_CAP_NOTES)
+    assert set(_CAP_ENV_BUILDERS) == set(_BUDGET_CONTROLS)
+
+
+def _cap_block(connector: str) -> dict:
+    """The profile block a dex-rendered profile carries the cap references in."""
+
+    from exmergo_dex_core.transform import init
+
+    return {
+        "clickhouse": {"custom_settings": init.clickhouse_custom_settings()},
+        "trino": {"session_properties": init.trino_session_properties()},
+    }[connector]
+
+
+def _write_cap_profile(project: Path, connector: str, *, with_caps: bool) -> None:
+    output = {"type": connector, "host": "localhost", "schema": "dbt_dev"}
+    if with_caps:
+        output.update(_cap_block(connector))
+    (project / "profiles.yml").write_text(
+        yaml.safe_dump({"proj": {"target": "dev", "outputs": {"dev": output}}}),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("connector", ["clickhouse", "trino"])
+def test_the_cap_reader_the_dev_target_warning_and_the_build_note_agree(
+    connector: str, tmp_path: Path
+):
+    """One reader decides whether a build was capped, and every place that says
+    so asks it. The dev-target check used to warn that a hand-written ClickHouse
+    profile could not be capped while the build note, on the same run, said the
+    build had been: two answers to one question.
+
+    Both halves are asserted, so a reader that always found the references (or
+    never did) cannot pass by agreeing with itself."""
+
+    from exmergo_dex_core.config import DexConfig
+    from exmergo_dex_core.envelope import Cost
+    from exmergo_dex_core.storage.memory import MemoryStore
+    from exmergo_dex_core.transform.commands import (
+        _DB_LOAD_CAP_NOTES,
+        _UNCAPPED_BUILD_NOTE,
+        _shape_build_result,
+    )
+    from exmergo_dex_core.transform.dev_target import (
+        _assert_build_cap_reachable,
+        missing_cap_references,
+    )
+
+    summary = {
+        "target": "dev",
+        "success": True,
+        "returncode": 0,
+        "nodes": [],
+        "counts": {},
+        "messages": [],
+    }
+    config = DexConfig(connector=connector)
+    for with_caps in (True, False):
+        _write_cap_profile(tmp_path, connector, with_caps=with_caps)
+        missing = missing_cap_references(tmp_path, "dev", connector)
+        warnings = _assert_build_cap_reachable(tmp_path, "dev", config)
+        result = _shape_build_result(
+            dict(summary),
+            Cost(paradigm=Paradigm.DB_LOAD, estimate=None, ceiling=60.0),
+            Paradigm.DB_LOAD,
+            connector,
+            MemoryStore(),
+            uncapped=bool(missing),
+        )
+        notes = [*result.warnings, *result.data().get("notes", [])]
+        if with_caps:
+            assert missing == [] and warnings == []
+            assert _DB_LOAD_CAP_NOTES[connector] in notes
+            assert _UNCAPPED_BUILD_NOTE not in notes
+        else:
+            assert missing and warnings
+            assert _UNCAPPED_BUILD_NOTE in notes
+            assert _DB_LOAD_CAP_NOTES[connector] not in notes
+
+
+def test_a_connector_whose_cap_rides_the_environment_is_never_missing_references(
+    tmp_path: Path,
+):
+    """Postgres's cap is PGOPTIONS on the dbt subprocess, which no profile can
+    remove, so a profile without any cap block is still a capped build."""
+
+    from exmergo_dex_core.transform.dev_target import missing_cap_references
+
+    (tmp_path / "profiles.yml").write_text(
+        yaml.safe_dump(
+            {"p": {"target": "dev", "outputs": {"dev": {"type": "postgres"}}}}
+        ),
+        encoding="utf-8",
+    )
+    assert missing_cap_references(tmp_path, "dev", "postgres") == []
+    assert missing_cap_references(tmp_path, "dev", "some-future-db") == []
 
 
 def test_dev_target_check_runs_before_the_cost_gate(

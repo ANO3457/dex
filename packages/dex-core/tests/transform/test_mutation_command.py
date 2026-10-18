@@ -615,6 +615,7 @@ def test_a_name_the_project_already_uses_turns_the_check_off(
         (None, "db_load", "postgres", "opt-in: re-run with --check-equivalence"),
         (True, "compute_time", "redshift", "no verified whole-row comparison"),
         (True, "compute_time", "databricks", "no verified whole-row comparison"),
+        (True, "db_load", "trino", "no verified whole-row comparison"),
     ],
 )
 def test_the_check_is_off_with_a_reason_rather_than_absent(

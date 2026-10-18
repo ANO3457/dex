@@ -308,6 +308,7 @@ def _dev_schemas(config: DexConfig) -> frozenset[str]:
             config.postgres.dev_schema if config.postgres else None,
             config.redshift.dev_schema if config.redshift else None,
             config.clickhouse.dev_database if config.clickhouse else None,
+            config.trino.dev_schema if config.trino else None,
         ]
         if name
     )
