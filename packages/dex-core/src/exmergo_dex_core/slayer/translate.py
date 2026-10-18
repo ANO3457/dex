@@ -57,7 +57,7 @@ from ..explore.semantic.backend import SemanticBackendError
 from ..explore.semantic.model import SemanticQuery
 from ..semantic_catalog import MetricInfo, SemanticCatalogView, SemanticModelInfo
 
-__all__ = ["to_slayer_query"]
+__all__ = ["source_model", "to_slayer_query"]
 
 # A catalog name: identifiers joined by dots. Anything else in a metric position
 # is an expression, which is a formula rather than a name.
@@ -124,6 +124,16 @@ def to_slayer_query(q: SemanticQuery, view: SemanticCatalogView) -> SlayerQuery:
         raise SemanticBackendError(
             f"SLayer refused the query dex translated: {exc.errors()[0]['msg']}"
         ) from exc
+
+
+def source_model(requested: list[str], view: SemanticCatalogView) -> SemanticModelInfo:
+    """The one model ``requested`` metrics are queried from, or a refusal.
+
+    The root a SLayer filter is read against, which the PII gate needs before
+    the rest of the query is translated.
+    """
+
+    return _source_model(_metrics(requested, view), view)
 
 
 def _metrics(requested: list[str], view: SemanticCatalogView) -> list[MetricInfo]:

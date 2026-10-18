@@ -117,7 +117,10 @@ def screen_dimension_refs(
             continue
         if _meta_clears(meta):
             continue
-        flag = detect_pii(ref, "string")
+        # A dotted token (SLayer's `model.column`) is read as separated words:
+        # the heuristic bounds a word with `_`, so `orders.email` would otherwise
+        # read as one word and pass.
+        flag = detect_pii(ref.replace(".", "__"), "string")
         if flag is not None and flag.confidence >= PII_BLOCK_CONFIDENCE:
             blocked.append(
                 (ref, f"{flag.category.value} (name heuristic, {flag.confidence:.2f})")
