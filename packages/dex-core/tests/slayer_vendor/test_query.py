@@ -1,4 +1,4 @@
-"""A governed `explore semantic query` over a SLayer layer (#680).
+"""A governed `explore semantic query` and `values` over a SLayer layer (#680, #681).
 
 SLayer renders and dex executes. What this release promises: a saved measure
 grouped by a column returns the numbers hand-written SQL does; the PII gate
@@ -7,7 +7,10 @@ screens every grouped column and every column a filter names, looked up in the
 a filter dex cannot read, a connector SLayer has no dialect for and a relation
 the connection lacks are each refused by name; a SLayer resolution error comes
 back redacted; and on a billed connector the query stops for confirmation
-before any spend.
+before any spend. `values` reads one dimension's domain through the same spine:
+an unknown token and a PII dimension are refused before anything renders,
+`--metric` roots the render at that metric's model and `scoped_to` says so, and
+the values come back capped.
 
 Needs the real `[slayer]` extra, so it skips without it; the `slayer-sqlglot` CI
 job is where it runs.
@@ -35,6 +38,7 @@ from exmergo_dex_core.cli import main
 from exmergo_dex_core.engine import DexEngine
 from exmergo_dex_core.explore.semantic import SemanticBackendError
 from exmergo_dex_core.explore.semantic.backend import resolve_semantic_layer
+from exmergo_dex_core.explore.semantic.conformance import SemanticCatalogContract
 from exmergo_dex_core.explore.semantic.model import SemanticQuery
 from exmergo_dex_core.slayer import render
 from exmergo_dex_core.slayer.loader import FORMAT_VERSION
@@ -143,6 +147,10 @@ def _run(capsys, root: Path, *argv: str) -> tuple[int, dict]:
 
 def _query(capsys, root: Path, *argv: str) -> tuple[int, dict]:
     return _run(capsys, root, "explore", "semantic", "query", *argv)
+
+
+def _values(capsys, root: Path, *argv: str) -> tuple[int, dict]:
+    return _run(capsys, root, "explore", "semantic", "values", *argv)
 
 
 def _by_hand(root: Path, sql: str) -> list[list[Any]]:
@@ -502,3 +510,188 @@ def test_a_billed_connector_asks_before_any_spend(
     assert "test-proj.shop.customers" in fake_bq_client.query_calls[-1].sql.replace(
         "`", ""
     )
+
+
+# --- values ------------------------------------------------------------------------
+
+
+def test_a_dimension_s_values_match_hand_written_sql(repo, capsys):
+    rc, envelope = _values(capsys, repo, "orders.status")
+
+    assert rc == 0, envelope["errors"]
+    data = envelope["data"]
+    assert (data["dimension"], data["scoped_to"]) == ("orders.status", [])
+    assert data["columns"] == ["orders.status"]
+    # The model's own filter applies: SLayer renders every query on the model
+    # under it, so `test` is not a value of this dimension.
+    assert sorted(data["cells"]) == sorted(
+        _by_hand(repo, "SELECT DISTINCT status FROM orders WHERE status <> 'test'")
+    )
+    assert data["truncated"] is False
+    assert (data["vendor"], data["execution"]) == ("slayer", "dex")
+    assert not any("cost guard" in warning for warning in envelope["warnings"])
+
+
+def test_a_metric_scopes_the_render_and_scoped_to_reports_it(repo, capsys, monkeypatch):
+    rendered: list[Any] = []
+    real = render.SlayerRenderer.render
+
+    def spy(self, query):
+        rendered.append(query)
+        return real(self, query)
+
+    monkeypatch.setattr(render.SlayerRenderer, "render", spy)
+
+    rc, envelope = _values(capsys, repo, "orders.status", "--metric", "orders.revenue")
+
+    assert rc == 0, envelope["errors"]
+    assert envelope["data"]["scoped_to"] == ["orders.revenue"]
+    (query,) = rendered
+    # Rooted at the metric's model, and still no measure: a value domain.
+    assert query.source_model == "orders"
+    assert not query.measures
+    assert query.distinct_dimension_values is True
+
+
+def test_a_dimension_the_metric_cannot_group_by_is_refused(repo, capsys):
+    rc, envelope = _values(
+        capsys, repo, "orders.status", "--metric", "customers.customer_count"
+    )
+
+    assert rc != 0
+    assert "orders.status is not groupable for customers.customer_count" in _errors(
+        envelope
+    )
+
+
+def test_a_time_dimension_s_values_at_a_grain(repo, capsys):
+    rc, envelope = _values(capsys, repo, "orders.ordered_at__month")
+
+    assert rc == 0, envelope["errors"]
+    assert envelope["data"]["dimension"] == "orders.ordered_at__month"
+    by_hand = _by_hand(
+        repo,
+        "SELECT DISTINCT date_trunc('month', ordered_at) FROM orders "
+        "WHERE status <> 'test'",
+    )
+    assert sorted(row[0] for row in envelope["data"]["cells"]) == sorted(
+        row[0].isoformat() for row in by_hand
+    )
+
+
+def test_a_grain_on_a_categorical_dimension_is_refused(repo, capsys):
+    rc, envelope = _values(capsys, repo, "orders.status__month")
+
+    assert rc != 0
+    assert "orders.status is not a time dimension" in _errors(envelope)
+
+
+def test_an_unknown_dimension_is_refused_by_name(repo, capsys, monkeypatch):
+    monkeypatch.setattr(render.SlayerRenderer, "render", _never_rendered)
+
+    rc, envelope = _values(capsys, repo, "orders.statsu")
+
+    assert rc != 0
+    assert "no such dimension in this semantic layer: orders.statsu" in _errors(
+        envelope
+    )
+    assert "model.column" in _errors(envelope)
+
+
+def test_an_unknown_scoping_metric_is_refused_by_name(repo, capsys):
+    rc, envelope = _values(capsys, repo, "orders.status", "--metric", "orders.revnue")
+
+    assert rc != 0
+    assert "no such metric in this semantic layer: orders.revnue" in _errors(envelope)
+
+
+class TestSlayerValuesContract:
+    """The catalog contract's values assertion, against this layer."""
+
+    @pytest.fixture(autouse=True)
+    def _repo(self, repo: Path) -> None:
+        self.repo = repo
+
+    def make_reference_backend(self):
+        return resolve_semantic_layer(DexEngine.from_repo(self.repo))
+
+    test_the_values_of_a_pii_dimension_are_refused = (
+        SemanticCatalogContract.test_the_values_of_a_pii_dimension_are_refused
+    )
+
+
+def test_a_pii_dimension_s_values_are_refused_by_its_name(repo, capsys, monkeypatch):
+    monkeypatch.setattr(render.SlayerRenderer, "render", _never_rendered)
+
+    rc, envelope = _values(capsys, repo, "customers.email")
+
+    assert rc != 0
+    assert envelope["reason"] == "guard"
+    assert "customers.email is PII" in _errors(envelope)
+
+
+def test_a_pii_dimension_s_values_are_refused_from_the_profile(repo, capsys):
+    """`buyer` reads `contact_email`: only the cache, reached through the catalog's
+    physical column, can tell the gate what it is."""
+
+    rc, profiled = _run(capsys, repo, "explore", "profile", "shop.main.orders")
+    assert rc == 0, profiled["errors"]
+
+    rc, envelope = _values(capsys, repo, "orders.buyer")
+
+    assert rc != 0
+    assert envelope["reason"] == "guard"
+    assert "orders.buyer is PII" in _errors(envelope)
+    assert "profiled and flagged" in _errors(envelope)
+
+
+def test_values_screened_by_name_alone_say_so(repo, capsys):
+    rc, envelope = _values(capsys, repo, "orders.status")
+
+    assert rc == 0, envelope["errors"]
+    assert any(
+        "name heuristic alone for orders.status" in note
+        for note in envelope["data"]["notes"]
+    )
+
+
+def test_values_come_back_capped_and_truncated(repo, capsys):
+    config = repo / ".dex" / "config.yml"
+    config.write_text(
+        config.read_text(encoding="utf-8") + "query:\n  max_rows: 2\n",
+        encoding="utf-8",
+    )
+
+    rc, envelope = _values(capsys, repo, "orders.status")
+
+    assert rc == 0, envelope["errors"]
+    data = envelope["data"]
+    assert data["row_count"] == 2
+    assert len(data["cells"]) == 2
+    assert data["truncated"] is True
+
+
+def test_slayer_s_own_value_profiling_is_never_reached(repo, capsys, monkeypatch):
+    """SLayer samples a column's values into its model file through
+    `update_column_sampled`; under dex nothing may call it, and the model file
+    is left byte-identical."""
+
+    calls: list[Any] = []
+
+    async def recorded(self, *args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("SLayer's value profiling was reached")
+
+    monkeypatch.setattr(render.ValidatedModelStorage, "update_column_sampled", recorded)
+    files = sorted((repo / BASE).rglob("*.yaml"))
+    before = [path.read_bytes() for path in files]
+
+    rc, envelope = _values(capsys, repo, "orders.status")
+
+    assert rc == 0, envelope["errors"]
+    assert calls == []
+    assert [path.read_bytes() for path in files] == before
+
+
+def _never_rendered(*_a, **_k):
+    raise AssertionError("rendered a values request that should have been refused")
