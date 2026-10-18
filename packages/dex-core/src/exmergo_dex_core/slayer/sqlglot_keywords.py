@@ -21,12 +21,10 @@ So the containment is two halves:
   into SLayer that emits SQL** (a render, a schema-drift computation). SLayer's
   own emission relies on them at generation time, since ``identifier_sql``
   reads the class attribute when it runs, and rendering without them would emit
-  a reserved-word alias bare. The previous sets are restored on the way out,
-  error or not.
-
-Nothing here is thread-safe, and nothing needs to be: a dex command runs SLayer
-on the calling thread and generates no SQL of its own while a SLayer call is in
-progress.
+  a reserved-word alias bare. Calls are reference-counted under a module-level
+  lock: the first to enter installs SLayer's sets and the last to exit restores
+  what was there before, error or not, so overlapping calls on different threads
+  cannot leave SLayer's sets behind.
 
 Only the generators of the dialects SLayer targets are saved
 (:data:`SLAYER_DIALECTS`, held equal to SLayer's ``SQLGLOT_NAMES`` by a test).
@@ -39,6 +37,7 @@ save them would cost more than the SLayer import does.
 from __future__ import annotations
 
 import sys
+import threading
 import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -138,18 +137,33 @@ def _import_contained() -> tuple[dict[type, object], bool]:
 
 _SLAYER, CONTAINED = _import_contained()
 
+# How many `slayer_keywords` blocks are open, across every thread, and the sets
+# the first of them replaced. Both are read and written only under the lock.
+_LOCK = threading.Lock()
+_depth = 0
+_outside: _KeywordState = {}
+
 
 @contextmanager
 def slayer_keywords() -> Iterator[None]:
     """SLayer's reserved keywords installed for the length of the block.
 
-    Wrap every call into SLayer that generates SQL. The sets in place before the
-    block, which are sqlglot's own outside one, are restored when it exits.
+    Wrap every call into SLayer that generates SQL. The first block to enter
+    installs them and the last to exit restores the sets in place before it,
+    which are sqlglot's own outside any block, so blocks may nest or overlap
+    across threads.
     """
 
-    previous = _capture()
-    _apply(_SLAYER)
+    global _depth, _outside
+    with _LOCK:
+        if _depth == 0:
+            _outside = _capture()
+            _apply(_SLAYER)
+        _depth += 1
     try:
         yield
     finally:
-        _apply(previous)
+        with _LOCK:
+            _depth -= 1
+            if _depth == 0:
+                _apply(_outside)

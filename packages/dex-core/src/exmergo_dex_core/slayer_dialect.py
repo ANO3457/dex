@@ -35,9 +35,10 @@ column it would never surface. So the tree is walked whole, every field of every
 node, and a reference anywhere in it is reported. Over-reporting is the safe
 direction: a token that names no dimension is screened by name and passes.
 
-A leaf beside :mod:`.metricflow_dialect`, importing nothing of dex's. It does
-import SLayer, so it is reached only where the ``[slayer]`` extra is known to be
-installed.
+A leaf beside :mod:`.metricflow_dialect`, importing nothing of dex's but
+:mod:`.slayer.sqlglot_keywords`, which every dex module that imports SLayer
+imports first. It does import SLayer, so it is reached only where the
+``[slayer]`` extra is known to be installed.
 """
 
 from __future__ import annotations

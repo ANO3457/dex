@@ -25,6 +25,7 @@ import json
 import subprocess
 import sys
 import textwrap
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -228,6 +229,52 @@ def test_the_context_restores_on_an_error():
     with pytest.raises(ValueError, match="boom"), slayer_keywords():
         raise ValueError("boom")
 
+    assert snowflake("SELECT values FROM t") == "SELECT values FROM t"
+
+
+def test_overlapping_blocks_on_two_threads_leave_none_behind():
+    """The interleaving that leaked before the blocks were reference-counted: A
+    enters, B enters (saving SLayer's sets as what to restore), A exits, B
+    exits and puts SLayer's sets back for good. B must still see them after A
+    has left, and neither must leave them behind."""
+
+    a_entered, b_entered, a_exited = (threading.Event() for _ in range(3))
+    seen: dict[str, str] = {}
+    errors: list[BaseException] = []
+
+    def a() -> None:
+        try:
+            with slayer_keywords():
+                a_entered.set()
+                assert b_entered.wait(5)
+                seen["a inside"] = snowflake("SELECT values FROM t")
+        except BaseException as exc:  # re-raised on the main thread
+            errors.append(exc)
+        finally:
+            a_exited.set()
+
+    def b() -> None:
+        try:
+            assert a_entered.wait(5)
+            with slayer_keywords():
+                b_entered.set()
+                assert a_exited.wait(5)
+                seen["b inside after a"] = snowflake("SELECT values FROM t")
+        except BaseException as exc:  # re-raised on the main thread
+            errors.append(exc)
+            b_entered.set()
+
+    threads = [threading.Thread(target=a), threading.Thread(target=b)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert not errors, errors
+    assert seen == {
+        "a inside": 'SELECT "values" FROM t',
+        "b inside after a": 'SELECT "values" FROM t',
+    }
     assert snowflake("SELECT values FROM t") == "SELECT values FROM t"
 
 
