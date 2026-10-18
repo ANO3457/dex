@@ -48,6 +48,16 @@ or `.dex/plans/` by hand in place of the command that guards them.
 
 ## Running the engine
 
+Run commands from the user's project directory, so dex finds that project's
+configuration and writes its cache there. The wrapper path is absolute:
+
+- In Claude Code, `${CLAUDE_SKILL_DIR}` is supplied by the host.
+- In Codex or another Agent Skills host, resolve the directory containing this
+  installed `SKILL.md` from the path the host provides. Substitute that absolute
+  directory for `${CLAUDE_SKILL_DIR}` in every command and reference below,
+  including paths in the bundled reference files. Do not assume that environment
+  variable exists, and do not change into the installed skill directory.
+
 ```bash
 uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [flags]
 ```
