@@ -38,7 +38,6 @@ from exmergo_dex_core.cli import main
 from exmergo_dex_core.engine import DexEngine
 from exmergo_dex_core.explore.semantic import SemanticBackendError
 from exmergo_dex_core.explore.semantic.backend import resolve_semantic_layer
-from exmergo_dex_core.explore.semantic.conformance import SemanticCatalogContract
 from exmergo_dex_core.explore.semantic.model import SemanticQuery
 from exmergo_dex_core.slayer import render
 from exmergo_dex_core.slayer.loader import FORMAT_VERSION
@@ -603,21 +602,6 @@ def test_an_unknown_scoping_metric_is_refused_by_name(repo, capsys):
 
     assert rc != 0
     assert "no such metric in this semantic layer: orders.revnue" in _errors(envelope)
-
-
-class TestSlayerValuesContract:
-    """The catalog contract's values assertion, against this layer."""
-
-    @pytest.fixture(autouse=True)
-    def _repo(self, repo: Path) -> None:
-        self.repo = repo
-
-    def make_reference_backend(self):
-        return resolve_semantic_layer(DexEngine.from_repo(self.repo))
-
-    test_the_values_of_a_pii_dimension_are_refused = (
-        SemanticCatalogContract.test_the_values_of_a_pii_dimension_are_refused
-    )
 
 
 def test_a_pii_dimension_s_values_are_refused_by_its_name(repo, capsys, monkeypatch):
