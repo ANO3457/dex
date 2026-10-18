@@ -645,6 +645,30 @@ def test_a_pii_dimension_s_values_are_refused_from_the_profile(repo, capsys):
     assert "profiled and flagged" in _errors(envelope)
 
 
+def test_a_flag_behind_a_partial_sql_table_refuses_values(tmp_path, capsys, monkeypatch):
+    """`main.orders` carries no relation in the catalog, so `contact` resolves to
+    the profile by suffix: its name passes the heuristic, and only the flag on
+    `contact_email` can refuse it."""
+
+    contact = {"name": "contact", "type": "TEXT", "sql": "contact_email"}
+    orders = {
+        **ORDERS,
+        "sql_table": "main.orders",
+        "columns": [*ORDERS["columns"], contact],
+    }
+    root = _repo(tmp_path, orders, CUSTOMERS)
+    rc, profiled = _run(capsys, root, "explore", "profile", "shop.main.orders")
+    assert rc == 0, profiled["errors"]
+    monkeypatch.setattr(render.SlayerRenderer, "render", _never_rendered)
+
+    rc, envelope = _values(capsys, root, "orders.contact")
+
+    assert rc != 0
+    assert envelope["reason"] == "guard"
+    assert "orders.contact is PII" in _errors(envelope)
+    assert "profiled and flagged" in _errors(envelope)
+
+
 def test_values_screened_by_name_alone_say_so(repo, capsys):
     rc, envelope = _values(capsys, repo, "orders.status")
 
