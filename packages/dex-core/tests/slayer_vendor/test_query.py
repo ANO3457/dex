@@ -278,6 +278,79 @@ def test_a_pii_filter_is_refused(repo, capsys, clause):
     assert "would surface PII" in _errors(envelope)
 
 
+@pytest.mark.parametrize("table", ["main.orders", "orders"])
+@pytest.mark.parametrize(
+    "request_argv",
+    [["--group-by", "orders.buyer"], ["--where", "buyer IS NOT NULL"]],
+    ids=["group-by", "where"],
+)
+def test_a_flag_behind_a_partial_sql_table_is_refused(
+    tmp_path, capsys, table, request_argv
+):
+    """A `sql_table` dex cannot qualify carries no relation in the catalog, and
+    the gate still resolves it against the profile by suffix: `buyer` passes the
+    heuristic, so only the flag on `contact_email` can refuse it."""
+
+    root = _repo(tmp_path, {**ORDERS, "sql_table": table}, CUSTOMERS)
+    rc, profiled = _run(capsys, root, "explore", "profile", "shop.main.orders")
+    assert rc == 0, profiled["errors"]
+
+    rc, envelope = _query(capsys, root, "orders.revenue", *request_argv)
+
+    assert rc != 0
+    assert envelope["reason"] == "guard"
+    assert "orders.buyer" in _errors(envelope)
+    assert "profiled and flagged" in _errors(envelope)
+
+
+def test_a_column_with_no_mapped_warehouse_column_is_disclosed(tmp_path, capsys):
+    recent = model(
+        "recent",
+        sql_table=None,
+        sql="select status, amount from orders",
+        columns=[
+            {"name": "status", "type": "TEXT"},
+            {"name": "amount", "type": "DOUBLE"},
+        ],
+        measures=[{"name": "revenue", "formula": "amount:sum"}],
+    )
+    root = _repo(tmp_path, recent)
+
+    rc, envelope = _query(capsys, root, "recent.revenue", "--group-by", "recent.status")
+
+    assert rc == 0, envelope["errors"]
+    assert any(
+        "recent.status fell back to the name heuristic" in note
+        for note in envelope["data"]["notes"]
+    )
+
+
+def test_a_grain_on_a_pii_time_dimension_is_refused(tmp_path, capsys):
+    """`--grain` groups by the root's time dimension, so the gate screens it."""
+
+    patients = model(
+        "patients",
+        default_time_dimension="date_of_birth",
+        columns=[
+            {"name": "patient_id", "type": "INT", "primary_key": True},
+            {"name": "date_of_birth", "type": "DATE"},
+        ],
+        measures=[{"name": "patient_count", "formula": "*:count"}],
+    )
+    root = _repo(tmp_path, patients)
+    conn = duckdb.connect(str(root / "shop.duckdb"))
+    conn.execute("CREATE TABLE patients (patient_id INT, date_of_birth DATE)")
+    conn.execute("INSERT INTO patients VALUES (1, '1990-04-02'), (2, '1985-11-30')")
+    conn.close()
+
+    rc, envelope = _query(capsys, root, "patients.patient_count", "--grain", "day")
+
+    assert rc != 0
+    assert envelope["reason"] == "guard"
+    assert "patients.date_of_birth" in _errors(envelope)
+    assert "would surface PII" in _errors(envelope)
+
+
 @pytest.mark.parametrize("clause", ["status =", "status == {state}"])
 def test_a_filter_dex_cannot_read_is_refused(repo, capsys, clause):
     rc, envelope = _query(capsys, repo, "orders.revenue", "--where", clause)

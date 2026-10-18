@@ -40,6 +40,7 @@ their attributes are read.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -83,6 +84,9 @@ METRIC_TYPE = "formula"
 # treats as time.
 _TEMPORAL = frozenset({"DATE", "TIMESTAMP"})
 
+# One unquoted identifier part, the shape `parse_relation` accepts.
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+
 
 def dimension_token(model: str, column: str) -> str:
     """The reference a SLayer query uses for a model's column: ``model.column``.
@@ -113,6 +117,10 @@ def semantic_catalog(
         relation, relation_note = _relation(model, connector)
         if relation_note:
             found.append(relation_note)
+        # What the PII gate resolves against, which may be the partial name the
+        # catalog declines to claim as a relation: the gate matches it against
+        # the profiled cache by suffix, failing closed when it is ambiguous.
+        gate_relation = relation or _partial_relation(model)
         time_dimension = _time_dimension(model)
         models.append(
             SemanticModelInfo(
@@ -126,10 +134,9 @@ def semantic_catalog(
         tokens: list[str] = []
         computed: list[str] = []
         for col in model.columns:
-            column = physical_column(col)
-            if relation is None:
-                column = None
-            elif column is None:
+            gate_column = physical_column(col)
+            column = gate_column if relation else None
+            if gate_relation and gate_column is None:
                 computed.append(col.name)
             token = dimension_token(model.name, col.name)
             tokens.append(token)
@@ -150,8 +157,8 @@ def semantic_catalog(
                     vendor_params=_column_params(col),
                 )
             )
-            if column and relation:
-                physical[token] = (relation, column)
+            if gate_column and gate_relation:
+                physical[token] = (gate_relation, gate_column)
         if computed:
             one = len(computed) == 1
             found.append(
@@ -251,9 +258,31 @@ def _relation(model: Any, connector: str | None) -> tuple[str | None, str | None
             f"cannot read as one fully qualified relation on "
             f"{connector or 'this connector'}, so it carries no physical link. "
             "SLayer completes a partial name from its datasource, and dex does "
-            "not read datasources, which carry credentials"
+            "not read datasources, which carry credentials. The PII gate still "
+            "matches an unquoted partial name against the profiled cache by "
+            "suffix"
         )
     return relation, None
+
+
+def _partial_relation(model: Any) -> str | None:
+    """A ``sql_table`` too short to be a relation, kept for the PII gate alone.
+
+    ``main.orders`` or ``orders`` names a relation dex cannot qualify without
+    SLayer's datasource, so the catalog claims none. The gate needs no claim: it
+    matches a name against the profiled cache by suffix, as ``explore profile``
+    resolves its arguments, and with nothing to match it falls to the heuristic.
+    Only unquoted dotted identifiers qualify; anything else names no column dex
+    can look up, and leaving it out keeps the gate from screening a guess.
+    """
+
+    table = model.sql_table
+    if not table:
+        return None
+    parts = table.split(".")
+    if not all(_IDENTIFIER.fullmatch(part) for part in parts):
+        return None
+    return table
 
 
 def _time_dimension(model: Any) -> str | None:

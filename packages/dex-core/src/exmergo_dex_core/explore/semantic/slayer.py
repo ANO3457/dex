@@ -7,10 +7,11 @@ gaps, and the governed metric query.
 **SLayer renders, dex executes.** ``query`` follows the local MetricFlow
 backend's order, because the safety contract is the order:
 
-1. the PII request-gate on the grouped dimensions and on every column a
-   ``--where`` clause names, read with SLayer's own filter grammar
-   (:mod:`...slayer_dialect`) and looked up in the ``.dex/`` cache through the
-   catalog's ``physical_columns``, with the name heuristic as the floor;
+1. the PII request-gate on the grouped dimensions, on the time dimension a
+   ``--grain`` buckets, and on every column a ``--where`` clause names, read
+   with SLayer's own filter grammar (:mod:`...slayer_dialect`) and looked up in
+   the ``.dex/`` cache through the catalog's ``physical_columns``, with the name
+   heuristic as the floor and a note on any token that had only the floor;
 2. the grain check;
 3. translation into a ``SlayerQuery`` (:mod:`...slayer.translate`), which
    refuses whatever v1 does not map;
@@ -190,20 +191,28 @@ class LocalSlayerLayer:
         view = self._catalog_view()
         cache = governed.load_cache()
 
-        # A filter is read against the model the query is rooted at, so a
-        # filtered query needs that root first. A set of metrics that names no
-        # single root is refused by name here, rather than as a filter the gate
-        # could not read, which would send the caller after the wrong problem.
-        # Nothing is rendered either way.
-        root = source_model(q.metrics, view).name if q.where else None
+        # A filter is read against the model the query is rooted at, and
+        # `--grain` buckets that model's time dimension, so either needs the
+        # root first. A set of metrics that names no single root is refused by
+        # name here, rather than as a filter the gate could not read, which would
+        # send the caller after the wrong problem. Nothing is rendered either way.
+        root = source_model(q.metrics, view) if q.where or q.grain else None
 
-        # PII request-gate, before rendering.
-        blocked = screen_dimension_refs(
-            requested_dimension_refs(
-                q, filter_refs=partial(self.filter_refs, source_model=root)
+        # PII request-gate, before rendering. `--grain` groups by the root's time
+        # dimension as surely as `--group-by` would, so that column is screened
+        # too. A root with no time dimension adds nothing: translation refuses
+        # the grain, before anything renders.
+        refs = requested_dimension_refs(
+            q,
+            filter_refs=partial(
+                self.filter_refs, source_model=root.name if root else None
             ),
-            meta_lookup=governed.pii_lookup(cache),
         )
+        if q.grain and root is not None and root.agg_time_dimension:
+            refs = list(
+                dict.fromkeys([*refs, f"{root.name}.{root.agg_time_dimension}"])
+            )
+        blocked = screen_dimension_refs(refs, meta_lookup=governed.pii_lookup(cache))
         if blocked:
             named = ", ".join(f"{ref} ({reason})" for ref, reason in blocked)
             raise SemanticQueryRefusedError(
@@ -236,6 +245,7 @@ class LocalSlayerLayer:
             backend=self,
             command="explore semantic query",
             result_type=SemanticQueryResult,
+            extra_notes=_unmapped_note(refs, self._physical_columns()),
         )
 
     def values(self, _dimension: str, _metrics: list[str]) -> Any:
@@ -274,3 +284,22 @@ class LocalSlayerLayer:
             return dict(self._catalog_view().physical_columns)
         except SemanticBackendError:
             return {}
+
+
+def _unmapped_note(refs: list[str], columns: dict[str, tuple[str, str]]) -> list[str]:
+    """The disclosure that a screened token has no warehouse column behind it.
+
+    A column of a model backed by SQL, or one defined as an expression, names no
+    column the profile could have flagged, so only its name was screened. That is
+    the fail-closed floor rather than evidence, and the result says so, as it
+    does for a relation that was never profiled.
+    """
+
+    unmapped = [ref for ref in refs if ref not in columns]
+    if not unmapped:
+        return []
+    return [
+        f"PII screening of {', '.join(unmapped)} fell back to the name heuristic: "
+        "the SLayer model maps no warehouse column behind it (a model backed by "
+        "SQL, or a computed column), so no profile could adjudicate it."
+    ]
