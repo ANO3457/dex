@@ -20,6 +20,21 @@ Run this command in your terminal
 npx skills add exmergo/dex
 ```
 
+## Install (Codex)
+
+Install the three skills into Codex with the same Agent Skills installer:
+
+```bash
+npx skills add exmergo/dex --agent codex
+```
+
+The repository also packages Explore, Transform, and Maintain as one native
+Codex plugin through `.codex-plugin/plugin.json`. Its wrappers and references
+travel with the skills; no MCP server is required. Codex needs a local shell and
+[`uv`](#prerequisite-uv), and the first command downloads the pinned dex engine.
+Run dex from your project directory so it finds your configuration and keeps
+its `.dex/` cache with your project.
+
 ## Install (Claude Code)
 
 Run these commands **inside Claude Code** one at a time

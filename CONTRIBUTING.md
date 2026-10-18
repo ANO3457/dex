@@ -815,7 +815,7 @@ commit:
    scripts/prepare_release.sh <engine-version> <plugin-version>
    ```
 
-   It pins the three skill wrappers to the engine version, bumps the three plugin
+   It pins the three skill wrappers to the engine version, bumps the four plugin
    manifests, writes the release's section of `CHANGELOG.md` dated today in UTC,
    and deletes the fragments it collected. It stages nothing; every change is
    left in the working tree.
