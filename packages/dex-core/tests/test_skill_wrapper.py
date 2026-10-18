@@ -176,6 +176,17 @@ def test_the_extras_are_the_connector_plus_whatever_the_command_needs(
             "slayer",
             ["ossie", "slayer", "semantic-api"],
         ),
+        # SLayer renders `query` and `values` locally, so both take it (#685).
+        (
+            ["explore", "semantic", "query", "orders.revenue"],
+            "slayer",
+            ["ossie", "slayer", "semantic-api", "semantic"],
+        ),
+        (
+            ["explore", "semantic", "values", "orders.status"],
+            "slayer",
+            ["ossie", "slayer", "semantic-api", "semantic"],
+        ),
         # A SLayer plan is validated again as `transform apply` writes it.
         (["transform", "apply"], "slayer", ["slayer"]),
         (["explore", "map", "--use-project"], "slayer", ["slayer"]),
