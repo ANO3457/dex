@@ -263,18 +263,24 @@ def _imports_slayer(path: Path) -> bool:
     )
 
 
+#: The only modules that import SLayer: the reader, the schema axis that runs
+#: SLayer's own drift rules, and the renderer. Named one by one rather than as a
+#: package, so a new importer is a decision this list records.
+SLAYER_IMPORTERS = {"slayer/loader.py", "slayer/schema.py", "slayer/render.py"}
+
+
 def test_no_core_module_imports_slayer():
-    """SLayer is imported from `exmergo_dex_core.slayer` or nowhere. A source scan,
+    """SLayer is imported from the modules above or nowhere. A source scan,
     because an import inside a function is invisible to a `sys.modules` probe
     until that function runs."""
 
     package = Path(__file__).resolve().parents[2] / "src" / "exmergo_dex_core"
-    offenders = [
+    importers = {
         path.relative_to(package).as_posix()
         for path in package.rglob("*.py")
-        if path.relative_to(package).parts[0] != "slayer" and _imports_slayer(path)
-    ]
-    assert offenders == []
+        if _imports_slayer(path)
+    }
+    assert importers == SLAYER_IMPORTERS
 
 
 def test_the_check_and_the_seam_import_no_slayer():

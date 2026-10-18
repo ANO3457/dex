@@ -1,7 +1,8 @@
 """Reading SLayer model files, and judging whether each one is a model.
 
-The one module in dex that imports SLayer. Everything else reaches the validated
-models through :func:`load_models`, which is reached only through a source that
+One of the three modules in dex that import SLayer, beside :mod:`.schema` and
+:mod:`.render`. Everything else reaches the validated models through
+:func:`load_models`, which is reached only through a source that
 :func:`.dependency.ensure_available` let construct, so a base install never
 imports it.
 
