@@ -176,16 +176,17 @@ def test_the_extras_are_the_connector_plus_whatever_the_command_needs(
             "slayer",
             ["ossie", "slayer", "semantic-api"],
         ),
-        # SLayer renders `query` and `values` locally, so both take it (#685).
+        # SLayer renders `query` and `values` itself, so both take it and
+        # neither takes MetricFlow (#685).
         (
             ["explore", "semantic", "query", "orders.revenue"],
             "slayer",
-            ["ossie", "slayer", "semantic-api", "semantic"],
+            ["ossie", "slayer", "semantic-api"],
         ),
         (
             ["explore", "semantic", "values", "orders.status"],
             "slayer",
-            ["ossie", "slayer", "semantic-api", "semantic"],
+            ["ossie", "slayer", "semantic-api"],
         ),
         # A SLayer plan is validated again as `transform apply` writes it.
         (["transform", "apply"], "slayer", ["slayer"]),

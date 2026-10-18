@@ -20,8 +20,10 @@ logic.
   warehouse client, and both are resolved the same way, from the command being run
   rather than installed always: `explore cluster` adds `[cluster]`, and
   `explore semantic` adds `[semantic-api]` plus, where a statement might be
-  rendered locally (any mode but `list`, without `--api`), `[semantic]`. A repo
-  that runs neither resolves neither scikit-learn nor MetricFlow.
+  rendered locally (any mode but `list`, without `--api`), `[semantic]`, and
+  `[slayer]` where `semantic.vendor` is `slayer`, in place of `[semantic]`, since
+  SLayer renders its own `query` and `values`. A repo that runs neither resolves
+  neither scikit-learn nor MetricFlow.
 - That environment is uv's own, and `--no-project` is what keeps it so. Without it
   uv discovers whatever Python project the caller is standing in, builds it, leaves
   a `.venv/` and a `uv.lock` in their repo, and puts their dependencies on the

@@ -319,7 +319,9 @@ def _feature_extras(argv: list[str], vendor: str | None = None) -> list[str]:
 
     `slayer` is the exception that does read `vendor`, the configured
     `semantic.vendor`, because it is too heavy to take on a guess (see
-    `_SLAYER_COMMANDS`).
+    `_SLAYER_COMMANDS`). The same read keeps MetricFlow out of a SLayer `query` or
+    `values`: SLayer renders those itself, so `semantic` would be installed for
+    nothing.
     """
 
     positionals = _positionals(argv)
@@ -338,7 +340,8 @@ def _feature_extras(argv: list[str], vendor: str | None = None) -> list[str]:
     if command != ("explore", "semantic"):
         return extras
     mode = positionals[2] if len(positionals) > 2 else "list"
-    if mode in _SEMANTIC_RENDERING_MODES and "--api" not in argv:
+    renders_with_metricflow = vendor != _SLAYER_VENDOR and "--api" not in argv
+    if mode in _SEMANTIC_RENDERING_MODES and renders_with_metricflow:
         return [*extras, "semantic-api", "semantic"]
     return [*extras, "semantic-api"]
 

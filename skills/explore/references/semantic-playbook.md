@@ -116,7 +116,9 @@ domain comes back capped and `truncated`, and says so.
 
 Use a `query` instead when you want the distribution rather than the domain: group
 the metric by the dimension and read the sizes. That costs a query where `values`
-often does not.
+often does not. On a SLayer layer it always does: SLayer has no distinct-values
+shortcut, so `values` renders a dimension-only query and runs it through the same
+cost handshake as a metric query.
 
 ## When a command is refused
 

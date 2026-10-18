@@ -281,8 +281,9 @@ it as `execution` (`dex` or `vendor`).
   - `--where` is SLayer's filter syntax, not Jinja: `status = 'paid'`, read
     relative to the query's model, or a dotted column through a declared join.
     A clause dex cannot read, or one carrying `{variable}` syntax, is refused;
-  - `--order-by` (`-orders.revenue` for descending) names one of the query's
-    own metrics or grouped columns.
+  - `--order-by` names one of the query's own metrics or grouped columns;
+    write a descending one as `--order-by=-orders.revenue`, since with a space
+    the leading `-` is read as a flag and refused.
 
   `values` is rooted at the dimension's own model (`scoped_to` empty, the
   model's own filters applied), or at the `--metric` model when one is named,
