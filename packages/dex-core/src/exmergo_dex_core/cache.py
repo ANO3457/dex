@@ -524,6 +524,25 @@ class DexCache(BaseModel):
         return sorted(candidates, key=lambda d: (-(d.rank_score or 0.0), d.identifier))
 
 
+def mask_overridden(cache: DexCache, override_paths: set[str]) -> DexCache:
+    """Apply config overrides to a loaded cache in memory, so an override takes
+    effect at query time immediately instead of demanding a re-profile (a billed
+    scan on metered connectors). The persisted cache is untouched; the next
+    profile writes the override through durably."""
+
+    if not override_paths:
+        return cache
+    for dataset in cache.datasets:
+        for column in dataset.columns:
+            if (
+                column.pii is not None
+                and f"{dataset.identifier}.{column.name}".lower() in override_paths
+            ):
+                column.pii_overridden = column.pii.category
+                column.pii = None
+    return cache
+
+
 def join_columns_by_dataset(
     relationships: list[Relationship],
 ) -> dict[str, set[str]]:
