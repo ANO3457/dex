@@ -43,7 +43,20 @@ BigQuery rejects a dotted output column, so ``orders.status`` reaches the
 warehouse as ``orders___status``, and a dialect with an identifier length limit
 fits a long alias to it. dex reads the rows, not SLayer, so the render carries
 the decoding with it (:attr:`RenderedQuery.result_keys`) and a caller reads the
-same ``model.column`` names on every connector.
+same ``model.column`` names on every connector. Redshift folds a quoted
+identifier to lowercase unless ``enable_case_sensitive_identifier`` is on, so
+there the decoding is keyed by the folded name, and a query whose result names
+would fold onto one another is refused by name rather than answered with two
+columns a caller cannot tell apart.
+
+**A week starts on the day SLayer means.** SLayer's ``week`` is Monday-based
+and ``week_sunday`` is the Monday week of the next day, moved back one. On
+Snowflake both come out as ``DATE_TRUNC('WEEK', ...)``, whose start day follows
+the session's ``WEEK_START`` parameter, so an account set to Sunday would bucket
+``week`` from Sunday and ``week_sunday`` from Saturday, and nothing would say
+so. The render rewrites every Snowflake week truncation to the Monday it means
+through ``DAYOFWEEKISO``, which ignores ``WEEK_START``, so the buckets are the
+same on every account (:func:`pin_snowflake_weeks`).
 """
 
 from __future__ import annotations
@@ -59,10 +72,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, NoReturn
 
+import sqlglot
 from slayer.core.models import DatasourceConfig, SlayerModel
 from slayer.engine.query_engine import SlayerQueryEngine
 from slayer.sql.dialects import dialect_for_ds_type
 from slayer.storage.base import StorageBackend
+from sqlglot import exp
 
 from ..explore.semantic.backend import SemanticBackendError
 from .loader import LoadedModel
@@ -73,6 +88,7 @@ __all__ = [
     "RenderedQuery",
     "SlayerRenderer",
     "ValidatedModelStorage",
+    "pin_snowflake_weeks",
     "slayer_type",
 ]
 
@@ -103,6 +119,12 @@ EXCLUDED: dict[str, str] = {
         "preparing a correlated semi-join, which a dry run would not survive"
     ),
 }
+
+
+#: SLayer datasource types whose warehouse folds a quoted identifier to
+#: lowercase by default, so a result column comes back under a name the
+#: statement did not spell.
+FOLDS_QUOTED_IDENTIFIERS: frozenset[str] = frozenset({"redshift"})
 
 
 def slayer_type(connector: str | None) -> str:
@@ -250,9 +272,9 @@ class ValidatedModelStorage(StorageBackend):
 class RenderedQuery:
     """The SQL SLayer would run, and the names its result columns mean.
 
-    ``result_keys`` maps each column name the statement emits to the
+    ``result_keys`` maps each column name the warehouse returns to the
     ``model.column`` key SLayer itself would report for it; a name the
-    statement already emits as its key is not listed.
+    warehouse already returns as its key is not listed.
     """
 
     sql: str
@@ -281,16 +303,89 @@ class SlayerRenderer:
     def render(self, query: Any) -> RenderedQuery:
         """The SQL SLayer would run for ``query``, rendered without executing it."""
 
+        ds_type = self.storage.datasource_type
         with slayer_keywords():
             response = self._engine.execute_sync(query, dry_run=True)
-            dialect = dialect_for_ds_type(self.storage.datasource_type)
+            dialect = dialect_for_ds_type(ds_type)
             emitted = {dialect.emit_alias(key): key for key in response.columns}
-        if not response.sql:
+            sql = response.sql
+            if sql and ds_type == "snowflake":
+                sql = pin_snowflake_weeks(sql)
+        if not sql:
             raise SemanticBackendError(
                 "SLayer rendered no SQL for this query, so there is nothing for "
                 "dex to run"
             )
+        if ds_type in FOLDS_QUOTED_IDENTIFIERS:
+            emitted = _folded(emitted)
         return RenderedQuery(
-            sql=response.sql,
+            sql=sql,
             result_keys={name: key for name, key in emitted.items() if name != key},
         )
+
+
+def _folded(emitted: dict[str, str]) -> dict[str, str]:
+    """``emitted`` keyed by the lowercase name a folding warehouse returns.
+
+    A cluster with case-sensitive identifiers returns the name as spelt, which
+    is already its own key, so the folded mapping answers both settings. Two
+    keys that fold to one name are refused, since the rows could not say which
+    column is which.
+    """
+
+    folded: dict[str, str] = {}
+    clashes: dict[str, set[str]] = {}
+    for name, key in emitted.items():
+        lower = name.lower()
+        if lower in folded and folded[lower] != key:
+            clashes.setdefault(lower, {folded[lower]}).add(key)
+        folded[lower] = key
+    if clashes:
+        named = "; ".join(
+            " and ".join(f"'{key}'" for key in sorted(keys))
+            for keys in clashes.values()
+        )
+        raise SemanticBackendError(
+            f"the result columns {named} differ only in case, and Redshift "
+            "returns a quoted name folded to lowercase, so dex could not tell "
+            "them apart in the rows. Rename one of the SLayer columns or "
+            "measures, or query them separately"
+        )
+    return folded
+
+
+def pin_snowflake_weeks(sql: str) -> str:
+    """``sql`` with every Snowflake week truncation pinned to Monday.
+
+    ``DATE_TRUNC('WEEK', x)`` becomes ``DATEADD(DAY, 1 - DAYOFWEEKISO(x),
+    DATE_TRUNC('DAY', x))``: the same Monday on an account whose ``WEEK_START``
+    is the default, and still Monday on one set to any other day. The
+    expression keeps the operand's type (a date stays a date), and SLayer's
+    ``week_sunday`` composes this truncation, so it is pinned to Sunday by the
+    same rewrite. A statement with no week truncation is returned unchanged,
+    byte for byte. Called inside :func:`slayer_keywords`, because the statement
+    is regenerated with the identifiers SLayer quoted.
+    """
+
+    tree = sqlglot.parse_one(sql, read="snowflake")
+    pinned = False
+
+    def pin(node: exp.Expression) -> exp.Expression:
+        nonlocal pinned
+        if not isinstance(node, (exp.DateTrunc, exp.TimestampTrunc)):
+            return node
+        if node.text("unit").upper() != "WEEK":
+            return node
+        pinned = True
+        operand = node.this
+        offset = exp.Sub(
+            this=exp.Literal.number(1),
+            expression=exp.Anonymous(this="DAYOFWEEKISO", expressions=[operand.copy()]),
+        )
+        day = exp.TimestampTrunc(this=operand.copy(), unit=exp.var("DAY"))
+        return exp.Anonymous(this="DATEADD", expressions=[exp.var("DAY"), offset, day])
+
+    rewritten = tree.transform(pin)
+    if not pinned:
+        return sql
+    return rewritten.sql(dialect="snowflake", pretty=True)
