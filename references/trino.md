@@ -128,11 +128,14 @@ rather than reporting no drift.
 plans the statement on the coordinator and reports each input table's estimated
 bytes after column pruning and predicate pushdown. Bytes become seconds through
 a deliberately conservative scan rate (200 MiB/s). A catalog with no statistics
-(`memory`, most JDBC catalogs, a Hive table never `ANALYZE`d) answers `NaN`;
+(most JDBC catalogs, a Hive table never `ANALYZE`d) answers `NaN`;
 such a table is priced at a fixed floor and named in a note. The handshake's
 `estimate_basis` says `explain_io` when every table was priced from the plan and
 `floor` when at least one was not, so you know which part of the quote to
-distrust. `estimate_quality` is `heuristic`, because the number you confirm is
+distrust. A statement that cannot be planned at all, almost always a build's
+test over a relation the build has not created yet, is priced at the 0.5-second
+minimum and counted in a note, as every connector prices a cold dev target: the
+estimate is then a lower bound, and the run-time cap still binds each statement. `estimate_quality` is `heuristic`, because the number you confirm is
 seconds from a constant.
 
 **The cap is two session properties, set through one door.** Every billed
@@ -205,15 +208,21 @@ reports `session_read_only: false` rather than claiming one. Read-only rests on:
   ],
   "tables": [
     {"user": "dbt_dev", "catalog": "lake", "schema": "dbt_dev",
-     "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP"]},
-    {"user": "dbt_dev", "privileges": ["SELECT"]},
+     "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP",
+                    "GRANT_SELECT"]},
+    {"user": "dbt_dev", "privileges": ["SELECT", "GRANT_SELECT"]},
     {"privileges": ["SELECT"]}
   ]
 }
 ```
 
-The rules are first-match, so the read-only catch-all goes last. The same
-intent maps onto Ranger or OPA policies. `scripts/trino/rules.json` is the
+The rules are first-match, so the read-only catch-all goes last.
+`GRANT_SELECT` for the dbt identity is not optional: Trino views run with their
+owner's rights, so when dex (or anyone else) reads a dbt view, Trino checks that
+the view's owner may pass on read access to everything the view reads. Without
+it a staging view over a source reads fine and a mart over those staging views
+is refused ("View owner 'dbt_dev' cannot create view that selects from ...").
+The same intent maps onto Ranger or OPA policies. `scripts/trino/rules.json` is the
 version the integration suite runs against, with an `admin` identity for
 seeding.
 
@@ -289,6 +298,23 @@ dbt runs when it is a read-only kind (`tpch`, `tpcds`, `jmx`, `system`,
 nothing) are allowed with a warning. Whether the dbt identity may write is not
 asked: Trino authorization is pluggable and exposes no grant table, so dbt finds
 out.
+
+**Scaffolded sources name their catalog.** dbt-trino resolves a source with no
+`database` in the profile's, which is the dev catalog, so `transform plan
+--scaffold` writes each source with `database: <catalog>` and names it
+`<catalog>_<schema>` (`memory_app`), since federated catalogs often share schema
+names. Two relations sharing a table name in different catalogs would both map
+to `stg_<table>`; the scaffold refuses rather than repoint an existing model, and
+names `transform rename model` as the way through.
+
+**A lakehouse dev catalog cannot hold every source type.** Iceberg rejects
+`char(n)`, `timestamp(p)` below microseconds, and a few others, so a staging
+model that passes a federated source's column straight through fails to build
+there (`Type not supported for Iceberg: char(10)`, `Timestamp precision (3) not
+supported for Iceberg`). Cast in the staging model (`cast(zip as varchar)`,
+`cast(paid_at as timestamp(6))`). The scaffold does not cast for you, because the
+right target type depends on the dev catalog's connector: Hive, for one, rejects
+`timestamp(6)` under its default precision.
 
 `transform build --verify` reads `dev_catalog.dev_schema` for that one command.
 Its row counts are priced into the build's own estimate, and since Trino keeps

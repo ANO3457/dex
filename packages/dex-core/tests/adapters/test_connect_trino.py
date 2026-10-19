@@ -1047,20 +1047,21 @@ def test_an_unknown_deployment_is_refused():
         TrinoTarget(deployment="cloud")
 
 
-def test_a_statement_that_cannot_be_planned_is_floored_and_said_so(
+def test_a_statement_that_cannot_be_planned_is_priced_at_the_minimum(
     fake_trino_connection,
 ):
     """A build's tests read the model the build creates, which does not exist
-    when it is priced, so EXPLAIN fails. That is a floor for a different reason
-    than missing statistics, and the note says which."""
+    when it is priced, so EXPLAIN fails. That is priced at the minimum, as every
+    connector prices a cold dev target, rather than at the stats-less table
+    floor, and the note says the estimate is a lower bound for it."""
 
     adapter = make_adapter(fake_trino_connection)
     fake_trino_connection.refusals["EXPLAIN"] = server_error(
         TABLE_NOT_FOUND, "Table 'memory.dbt_dev.stg_orders' does not exist"
     )
     seconds = adapter.query_estimate("SELECT count(*) FROM memory.dbt_dev.stg_orders")
-    assert seconds == pytest.approx(5.0)
+    assert seconds == pytest.approx(0.5)
     payload = adapter.describe_estimate(seconds)
     assert payload["estimate_basis"] == "floor"
-    assert any("could not be planned" in n for n in payload["notes"])
+    assert any("lower bound" in n for n in payload["notes"])
     assert not any("their catalogs report no statistics" in n for n in payload["notes"])

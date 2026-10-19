@@ -188,7 +188,9 @@ def build(
             )
             continue
         patched = _patched_dataset(base, table_findings, pii_overrides or set())
-        table_edits = model_edits(patched)
+        table_edits = model_edits(
+            patched, cache.provenance.connector if cache is not None else None
+        )
         # The scaffold generates both the path and the dbt SQL inside it, so a
         # format that places a staging model somewhere else would receive dbt
         # content written to a path the generator did not agree to. Placement

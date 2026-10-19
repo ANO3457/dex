@@ -560,3 +560,72 @@ def test_scaffold_into_an_unmergeable_sources_file_is_a_configuration_refusal(
     assert envelope["status"] == "error"
     assert "flow-style" in envelope["errors"][0]
     assert envelope["reason"] == "configuration"
+
+
+def _trino_store(*identifiers: str):
+    from exmergo_dex_core.cache import CacheProvenance, ColumnProfile, DexCache
+    from exmergo_dex_core.storage.memory import MemoryStore
+
+    store = MemoryStore()
+    store.save_cache(
+        DexCache(
+            datasets=[
+                Dataset(
+                    identifier=identifier,
+                    columns=[ColumnProfile(name="id", data_type="bigint")],
+                )
+                for identifier in identifiers
+            ],
+            provenance=CacheProvenance(connector="trino"),
+        )
+    )
+    return store
+
+
+def test_a_trino_source_names_its_catalog():
+    """dbt-trino resolves a source with no `database` in the profile's, which is
+    the dev catalog and never a source catalog, so a scaffold without it reads
+    the wrong table. Catalogs also share schema names, so the source name
+    carries the catalog as well."""
+
+    from exmergo_dex_core.transform.scaffold import scaffold_edits
+
+    edits = scaffold_edits(
+        ["memory.app.orders"], _trino_store("memory.app.orders", "lake.app.orders")
+    )
+    sources = yaml.safe_load(next(e for e in edits if "sources" in e.path).new_content)
+    assert sources["sources"] == [
+        {
+            "name": "memory_app",
+            "database": "memory",
+            "schema": "app",
+            "tables": [{"name": "orders"}],
+        }
+    ]
+    model = next(e for e in edits if e.path.endswith("stg_orders.sql"))
+    assert "source('memory_app', 'orders')" in model.new_content
+
+
+def test_two_relations_sharing_a_table_name_are_refused_in_one_call():
+    from exmergo_dex_core.transform.scaffold import scaffold_edits
+
+    store = _trino_store("memory.app.orders", "lake.app.orders")
+    with pytest.raises(ScaffoldError, match="both scaffold stg_orders"):
+        scaffold_edits(["memory.app.orders", "lake.app.orders"], store)
+
+
+def test_a_model_reading_another_relation_is_not_repointed(dbt_project_dir: Path):
+    """stg_orders already reads one relation; scaffolding a different relation
+    with the same table name would silently repoint every model downstream.
+    Re-scaffolding the relation it already reads is still an update."""
+
+    from exmergo_dex_core.transform.scaffold import scaffold_edits
+
+    store = _trino_store("memory.app.orders", "lake.app.orders")
+    (dbt_project_dir / "models" / "staging" / "stg_orders.sql").write_text(
+        "select * from {{ source('memory_app', 'orders') }}\n", encoding="utf-8"
+    )
+    with pytest.raises(ScaffoldError, match="already reads source"):
+        scaffold_edits(["lake.app.orders"], store, dbt_project_dir)
+    edits = scaffold_edits(["memory.app.orders"], store, dbt_project_dir)
+    assert any(e.path.endswith("stg_orders.sql") for e in edits)

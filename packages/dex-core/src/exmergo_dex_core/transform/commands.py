@@ -1552,6 +1552,15 @@ class _EquivalenceCheck:
         free = paradigm is Paradigm.FREE_LOCAL
         if requested is False:
             return cls(reason="the equivalence check is off (--no-check-equivalence)")
+        # Asked before the opt-in: inviting a re-run with --check-equivalence on
+        # a connector with no comparison sends the caller to a second refusal.
+        comparison = mutation_mod.equivalence_model(
+            _reference_jinja(node, node.get("unique_id", "")), get_dialect(connector)
+        )
+        if comparison is None:
+            return cls(
+                reason=(f"dex has no verified whole-row comparison for {connector} yet")
+            )
         if requested is None and not free:
             return cls(
                 reason=(
@@ -1559,13 +1568,6 @@ class _EquivalenceCheck:
                     "so it is opt-in: re-run with --check-equivalence to price the "
                     "comparisons into the same batch"
                 )
-            )
-        comparison = mutation_mod.equivalence_model(
-            _reference_jinja(node, node.get("unique_id", "")), get_dialect(connector)
-        )
-        if comparison is None:
-            return cls(
-                reason=(f"dex has no verified whole-row comparison for {connector} yet")
             )
         names = {
             other.get("name") for other in shadow.manifest().get("nodes", {}).values()

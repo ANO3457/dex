@@ -741,8 +741,14 @@ class TrinoAdapter:
     def _statement_seconds(self, sql: str) -> float:
         inputs = self._explain_io(sql)
         if inputs is None:
+            # Almost always a build statement over a relation the build has not
+            # created yet. Priced at the minimum, as every connector prices a
+            # cold dev target: a lower bound the handshake names, with the
+            # server-side run-time cap binding each statement regardless. The
+            # stats-less table floor would price a first build of thirty tests
+            # at two and a half minutes before a single row exists.
             self._unplanned += 1
-            return _UNSTATISTICAL_TABLE_SECONDS
+            return _MIN_STATEMENT_SECONDS
         seconds = 0.0
         for identifier, size in inputs:
             if size is None:
@@ -819,7 +825,8 @@ class TrinoAdapter:
             notes.append(
                 f"{self._unplanned} statement(s) could not be planned for an "
                 "estimate (EXPLAIN failed, for example over a relation this build "
-                "has not created yet) and were priced at the floor"
+                "has not created yet) and were priced at the minimum, so the "
+                "estimate is a lower bound for them"
             )
         data: dict[str, object] = {
             "estimated_seconds": estimate,
@@ -1363,10 +1370,18 @@ class TrinoAdapter:
                 "work"
             )
         if name == _PERMISSION_DENIED:
+            # The server's own sentence is kept: it names what was refused and
+            # to whom, which separates the dex identity lacking a read from a
+            # view whose owner may not pass one on. It carries relation and
+            # identity names, never a value.
+            said = str(getattr(exc, "message", "") or "").strip().splitlines()
+            detail = f" ({said[0][:300]})" if said else ""
             return TrinoConnectionError(
-                "the cluster's access control refused the statement. dex reads "
-                "only; check that the identity it connects as may read the "
-                "source catalogs (see references/trino.md for the rule)"
+                f"the cluster's access control refused the statement{detail}. "
+                "dex reads only; check that the identity it connects as may read "
+                "the source catalogs, and that the dbt identity holds "
+                "GRANT_SELECT on what its views read (see references/trino.md "
+                "for the rule)"
             )
         if name in _NOT_FOUND:
             return TrinoConnectionError(
