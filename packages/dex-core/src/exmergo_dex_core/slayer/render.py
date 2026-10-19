@@ -1,0 +1,228 @@
+"""Rendering a SLayer query to SQL, and nothing past rendering.
+
+One of the three modules in dex that import SLayer, beside :mod:`.loader` and
+:mod:`.schema`. SLayer renders and dex executes: this module hands SLayer's query
+engine a query and takes back the SQL it would run, and the statement then goes
+through the same governed spine a MetricFlow-rendered one does. Nothing here can
+execute.
+
+**The storage is the models dex already validated.** ``SlayerQueryEngine`` needs
+a ``StorageBackend``, and SLayer ships none that only reads: ``YAMLStorage``
+runs layout migrations that rewrite files under the storage root, and
+``SQLiteStorage`` migrates its database at construction. :class:`ValidatedModelStorage`
+answers SLayer's reads from the :class:`~.loader.LoadedModel` set the command
+already loaded, and every write, memory and embedding method raises, so a
+planning path that tried to persist something would fail rather than write.
+
+**A datasource is a dialect and nothing else.** SLayer reads a model's
+datasource to pick the dialect it renders in.
+:meth:`ValidatedModelStorage.get_datasource` answers with a name and a type and
+no host, user, password, connection string or environment variable, so there is
+nothing a client could connect with even if one were built. The type comes from
+dex's own connector through :data:`SLAYER_TYPES`, an explicit table: SLayer
+falls back to Postgres for a type it does not know, and a statement rendered in
+another dialect would run and return wrong numbers, so a connector outside the
+table is refused by name, the way ``explore.semantic.local_runtime`` refuses one
+with no MetricFlow renderer.
+
+**Rendering is a dry run.** :meth:`SlayerRenderer.render` calls
+``execute_sync(query, dry_run=True)``, which returns before SLayer constructs a
+SQL client. The engine is built with ``policy=None``, since a forced-filter
+policy is applied by probing the live schema through SLayer's own connection,
+and with a fixed clock, so a relative date (``last 7 days``) resolves to the
+same SQL however long a command takes between rendering and pricing.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from datetime import datetime
+from typing import Any, NoReturn
+
+from slayer.core.models import DatasourceConfig, SlayerModel
+from slayer.engine.query_engine import SlayerQueryEngine
+from slayer.storage.base import StorageBackend
+
+from ..explore.semantic.backend import SemanticBackendError
+from .loader import LoadedModel
+
+__all__ = [
+    "SLAYER_TYPES",
+    "SlayerRenderer",
+    "ValidatedModelStorage",
+    "slayer_type",
+]
+
+#: dex connector -> the SLayer datasource ``type`` that renders in its dialect.
+#: Explicit, and matching the connectors local MetricFlow renders for. ClickHouse
+#: is left out on purpose: SLayer probes a ClickHouse server's profile through a
+#: live client while preparing a correlated semi-join, which a dry run would not
+#: survive.
+SLAYER_TYPES: dict[str, str] = {
+    "duckdb": "duckdb",
+    "bigquery": "bigquery",
+    "snowflake": "snowflake",
+    "databricks": "databricks",
+    "postgres": "postgres",
+    "redshift": "redshift",
+}
+
+
+def slayer_type(connector: str | None) -> str:
+    """The SLayer datasource type for ``connector``, or a refusal naming it."""
+
+    mapped = SLAYER_TYPES.get(connector or "")
+    if mapped is None:
+        supported = ", ".join(sorted(SLAYER_TYPES))
+        raise SemanticBackendError(
+            f"no SLayer dialect for connector '{connector}'; SLayer metric queries "
+            f"support {supported}. dex will not let SLayer render a metric in its "
+            "Postgres fallback for a connector it does not name, because the SQL "
+            "would run and the numbers would be wrong"
+        )
+    return mapped
+
+
+def _read_only(what: str) -> NoReturn:
+    raise RuntimeError(
+        f"dex's SLayer storage is read-only: {what} is not permitted. SLayer "
+        "renders under dex and never persists anything"
+    )
+
+
+class ValidatedModelStorage(StorageBackend):
+    """A SLayer ``StorageBackend`` over models dex has already validated.
+
+    Read-only by construction: the reads planning makes are answered from the
+    model set given at construction, and every method that would persist a
+    model, a datasource, a priority list, a memory or an embedding raises.
+    Every model must carry a ``data_source``, because SLayer keys a model by
+    ``(data_source, name)`` and resolves its dialect through it; a model with
+    none is refused by name rather than rendered in a dialect nobody chose.
+    """
+
+    def __init__(self, models: Sequence[LoadedModel], *, connector: str) -> None:
+        self._type = slayer_type(connector)
+        orphans = sorted(
+            f"'{m.model.name}' ({m.file})" for m in models if not m.model.data_source
+        )
+        if orphans:
+            raise SemanticBackendError(
+                f"SLayer model{'s' if len(orphans) > 1 else ''} "
+                f"{', '.join(orphans)} declare{'' if len(orphans) > 1 else 's'} no "
+                "`data_source`. SLayer renders a model in its datasource's dialect "
+                "and keys it by (data_source, name), so set `data_source` on the "
+                "model and keep the file at models/<data_source>/<name>.yaml"
+            )
+        self._models: dict[tuple[str, str], SlayerModel] = {
+            (m.model.data_source, m.model.name): m.model
+            for m in models
+            if m.model.data_source
+        }
+
+    # --- what planning reads ---------------------------------------------------
+
+    async def get_model(
+        self, name: str, data_source: str | None = None
+    ) -> SlayerModel | None:
+        target = await self._resolve_target_or_none(name, data_source=data_source)
+        if target is None:
+            return None
+        model = self._models.get(target)
+        # A copy, as SLayer's own storage returns, so planning cannot alter the
+        # validated set the rest of the command reads.
+        return model.model_copy(deep=True) if model is not None else None
+
+    async def _list_all_model_identities(self) -> list[tuple[str, str]]:
+        return sorted(self._models)
+
+    async def get_datasource(self, name: str) -> DatasourceConfig | None:
+        if name not in {data_source for data_source, _ in self._models}:
+            return None
+        return DatasourceConfig(name=name, type=self._type)
+
+    async def list_datasources(self) -> list[str]:
+        return sorted({data_source for data_source, _ in self._models})
+
+    async def get_datasource_priority(self) -> list[str]:
+        # The loader refuses a model name declared twice, so a bare name never
+        # needs a priority list to disambiguate it.
+        return []
+
+    # --- everything that would persist -----------------------------------------
+
+    async def _save_model_impl(self, model: SlayerModel) -> None:
+        _read_only("saving a model")
+
+    async def _delete_model_row(self, *, data_source: str, name: str) -> bool:
+        _read_only("deleting a model")
+
+    async def update_column_sampled(self, *args: Any, **kwargs: Any) -> bool:
+        _read_only("recording a column sample")
+
+    async def _save_datasource_impl(self, datasource: DatasourceConfig) -> None:
+        _read_only("saving a datasource")
+
+    async def _delete_datasource_row(self, name: str) -> bool:
+        _read_only("deleting a datasource")
+
+    async def _set_datasource_priority_raw(self, priority: list[str]) -> None:
+        _read_only("setting the datasource priority")
+
+    async def _save_memory_row(self, memory: Any) -> None:
+        _read_only("saving a memory")
+
+    async def _get_memory_row(self, memory_id: str) -> Any:
+        _read_only("reading a memory")
+
+    async def _list_memories_rows(self, *args: Any, **kwargs: Any) -> Any:
+        _read_only("listing memories")
+
+    async def _delete_memory_row(self, memory_id: str) -> bool:
+        _read_only("deleting a memory")
+
+    async def _next_memory_seq(self) -> str:
+        _read_only("allocating a memory id")
+
+    async def save_embedding(self, row: Any) -> None:
+        _read_only("saving an embedding")
+
+    async def get_embedding(self, *, canonical_id: str, embedding_model_name: str):
+        _read_only("reading an embedding")
+
+    async def list_embeddings(self, *, embedding_model_name: str) -> list[Any]:
+        _read_only("listing embeddings")
+
+    async def delete_embeddings_for_canonical(self, *, canonical_id_prefix: str) -> int:
+        _read_only("deleting embeddings")
+
+
+class SlayerRenderer:
+    """SLayer's query engine, reduced to turning a query into SQL.
+
+    ``now`` pins the clock for every render this instance makes; it defaults to
+    the moment of construction, so one command renders against one instant.
+    """
+
+    def __init__(
+        self,
+        models: Sequence[LoadedModel],
+        *,
+        connector: str,
+        now: datetime | None = None,
+    ) -> None:
+        self.storage = ValidatedModelStorage(models, connector=connector)
+        instant = now if now is not None else datetime.now()
+        clock: Callable[[], datetime] = lambda: instant  # noqa: E731
+        self._engine = SlayerQueryEngine(self.storage, policy=None, clock=clock)
+
+    def render(self, query: Any) -> str:
+        """The SQL SLayer would run for ``query``, rendered without executing it."""
+
+        response = self._engine.execute_sync(query, dry_run=True)
+        if not response.sql:
+            raise SemanticBackendError(
+                "SLayer rendered no SQL for this query, so there is nothing for "
+                "dex to run"
+            )
+        return response.sql
