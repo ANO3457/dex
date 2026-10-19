@@ -645,7 +645,9 @@ def test_a_pii_dimension_s_values_are_refused_from_the_profile(repo, capsys):
     assert "profiled and flagged" in _errors(envelope)
 
 
-def test_a_flag_behind_a_partial_sql_table_refuses_values(tmp_path, capsys, monkeypatch):
+def test_a_flag_behind_a_partial_sql_table_refuses_values(
+    tmp_path, capsys, monkeypatch
+):
     """`main.orders` carries no relation in the catalog, so `contact` resolves to
     the profile by suffix: its name passes the heuristic, and only the flag on
     `contact_email` can refuse it."""
