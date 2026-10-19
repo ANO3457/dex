@@ -31,40 +31,66 @@ SQL client. The engine is built with ``policy=None``, since a forced-filter
 policy is applied by probing the live schema through SLayer's own connection,
 and with a fixed clock, so a relative date (``last 7 days``) resolves to the
 same SQL however long a command takes between rendering and pricing.
+
+**A result is named as SLayer would name it.** SLayer emits a projection alias
+in a form the dialect accepts and decodes it on the rows it reads back:
+BigQuery rejects a dotted output column, so ``orders.status`` reaches the
+warehouse as ``orders___status``, and a dialect with an identifier length limit
+fits a long alias to it. dex reads the rows, not SLayer, so the render carries
+the decoding with it (:attr:`RenderedQuery.result_keys`) and a caller reads the
+same ``model.column`` names on every connector.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, NoReturn
 
 from slayer.core.models import DatasourceConfig, SlayerModel
 from slayer.engine.query_engine import SlayerQueryEngine
+from slayer.sql.dialects import dialect_for_ds_type
 from slayer.storage.base import StorageBackend
 
 from ..explore.semantic.backend import SemanticBackendError
 from .loader import LoadedModel
 
 __all__ = [
+    "EXCLUDED",
     "SLAYER_TYPES",
+    "RenderedQuery",
     "SlayerRenderer",
     "ValidatedModelStorage",
     "slayer_type",
 ]
 
 #: dex connector -> the SLayer datasource ``type`` that renders in its dialect.
-#: Explicit, and matching the connectors local MetricFlow renders for. ClickHouse
-#: is left out on purpose: SLayer probes a ClickHouse server's profile through a
-#: live client while preparing a correlated semi-join, which a dry run would not
-#: survive.
+#: Explicit, and a subset of the connectors local MetricFlow renders for: a
+#: connector joins only once a golden of its rendered SQL has been read for that
+#: dialect (``tests/slayer_vendor/test_goldens.py``). The ones left out, and
+#: why, are :data:`EXCLUDED`.
 SLAYER_TYPES: dict[str, str] = {
     "duckdb": "duckdb",
     "bigquery": "bigquery",
     "snowflake": "snowflake",
-    "databricks": "databricks",
     "postgres": "postgres",
     "redshift": "redshift",
+}
+
+#: Connectors with a SLayer dialect that dex still will not render for, each
+#: with the reason a refusal quotes.
+EXCLUDED: dict[str, str] = {
+    "databricks": (
+        "SLayer renders a Databricks time bucket with Spark's TRUNC, which knows "
+        "only year, quarter, month and week and answers NULL for a day, hour, "
+        "minute or second grain, and it renders a median with PERCENTILE_APPROX, "
+        "an approximation; either would run and return the wrong numbers"
+    ),
+    "clickhouse": (
+        "SLayer probes a ClickHouse server's profile through a live client while "
+        "preparing a correlated semi-join, which a dry run would not survive"
+    ),
 }
 
 
@@ -74,6 +100,12 @@ def slayer_type(connector: str | None) -> str:
     mapped = SLAYER_TYPES.get(connector or "")
     if mapped is None:
         supported = ", ".join(sorted(SLAYER_TYPES))
+        reason = EXCLUDED.get(connector or "")
+        if reason is not None:
+            raise SemanticBackendError(
+                f"no SLayer dialect for connector '{connector}': {reason}. SLayer "
+                f"metric queries support {supported}"
+            )
         raise SemanticBackendError(
             f"no SLayer dialect for connector '{connector}'; SLayer metric queries "
             f"support {supported}. dex will not let SLayer render a metric in its "
@@ -119,6 +151,12 @@ class ValidatedModelStorage(StorageBackend):
             for m in models
             if m.model.data_source
         }
+
+    @property
+    def datasource_type(self) -> str:
+        """The SLayer datasource type every model here renders as."""
+
+        return self._type
 
     # --- what planning reads ---------------------------------------------------
 
@@ -197,6 +235,19 @@ class ValidatedModelStorage(StorageBackend):
         _read_only("deleting embeddings")
 
 
+@dataclass(frozen=True)
+class RenderedQuery:
+    """The SQL SLayer would run, and the names its result columns mean.
+
+    ``result_keys`` maps each column name the statement emits to the
+    ``model.column`` key SLayer itself would report for it; a name the
+    statement already emits as its key is not listed.
+    """
+
+    sql: str
+    result_keys: dict[str, str] = field(default_factory=dict)
+
+
 class SlayerRenderer:
     """SLayer's query engine, reduced to turning a query into SQL.
 
@@ -216,7 +267,7 @@ class SlayerRenderer:
         clock: Callable[[], datetime] = lambda: instant  # noqa: E731
         self._engine = SlayerQueryEngine(self.storage, policy=None, clock=clock)
 
-    def render(self, query: Any) -> str:
+    def render(self, query: Any) -> RenderedQuery:
         """The SQL SLayer would run for ``query``, rendered without executing it."""
 
         response = self._engine.execute_sync(query, dry_run=True)
@@ -225,4 +276,9 @@ class SlayerRenderer:
                 "SLayer rendered no SQL for this query, so there is nothing for "
                 "dex to run"
             )
-        return response.sql
+        dialect = dialect_for_ds_type(self.storage.datasource_type)
+        emitted = {dialect.emit_alias(key): key for key in response.columns}
+        return RenderedQuery(
+            sql=response.sql,
+            result_keys={name: key for name, key in emitted.items() if name != key},
+        )

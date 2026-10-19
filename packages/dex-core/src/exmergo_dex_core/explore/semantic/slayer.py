@@ -23,7 +23,9 @@ backend's order, because the safety contract is the order:
 SLayer never opens a datasource, never reads a credential, and never executes
 under dex: it is handed a query and returns the SQL it would run, and that SQL
 reaches the warehouse only through the spine. So ``execution`` is ``dex`` and
-no cost-guard-unavailable warning applies.
+no cost-guard-unavailable warning applies. The result's columns carry the names
+SLayer itself would report (``orders.status``) on every connector, including
+BigQuery, where the statement has to emit ``orders___status``.
 
 ``values`` runs the same spine behind a different front: the dimension token is
 resolved against the catalog (an unknown one is refused by name), the values gate
@@ -231,15 +233,16 @@ class LocalSlayerLayer:
         # can be bucketed at is the translation's check: its default time
         # dimension, at one of SLayer's built-in granularities.
         q = replace(q, grain=validate_grain(q.grain, available=None))
-        sql = self._render(to_slayer_query(q, view), "the metric query")
+        rendered = self._render(to_slayer_query(q, view), "the metric query")
 
         return governed.run(
-            sql,
+            rendered.sql,
             cache,
             backend=self,
             command="explore semantic query",
             result_type=SemanticQueryResult,
             extra_notes=_unmapped_note(refs, self._physical_columns()),
+            column_names=rendered.result_keys,
         )
 
     def values(self, dimension: str, metrics: list[str]) -> SemanticValuesResult:
@@ -270,21 +273,22 @@ class LocalSlayerLayer:
         )
 
         slayer_query = to_slayer_values_query(request, view)
-        sql = self._render(slayer_query, f"the values of {request.token}")
+        rendered = self._render(slayer_query, f"the values of {request.token}")
 
         return governed.run(
-            sql,
+            rendered.sql,
             cache,
             backend=self,
             command="explore semantic values",
             result_type=SemanticValuesResult,
             extra_notes=notes,
+            column_names=rendered.result_keys,
             dimension=request.token,
             scoped_to=request.metrics,
         )
 
-    def _render(self, slayer_query: Any, what: str) -> str:
-        """The SQL SLayer renders for ``slayer_query``, as a dry run."""
+    def _render(self, slayer_query: Any, what: str) -> Any:
+        """The ``RenderedQuery`` SLayer makes of ``slayer_query``, as a dry run."""
 
         from ...slayer.render import SlayerRenderer
 

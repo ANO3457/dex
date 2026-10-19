@@ -86,13 +86,16 @@ class GovernedSql:
         command: str,
         result_type,
         extra_notes: list[str] | None = None,
+        column_names: Mapping[str, str] | None = None,
         **fields,
     ):
         """Take rendered SQL to a stamped result, in the order the module states.
 
         ``backend`` is the answering backend itself, whose provenance the result
         carries; ``fields`` are the result type's own fields beyond the columnar
-        payload.
+        payload. ``column_names`` renames a column the warehouse returned under
+        the name the statement had to emit to the name the layer reports it by,
+        for a layer that encodes its result names to suit a dialect.
         """
 
         from ...guards.sql_guard import NotSelectOnlyError, assert_select_only
@@ -126,8 +129,11 @@ class GovernedSql:
             max_rows=self._limits.max_rows,
             timeout_seconds=self._limits.timeout_seconds,
         )
+        columns = list(result.columns)
+        if column_names:
+            columns = [column_names.get(name, name) for name in columns]
         capped = cap_columnar(
-            result.columns,
+            columns,
             result.types,
             result.cells,
             max_rows=self._limits.max_rows,

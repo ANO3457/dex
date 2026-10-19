@@ -300,7 +300,11 @@ def test_the_translated_query_renders_as_asked():
         order_by=["-orders.revenue"],
         limit=3,
     )
-    sql = SlayerRenderer(LAYER, connector="duckdb", now=datetime(2026, 1, 15)).render(q)
+    sql = (
+        SlayerRenderer(LAYER, connector="duckdb", now=datetime(2026, 1, 15))
+        .render(q)
+        .sql
+    )
 
     assert "DATE_TRUNC('MONTH', orders.ordered_at)" in sql
     assert "orders.status" in sql

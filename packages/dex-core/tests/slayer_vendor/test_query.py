@@ -226,6 +226,33 @@ def test_order_and_limit_reach_the_result(repo, capsys):
     assert envelope["data"]["cells"] == [["paid", 18.0]]
 
 
+def test_a_mangled_alias_comes_back_under_its_model_column_key(
+    repo, capsys, monkeypatch
+):
+    """BigQuery's render emits `orders___status`, because a dotted output column
+    is an error there. Mangled the same way on DuckDB, the caller still reads the
+    `model.column` names, because the render's result keys reach the spine."""
+
+    real = render.SlayerRenderer.render
+
+    def mangled(self, query):
+        result = real(self, query)
+        keys = {
+            key.replace(".", "___"): key for key in ("orders.status", "orders.revenue")
+        }
+        sql = result.sql
+        for emitted, key in keys.items():
+            sql = sql.replace(f'"{key}"', f'"{emitted}"')
+        return render.RenderedQuery(sql=sql, result_keys=keys)
+
+    monkeypatch.setattr(render.SlayerRenderer, "render", mangled)
+
+    rc, envelope = _query(capsys, repo, "orders.revenue", "--group-by", "orders.status")
+
+    assert rc == 0, envelope["errors"]
+    assert envelope["data"]["columns"] == ["orders.status", "orders.revenue"]
+
+
 def test_an_unprofiled_relation_is_disclosed(repo, capsys):
     _, envelope = _query(capsys, repo, "orders.revenue")
 

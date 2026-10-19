@@ -45,6 +45,7 @@ from exmergo_dex_core.slayer import loader, render
 from exmergo_dex_core.slayer.loader import FORMAT_VERSION, validate_model_contents
 from exmergo_dex_core.slayer.project import SlayerSemanticLayer
 from exmergo_dex_core.slayer.render import (
+    EXCLUDED,
     SLAYER_TYPES,
     SlayerRenderer,
     ValidatedModelStorage,
@@ -90,7 +91,7 @@ def renderer(connector: str = "duckdb", **kwargs: Any) -> SlayerRenderer:
 
 
 def test_a_saved_measure_renders_to_sql():
-    sql = renderer().render(QUERY)
+    sql = renderer().render(QUERY).sql
 
     assert "SUM(orders.amount)" in sql
     assert "FROM demo.main.orders" in sql
@@ -101,8 +102,8 @@ def test_the_dialect_follows_dex_s_connector():
     """BigQuery quotes with backticks and DuckDB with double quotes: the type in
     the table, not SLayer's Postgres fallback, chose each."""
 
-    assert "`" in renderer("bigquery").render(QUERY)
-    assert "`" not in renderer("duckdb").render(QUERY)
+    assert "`" in renderer("bigquery").render(QUERY).sql
+    assert "`" not in renderer("duckdb").render(QUERY).sql
 
 
 def test_a_relative_date_resolves_against_the_fixed_clock():
@@ -119,12 +120,14 @@ def test_a_relative_date_resolves_against_the_fixed_clock():
     }
     pinned = renderer()
 
-    first = pinned.render(query)
+    first = pinned.render(query).sql
     assert "2026-01-08" in first and "2026-01-16" in first
-    assert pinned.render(query) == first
-    later = SlayerRenderer(
-        loaded(model()), connector="duckdb", now=datetime(2026, 3, 1)
-    ).render(query)
+    assert pinned.render(query).sql == first
+    later = (
+        SlayerRenderer(loaded(model()), connector="duckdb", now=datetime(2026, 3, 1))
+        .render(query)
+        .sql
+    )
     assert later != first
 
 
@@ -138,7 +141,7 @@ def test_rendering_never_constructs_a_sql_client(monkeypatch):
     monkeypatch.setattr(SlayerQueryEngine, "_client_for", refuse)
     monkeypatch.setattr(SlayerSQLClient, "__init__", refuse)
 
-    assert renderer().render(QUERY)
+    assert renderer().render(QUERY).sql
 
 
 def test_rendering_never_calls_a_storage_write(monkeypatch):
@@ -270,17 +273,38 @@ def test_the_store_answers_only_for_the_models_it_was_given():
     assert asyncio.run(storage.get_model("orders", data_source="wh")).columns
 
 
-def test_the_type_table_is_explicit_and_matches_local_metricflow():
-    assert {connector: connector for connector in _RENDERERS} == SLAYER_TYPES
+def test_the_type_table_is_explicit_and_within_local_metricflow():
+    """Every connector the table names renders in its own dialect, and every
+    connector local MetricFlow renders for is either in it or excluded with a
+    reason a refusal can quote."""
+
+    assert all(SLAYER_TYPES[connector] == connector for connector in SLAYER_TYPES)
+    assert set(SLAYER_TYPES) <= set(_RENDERERS)
+    assert set(_RENDERERS) - set(SLAYER_TYPES) <= set(EXCLUDED)
+    assert not set(SLAYER_TYPES) & set(EXCLUDED)
 
 
-@pytest.mark.parametrize("connector", ["clickhouse", "mysql", "", None])
+@pytest.mark.parametrize("connector", ["mysql", "", None])
 def test_a_connector_outside_the_table_is_refused_by_name(connector):
     with pytest.raises(SemanticBackendError) as raised:
         SlayerRenderer(loaded(model()), connector=connector)
 
     assert f"connector '{connector}'" in str(raised.value)
     assert "Postgres fallback" in str(raised.value)
+    assert reason_for(raised.value) is Reason.CONFIGURATION
+
+
+@pytest.mark.parametrize(
+    ("connector", "why"),
+    [("clickhouse", "live client"), ("databricks", "TRUNC")],
+)
+def test_an_excluded_connector_is_refused_with_its_reason(connector, why):
+    with pytest.raises(SemanticBackendError) as raised:
+        SlayerRenderer(loaded(model()), connector=connector)
+
+    assert f"connector '{connector}'" in str(raised.value)
+    assert why in str(raised.value)
+    assert "duckdb" in str(raised.value)
     assert reason_for(raised.value) is Reason.CONFIGURATION
 
 
@@ -346,6 +370,7 @@ def test_the_source_hands_the_renderer_the_models_it_already_loaded(
 
     assert reads == ["load"]
     assert [m.model.name for m in models] == ["orders"]
-    assert "FROM demo.main.orders" in SlayerRenderer(
-        models, connector="duckdb", now=NOW
-    ).render(QUERY)
+    assert (
+        "FROM demo.main.orders"
+        in SlayerRenderer(models, connector="duckdb", now=NOW).render(QUERY).sql
+    )
