@@ -25,7 +25,14 @@ under dex: it is handed a query and returns the SQL it would run, and that SQL
 reaches the warehouse only through the spine. So ``execution`` is ``dex`` and
 no cost-guard-unavailable warning applies.
 
-``values`` still refuses: rendering a value domain is a separate change.
+``values`` runs the same spine behind a different front: the dimension token is
+resolved against the catalog (an unknown one is refused by name), the values gate
+(:func:`.policy.screen_values_request`) refuses a PII dimension outright, and the
+render is a dimension-only query with no measure, rooted at the dimension's own
+model or, with ``--metric``, at that metric's model, which ``scoped_to`` reports.
+The values come back capped like any query result. SLayer's own value profiling
+(``update_column_sampled``, the samples it caches in a model file) is never
+reached: the storage SLayer renders against refuses every write.
 """
 
 from __future__ import annotations
@@ -37,7 +44,7 @@ from typing import Any
 from ... import envelope as env
 from ...config import QueryLimits
 from ...errors import ProjectError
-from ..results import SemanticQueryResult
+from ..results import SemanticQueryResult, SemanticValuesResult
 from .backend import (
     EXECUTION_DEX,
     BackendDescriptor,
@@ -47,7 +54,13 @@ from .backend import (
 from .catalog import SemanticCatalog
 from .governed import GovernedSql
 from .model import SemanticQuery
-from .policy import requested_dimension_refs, screen_dimension_refs, validate_grain
+from .policy import (
+    requested_dimension_refs,
+    resolve_values_request,
+    screen_dimension_refs,
+    screen_values_request,
+    validate_grain,
+)
 
 # Fields of the neutral catalog SLayer has nowhere to put, per element kind, so
 # a caller can tell a structural absence from a field the author left blank.
@@ -77,13 +90,6 @@ SLAYER_CATALOG_GAPS: dict[str, list[str]] = {
 # A relation that resolves to the wrong namespace is a model whose `sql_table`
 # names another target, since SLayer bakes it into the SQL verbatim.
 _RECOMPILE_HINT = "correct the SLayer model's `sql_table`"
-
-_NO_VALUES = (
-    "dex does not read a SLayer dimension's value domain yet. A dimension "
-    "backed by a bare column names its relation and column in the catalog; "
-    "profile that relation with `explore profile`, or read it with "
-    "`explore query`, which runs under the firewall and the cost guard"
-)
 
 
 class LocalSlayerLayer:
@@ -179,7 +185,7 @@ class LocalSlayerLayer:
         return filter_refs(clauses, source_model, models=models)
 
     def query(self, q: SemanticQuery) -> SemanticQueryResult:
-        from ...slayer.render import SlayerRenderer, slayer_type
+        from ...slayer.render import slayer_type
         from ...slayer.translate import source_model, to_slayer_query
 
         if not q.metrics:
@@ -225,19 +231,7 @@ class LocalSlayerLayer:
         # can be bucketed at is the translation's check: its default time
         # dimension, at one of SLayer's built-in granularities.
         q = replace(q, grain=validate_grain(q.grain, available=None))
-        slayer_query = to_slayer_query(q, view)
-
-        try:
-            sql = SlayerRenderer(
-                self._source.validated_models(), connector=self._connector()
-            ).render(slayer_query)
-        except SemanticBackendError:
-            raise
-        except Exception as exc:  # a SLayer resolution error is the query's
-            # fault, not a crash: surface it, redacted, as MetricFlow's is.
-            raise SemanticBackendError(
-                f"could not resolve the metric query: {env.redact(str(exc))}"
-            ) from exc
+        sql = self._render(to_slayer_query(q, view), "the metric query")
 
         return governed.run(
             sql,
@@ -248,8 +242,63 @@ class LocalSlayerLayer:
             extra_notes=_unmapped_note(refs, self._physical_columns()),
         )
 
-    def values(self, _dimension: str, _metrics: list[str]) -> Any:
-        raise SemanticBackendError(_NO_VALUES)
+    def values(self, dimension: str, metrics: list[str]) -> SemanticValuesResult:
+        """One dimension's value domain, rendered by SLayer and executed here.
+
+        The token is resolved against the catalog first, so a misspelling is
+        refused by name, and the values gate runs before anything renders: this
+        command's whole output is values, so a PII dimension has no reduced
+        answer to fall back to. Then a dimension-only render and the spine.
+        """
+
+        from ...slayer.render import slayer_type
+        from ...slayer.translate import GRAINS, to_slayer_values_query
+
+        slayer_type(self._connector())
+        governed = self._governed_sql()
+        view = self._catalog_view()
+        request = resolve_values_request(
+            view,
+            dimension,
+            metrics,
+            grains=GRAINS,
+            spelling="named model.column (orders.status)",
+        )
+        cache = governed.load_cache()
+        notes = screen_values_request(
+            request.name, meta_lookup=governed.pii_lookup(cache)
+        )
+
+        slayer_query = to_slayer_values_query(request, view)
+        sql = self._render(slayer_query, f"the values of {request.token}")
+
+        return governed.run(
+            sql,
+            cache,
+            backend=self,
+            command="explore semantic values",
+            result_type=SemanticValuesResult,
+            extra_notes=notes,
+            dimension=request.token,
+            scoped_to=request.metrics,
+        )
+
+    def _render(self, slayer_query: Any, what: str) -> str:
+        """The SQL SLayer renders for ``slayer_query``, as a dry run."""
+
+        from ...slayer.render import SlayerRenderer
+
+        try:
+            return SlayerRenderer(
+                self._source.validated_models(), connector=self._connector()
+            ).render(slayer_query)
+        except SemanticBackendError:
+            raise
+        except Exception as exc:  # a SLayer resolution error is the query's
+            # fault, not a crash: surface it, redacted, as MetricFlow's is.
+            raise SemanticBackendError(
+                f"could not resolve {what}: {env.redact(str(exc))}"
+            ) from exc
 
     def _connector(self) -> str | None:
         if self._dex is not None:

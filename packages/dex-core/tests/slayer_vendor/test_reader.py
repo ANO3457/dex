@@ -722,15 +722,19 @@ def test_explore_semantic_list_narrows_by_metric_and_dimension(tmp_path, capsys)
     ]
 
 
-def test_a_slayer_values_is_refused_naming_the_governed_route(tmp_path, capsys):
+def test_a_slayer_values_reaches_dex_s_own_connection(tmp_path, capsys):
+    """It used to be refused for want of a runtime. Now it is resolved and
+    rendered, and what stops it is dex's connection, which this config names no
+    warehouse for: SLayer opened nothing of its own."""
+
     root = _repo(tmp_path, ORDERS, CUSTOMERS)
 
     rc, envelope = _run(capsys, root, "explore", "semantic", "values", "orders.status")
 
     assert rc != 0
-    assert "explore query" in " ".join(envelope["errors"]) or "profile" in " ".join(
-        envelope["errors"]
-    )
+    assert envelope["errors"] == [
+        "no DuckDB path: pass --path or set duckdb.path in .dex/config.yml"
+    ]
 
 
 def test_a_slayer_query_reaches_dex_s_own_connection(tmp_path, capsys):

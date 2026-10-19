@@ -30,6 +30,12 @@ model, so a refusal here costs nothing and happens before SLayer plans anything.
   PII gate screens what a query groups and filters by, so ordering by anything
   else would reach a column nothing screened.
 
+**A values request** (:func:`to_slayer_values_query`) is a dimension-only
+query: the one column, no measure, and ``distinct_dimension_values`` on, which
+SLayer renders as a ``GROUP BY`` of that column. It is rooted at the model the
+dimension belongs to, or, with ``--metric``, at that metric's model, where the
+dimension must be groupable. A grain suffix buckets a time dimension.
+
 **Refused, in every form: an ad-hoc formula.** A metric here is a catalog name.
 SLayer would accept ``sum(amount)`` as a measure, but that is a definition
 written at query time, which the layer never reviewed and the catalog never
@@ -54,16 +60,17 @@ from slayer.core.query import (
 )
 
 from ..explore.semantic.backend import SemanticBackendError
-from ..explore.semantic.model import SemanticQuery
+from ..explore.semantic.model import SemanticQuery, ValuesRequest
 from ..semantic_catalog import MetricInfo, SemanticCatalogView, SemanticModelInfo
 
-__all__ = ["source_model", "to_slayer_query"]
+__all__ = ["GRAINS", "source_model", "to_slayer_query", "to_slayer_values_query"]
 
 # A catalog name: identifiers joined by dots. Anything else in a metric position
 # is an expression, which is a formula rather than a name.
 _NAME = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
 
-_GRAINS = tuple(grain.value for grain in TimeGranularity)
+#: SLayer's built-in time granularities, the vocabulary a grain is read from.
+GRAINS = tuple(grain.value for grain in TimeGranularity)
 
 _DISCOVER = "List what the layer exposes with `explore semantic list`"
 
@@ -117,6 +124,73 @@ def to_slayer_query(q: SemanticQuery, view: SemanticCatalogView) -> SlayerQuery:
         fields["order"] = _order(q.order_by, orderable)
     if q.limit is not None:
         fields["limit"] = q.limit
+
+    try:
+        return SlayerQuery(**fields)
+    except ValidationError as exc:
+        raise SemanticBackendError(
+            f"SLayer refused the query dex translated: {exc.errors()[0]['msg']}"
+        ) from exc
+
+
+def to_slayer_values_query(
+    request: ValuesRequest, view: SemanticCatalogView
+) -> SlayerQuery:
+    """The dimension-only ``SlayerQuery`` that reads ``request``'s value domain.
+
+    Unscoped, it is rooted at the model that declares the dimension, so the
+    values are that column's under the model's own filters. Scoped, it is rooted
+    at the metrics' model and the dimension has to be one they group by, so a
+    scope never quietly reaches a column through a join the catalog did not
+    report. No measure is rendered either way.
+    """
+
+    dimensions = {dimension.name: dimension for dimension in view.dimensions}
+    dimension = dimensions.get(request.name)
+    if dimension is None or not dimension.semantic_model:
+        raise SemanticBackendError(
+            f"no such dimension in this semantic layer: {request.name}. "
+            f"{_DISCOVER}; a SLayer dimension is a model's column, named "
+            "model.column"
+        )
+
+    if request.metrics:
+        metrics = _metrics(request.metrics, view)
+        source = _source_model(metrics, view)
+        if request.name not in _groupable(metrics):
+            raise SemanticBackendError(
+                f"{request.name} is not groupable for {_names(metrics)}, so it has "
+                "no values for "
+                f"{'that metric' if len(metrics) == 1 else 'those metrics'}. A "
+                "SLayer metric groups by the columns of its own model; drop "
+                "--metric to read the column's own values. See "
+                f"`explore semantic list --metric {metrics[0].name}`"
+            )
+    else:
+        models = {model.name: model for model in view.semantic_models}
+        source = models.get(dimension.semantic_model)
+        if source is None:
+            raise SemanticBackendError(
+                f"the layer names no model for {request.name}, so there is no "
+                "model to read its values from"
+            )
+
+    column = ColumnRef(name=_column(request.name, source))
+    fields: dict[str, object] = {
+        "source_model": source.name,
+        "distinct_dimension_values": True,
+    }
+    if request.grain:
+        if dimension.type != "time":
+            raise SemanticBackendError(
+                f"{request.name} is not a time dimension, so it has no "
+                f"{request.grain} grain to bucket its values at"
+            )
+        fields["time_dimensions"] = [
+            TimeDimension(dimension=column, granularity=request.grain)
+        ]
+    else:
+        fields["dimensions"] = [column]
 
     try:
         return SlayerQuery(**fields)
@@ -222,10 +296,10 @@ def _column(token: str, source: SemanticModelInfo) -> str:
 def _time_column(grain: str, source: SemanticModelInfo) -> str:
     """The column ``--grain`` buckets: the model's default time dimension."""
 
-    if grain.lower() not in _GRAINS:
+    if grain.lower() not in GRAINS:
         raise SemanticBackendError(
             f"unknown time grain '{grain}' for a SLayer layer; SLayer's built-in "
-            f"grains are {', '.join(_GRAINS)}. A datasource's custom grain is not "
+            f"grains are {', '.join(GRAINS)}. A datasource's custom grain is not "
             "available: dex does not read datasources, which carry credentials"
         )
     if not source.agg_time_dimension:
