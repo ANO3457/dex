@@ -120,8 +120,10 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-      - name: Sync (bigquery + duckdb + dev extras)
-        run: uv sync --extra bigquery --extra duckdb --extra dev
+      # [slayer] runs the governed SLayer query smoke (test_slayer_query.py),
+      # which skips itself without it.
+      - name: Sync (bigquery + duckdb + slayer + dev extras)
+        run: uv sync --extra bigquery --extra duckdb --extra slayer --extra dev
       - name: Live BigQuery integration suite
         run: uv run pytest tests/integration -q -m bigquery
 
@@ -165,8 +167,10 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-      - name: Sync (snowflake + duckdb + dev extras)
-        run: uv sync --extra snowflake --extra duckdb --extra dev
+      # [slayer] runs the governed SLayer query smoke (test_slayer_query.py),
+      # which skips itself without it.
+      - name: Sync (snowflake + duckdb + slayer + dev extras)
+        run: uv sync --extra snowflake --extra duckdb --extra slayer --extra dev
       # Keyless: connect, explore, and the transform tests' own skip guard all
       # run on the workload identity above. The transform tests skip themselves
       # here (dbt cannot authenticate that way) and run in the next step.
@@ -313,8 +317,10 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-      - name: Sync (redshift + duckdb + dev extras)
-        run: uv sync --extra redshift --extra duckdb --extra dev
+      # [slayer] runs the governed SLayer query smoke (test_slayer_query.py),
+      # which skips itself without it.
+      - name: Sync (redshift + duckdb + slayer + dev extras)
+        run: uv sync --extra redshift --extra duckdb --extra slayer --extra dev
       - name: Live Redshift integration suite
         run: >-
           uv run pytest tests/integration -q -m redshift

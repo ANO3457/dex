@@ -20,8 +20,10 @@ logic.
   warehouse client, and both are resolved the same way, from the command being run
   rather than installed always: `explore cluster` adds `[cluster]`, and
   `explore semantic` adds `[semantic-api]` plus, where a statement might be
-  rendered locally (any mode but `list`, without `--api`), `[semantic]`. A repo
-  that runs neither resolves neither scikit-learn nor MetricFlow.
+  rendered locally (any mode but `list`, without `--api`), `[semantic]`, and
+  `[slayer]` where `semantic.vendor` is `slayer`, in place of `[semantic]`, since
+  SLayer renders its own `query` and `values`. A repo that runs neither resolves
+  neither scikit-learn nor MetricFlow.
 - That environment is uv's own, and `--no-project` is what keeps it so. Without it
   uv discovers whatever Python project the caller is standing in, builds it, leaves
   a `.venv/` and a `uv.lock` in their repo, and puts their dependencies on the
@@ -1022,9 +1024,14 @@ each saved measure a `formula` metric groupable by its own model's columns, so
 `--for-dimension` answers too. Measures and entities are declared `unavailable`,
 because a saved measure declares no aggregation and SLayer has no entities; its
 keys and joins reach `explore` through the declaration channel instead. `query`
-and `values` refuse by name: SLayer would execute through its own datasource
-connection, outside the cost guard and the query firewall, and under dex SLayer
-never touches the warehouse. Values SLayer caches in a model file
+and `values` run locally with `execution: dex`: SLayer renders the SQL as a dry
+run and dex executes it through the same PII gate, relation pre-check, cost
+handshake and columnar cap as the local MetricFlow backend, so SLayer never opens
+a datasource, never reads a credential, and never touches the warehouse. A query's
+metrics are saved measures on one model, grouped by that model's own columns, with
+`--where` in SLayer's own filter syntax; an ad-hoc formula is refused. DuckDB,
+BigQuery, Snowflake, Postgres and Redshift are supported, and Databricks and
+ClickHouse are refused with the reason. Values SLayer caches in a model file
 (`sampled_values`) are never read. See `references/semantic-layer.md`.
 `maintain` reads the same models on every axis without opening a SLayer
 datasource or SLayer storage: the baseline records the SLayer release and model

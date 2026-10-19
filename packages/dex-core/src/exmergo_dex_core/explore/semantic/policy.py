@@ -117,7 +117,10 @@ def screen_dimension_refs(
             continue
         if _meta_clears(meta):
             continue
-        flag = detect_pii(ref, "string")
+        # A dotted token (SLayer's `model.column`) is read as separated words:
+        # the heuristic bounds a word with `_`, so `orders.email` would otherwise
+        # read as one word and pass.
+        flag = detect_pii(ref.replace(".", "__"), "string")
         if flag is not None and flag.confidence >= PII_BLOCK_CONFIDENCE:
             blocked.append(
                 (ref, f"{flag.category.value} (name heuristic, {flag.confidence:.2f})")
@@ -168,9 +171,21 @@ def screen_values_request(
 
 
 def resolve_values_request(
-    view: SemanticCatalogView, dimension: str, metrics: list[str]
+    view: SemanticCatalogView,
+    dimension: str,
+    metrics: list[str],
+    *,
+    grains: tuple[str, ...] | None = None,
+    spelling: str = "entity-qualified (user__pricing_tier)",
 ) -> ValuesRequest:
-    """Resolve a dimension token and optional metric scope against a catalog."""
+    """Resolve a dimension token and optional metric scope against a catalog.
+
+    ``grains`` is the vocabulary a grain suffix is read from. Absent, it is the
+    grains the catalog reports, else MetricFlow's standard set; a layer whose
+    catalog declares no grains and whose built-in set differs passes its own.
+    ``spelling`` is how the layer spells a dimension token, for the refusal of
+    one it does not have.
+    """
 
     from ...metricflow_dialect import STANDARD_GRAINS, split_grain
 
@@ -180,7 +195,7 @@ def resolve_values_request(
             "a values request needs one dimension (discover them with "
             "`explore semantic list`)"
         )
-    grains = (
+    grains = grains or (
         tuple(
             dict.fromkeys(
                 grain
@@ -196,7 +211,7 @@ def resolve_values_request(
         raise SemanticBackendError(
             f"no such dimension in this semantic layer: {name}. List what it "
             "exposes with `explore semantic list`, and note that the token is "
-            "entity-qualified (user__pricing_tier) rather than the bare column name"
+            f"{spelling} rather than the bare column name"
         )
 
     wanted = list(dict.fromkeys(metrics or []))

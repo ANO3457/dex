@@ -300,7 +300,10 @@ class SemanticCatalogView:
     profiled column, which makes that resolution the project format's job rather
     than something a query backend re-derives. A token whose reference is a
     computed expression is absent rather than guessed, because guessing a column
-    out of an expression makes the gate over-claim.
+    out of an expression makes the gate over-claim. The relation may be partially
+    qualified where the format names one only partially (a SLayer ``sql_table``
+    such as ``main.orders``): the gate resolves it against the cache by suffix,
+    so it belongs here even where the catalog's own ``relation`` stays empty.
 
     ``notes`` is how a format says what it could not supply, the way
     ``ProjectDefinitions.notes`` and ``SemanticLayer.notes`` do.
