@@ -118,6 +118,34 @@ def test_the_pii_lookup_reads_a_mapping_the_layer_supplies():
     assert lookup("order__missing") is None
 
 
+@pytest.mark.parametrize("staging_first", [True, False])
+def test_a_partial_relation_matching_several_datasets_fails_closed(staging_first):
+    """`orders` names both relations: a flag on either refuses the column, and a
+    clear on one is not a clear while the other cannot speak."""
+
+    flagged = _flagged_cache().datasets[0]
+    cleared = Dataset(
+        identifier="wh.staging.orders",
+        columns=[
+            ColumnProfile(name="contact_col", data_type="VARCHAR"),
+            ColumnProfile(name="status", data_type="VARCHAR"),
+        ],
+    )
+    unprofiled = Dataset(identifier="wh.staging.orders")
+    columns = {
+        "order__contact": ("orders", "contact_col"),
+        "order__status": ("orders", "status"),
+    }
+    datasets = [cleared, flagged] if staging_first else [flagged, cleared]
+
+    lookup = _spine(columns).pii_lookup(DexCache(datasets=datasets))
+    assert lookup("order__contact") == {"pii": True, "category": "email"}
+    assert lookup("order__status") == {"pii": False}
+
+    lookup = _spine(columns).pii_lookup(DexCache(datasets=[flagged, unprofiled]))
+    assert lookup("order__status") is None
+
+
 def test_the_mapping_is_not_asked_for_without_a_cache():
     asked: list[bool] = []
 

@@ -187,7 +187,12 @@ class GovernedSql:
             if target is None:
                 return None
             relation, column_name = target
-            matches = match_identifier(relation, known)
+            # A partially qualified relation can match more than one dataset.
+            # Any of them flagging the column refuses it, and it is cleared only
+            # where every match profiled the column and cleared it: one that
+            # cannot speak leaves the name heuristic in charge.
+            matches = set(match_identifier(relation, known))
+            cleared: set[str] = set()
             for dataset in cache.datasets:
                 if dataset.identifier not in matches:
                     continue
@@ -197,9 +202,11 @@ class GovernedSql:
                     flag = column.pii
                     if flag is not None and flag.confidence >= PII_BLOCK_CONFIDENCE:
                         return {"pii": True, "category": flag.category.value}
-                    # Profiled and cleared (or a human override): authoritative,
-                    # so say so rather than leaving it to the name heuristic.
-                    return {"pii": False}
+                    cleared.add(dataset.identifier)
+            if matches and cleared == matches:
+                # Profiled and cleared (or a human override): authoritative,
+                # so say so rather than leaving it to the name heuristic.
+                return {"pii": False}
             return None
 
         return lookup

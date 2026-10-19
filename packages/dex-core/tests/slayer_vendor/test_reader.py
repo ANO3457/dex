@@ -722,24 +722,30 @@ def test_explore_semantic_list_narrows_by_metric_and_dimension(tmp_path, capsys)
     ]
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ("explore", "semantic", "query", "orders.revenue"),
-        ("explore", "semantic", "values", "orders.status"),
-    ],
-)
-def test_a_slayer_query_or_values_is_refused_naming_the_governed_route(
-    tmp_path, capsys, argv
-):
+def test_a_slayer_values_is_refused_naming_the_governed_route(tmp_path, capsys):
     root = _repo(tmp_path, ORDERS, CUSTOMERS)
 
-    rc, envelope = _run(capsys, root, *argv)
+    rc, envelope = _run(capsys, root, "explore", "semantic", "values", "orders.status")
 
     assert rc != 0
     assert "explore query" in " ".join(envelope["errors"]) or "profile" in " ".join(
         envelope["errors"]
     )
+
+
+def test_a_slayer_query_reaches_dex_s_own_connection(tmp_path, capsys):
+    """It used to be refused for want of a runtime. Now it is translated and
+    rendered, and the only thing between it and a result is dex's connection,
+    which this config names no warehouse for: SLayer opened nothing of its own."""
+
+    root = _repo(tmp_path, ORDERS, CUSTOMERS)
+
+    rc, envelope = _run(capsys, root, "explore", "semantic", "query", "orders.revenue")
+
+    assert rc != 0
+    assert envelope["errors"] == [
+        "no DuckDB path: pass --path or set duckdb.path in .dex/config.yml"
+    ]
 
 
 def test_the_engine_resolves_the_slayer_layer_and_its_declarations(tmp_path):
