@@ -114,6 +114,7 @@ def semantic_catalog(
     dimensions: list[DimensionInfo] = []
     metrics: list[MetricInfo] = []
     physical: dict[str, tuple[str, str]] = {}
+    computed_columns: dict[str, tuple[str, str]] = {}
     found: list[str] = list(notes)
 
     for entry in loaded:
@@ -163,6 +164,10 @@ def semantic_catalog(
             )
             if gate_column and gate_relation:
                 physical[token] = (gate_relation, gate_column)
+            elif gate_relation and isinstance(col.sql, str) and col.sql.strip():
+                # Not a column to name, but an expression the gate can read: it
+                # screens every column the expression reads instead of the name.
+                computed_columns[token] = (gate_relation, col.sql)
         if computed:
             one = len(computed) == 1
             found.append(
@@ -200,6 +205,7 @@ def semantic_catalog(
         dimension_scope=DIMENSIONS_PER_DECLARATION,
         notes=found,
         physical_columns=physical,
+        computed_columns=computed_columns,
     )
 
 

@@ -57,10 +57,12 @@ from .catalog import SemanticCatalog
 from .governed import GovernedSql
 from .model import SemanticQuery
 from .policy import (
+    name_only_note,
     requested_dimension_refs,
     resolve_values_request,
     screen_dimension_refs,
     screen_values_request,
+    unadjudicated_refs,
     validate_grain,
 )
 
@@ -216,11 +218,10 @@ class LocalSlayerLayer:
                 self.filter_refs, source_model=root.name if root else None
             ),
         )
-        if q.grain and root is not None and root.agg_time_dimension:
-            refs = list(
-                dict.fromkeys([*refs, f"{root.name}.{root.agg_time_dimension}"])
-            )
-        blocked = screen_dimension_refs(refs, meta_lookup=governed.pii_lookup(cache))
+        if q.grain and root is not None:
+            refs = list(dict.fromkeys([*refs, *(self.time_axis_refs(q.metrics) or [])]))
+        lookup = governed.pii_lookup(cache)
+        blocked = screen_dimension_refs(refs, meta_lookup=lookup)
         if blocked:
             named = ", ".join(f"{ref} ({reason})" for ref, reason in blocked)
             raise SemanticQueryRefusedError(
@@ -241,9 +242,25 @@ class LocalSlayerLayer:
             backend=self,
             command="explore semantic query",
             result_type=SemanticQueryResult,
-            extra_notes=_unmapped_note(refs, self._physical_columns()),
+            extra_notes=name_only_note(unadjudicated_refs(refs, meta_lookup=lookup)),
             column_names=rendered.result_keys,
         )
+
+    def time_axis_refs(self, metrics: list[str]) -> list[str] | None:
+        """The ``model.column`` a ``--grain`` on these metrics buckets.
+
+        The root model's ``default_time_dimension``, which is what SLayer groups
+        by when a query names a grain, so the gate screens it as a grouped
+        column. None where the metrics name no model with one, which is also a
+        query translation refuses before anything renders.
+        """
+
+        from ...semantic_catalog import time_axis_tokens
+
+        try:
+            return time_axis_tokens(self._catalog_view(), metrics)
+        except SemanticBackendError:
+            return None
 
     def values(self, dimension: str, metrics: list[str]) -> SemanticValuesResult:
         """One dimension's value domain, rendered by SLayer and executed here.
@@ -323,6 +340,7 @@ class LocalSlayerLayer:
                 limits,
                 self._physical_columns,
                 recompile_hint=_RECOMPILE_HINT,
+                computed_columns=self._computed_columns,
             )
         return self._governed
 
@@ -338,21 +356,14 @@ class LocalSlayerLayer:
         except SemanticBackendError:
             return {}
 
+    def _computed_columns(self) -> dict[str, tuple[str, str]]:
+        """``model.column -> (relation, SQL)`` for a column defined by ``sql``.
 
-def _unmapped_note(refs: list[str], columns: dict[str, tuple[str, str]]) -> list[str]:
-    """The disclosure that a screened token has no warehouse column behind it.
+        Read by the gate for the columns the expression reads, rather than
+        screened on the column's name alone.
+        """
 
-    A column of a model backed by SQL, or one defined as an expression, names no
-    column the profile could have flagged, so only its name was screened. That is
-    the fail-closed floor rather than evidence, and the result says so, as it
-    does for a relation that was never profiled.
-    """
-
-    unmapped = [ref for ref in refs if ref not in columns]
-    if not unmapped:
-        return []
-    return [
-        f"PII screening of {', '.join(unmapped)} fell back to the name heuristic: "
-        "the SLayer model maps no warehouse column behind it (a model backed by "
-        "SQL, or a computed column), so no profile could adjudicate it."
-    ]
+        try:
+            return dict(self._catalog_view().computed_columns)
+        except SemanticBackendError:
+            return {}
