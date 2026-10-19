@@ -23,6 +23,10 @@ MetricFlow, and SLayer is shaped differently:
   carries no measures at all: the gap is declared rather than filled.
 - A custom ``Aggregation`` is a function a formula applies to a column, not an
   element that answers a number, so it is named in a note rather than listed.
+- A metric's ``filter`` is the model's ``filters``, plus a column ``filter``
+  where every aggregation in the formula reads a column carrying that one
+  filter: SLayer has no per-measure filter, and a filtered column is where it
+  puts a predicate meant for one metric.
 - ``default_time_dimension`` is per model rather than per measure, and becomes
   the model's time dimension and the time axis of every metric on it.
 - SLayer has no entities. Joins and declared keys reach dex through the
@@ -181,11 +185,13 @@ def semantic_catalog(
                 "is listed here, but SLayer leaves it out of its own listings"
             )
 
-        model_filter = _filter(model.filters)
-        metrics.extend(
-            _metric(model.name, measure, tokens, model_filter, time_dimension)
-            for measure in model.measures
-        )
+        for measure in model.measures:
+            metric_filter, filter_note = _metric_filter(entry, measure)
+            if filter_note:
+                found.append(filter_note)
+            metrics.append(
+                _metric(model.name, measure, tokens, metric_filter, time_dimension)
+            )
 
     return SemanticCatalogView(
         semantic_models=models,
@@ -201,7 +207,7 @@ def _metric(
     model: str,
     measure: Any,
     tokens: list[str],
-    model_filter: str | None,
+    metric_filter: str | None,
     time_dimension: str | None,
 ) -> MetricInfo:
     """One saved measure as a formula metric."""
@@ -218,7 +224,7 @@ def _metric(
         dimensions=list(tokens),
         semantic_models=[model],
         composition=MetricComposition(expr=measure.template),
-        filter=model_filter,
+        filter=metric_filter,
         time_axis=[time_dimension] if time_dimension else None,
         vendor_params=_measure_params(measure),
     )
@@ -305,8 +311,48 @@ def _type(col: Any) -> str:
     return str(getattr(col.type, "value", col.type))
 
 
+def _metric_filter(entry: LoadedModel, measure: Any) -> tuple[str | None, str | None]:
+    """The predicate a saved measure measures under, and a note when part of it
+    could not be read.
+
+    Two places in SLayer narrow a metric. A model's ``filters`` apply to every
+    query on the model. A column's ``filter`` applies wherever that column is
+    aggregated (SLayer desugars it to ``CASE WHEN filter THEN value END``), which
+    is where SLayer puts a predicate meant for one metric rather than for every
+    metric on the model. So a formula whose every aggregation reads a column
+    carrying one same filter measures that subset as a whole, and the filter is
+    the metric's. Where only some aggregations are filtered (a ratio of a
+    filtered count to an unfiltered one), the predicate narrows a part of the
+    number rather than the number, and is not reported as the metric's, which is
+    how a MetricFlow ratio over a filtered side reads too.
+    """
+
+    model = entry.model
+    filters = list(model.filters)
+    columns = entry.aggregated_columns(measure)
+    if columns is None:
+        note = None
+        if any(col.filter for col in model.columns):
+            note = (
+                f"model '{model.name}': the formula of saved measure "
+                f"'{measure.name}' could not be read, so whether it aggregates a "
+                "filtered column is unknown and its filter states only the "
+                "model's own filters"
+            )
+        return _filter(filters), note
+    # `*` and a dotted name resolve to no column of this model, so a formula
+    # reading one is never wholly narrowed by a column filter here.
+    found = {
+        (col.filter if col is not None else None)
+        for col in (model.get_column(name) for name in columns)
+    }
+    if columns and len(found) == 1 and (shared := found.pop()):
+        filters.append(shared)
+    return _filter(filters), None
+
+
 def _filter(filters: Sequence[str]) -> str | None:
-    """A model's always-applied filters, as one predicate.
+    """Always-applied predicates, as one.
 
     SLayer applies every model filter to every query on the model, so a metric
     there measures the subset they select, which is what ``filter`` discloses.
