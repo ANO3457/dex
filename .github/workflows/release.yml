@@ -104,19 +104,43 @@ jobs:
       # Optionally emit PEP 740 / Sigstore attestations for provenance.
 
   # The documentation site, published from the tag only after PyPI accepted the
-  # release, so the docs always describe what `pip install` gives you. Build and
-  # validation live in docs-site.yml, shared with pull requests. Its deploy job
-  # commits the dex/ folder to exmergo/docs with a token from the organization's
-  # docs publisher app (held by the docs-site environment), so this repository
-  # is only read.
+  # release, so the docs always describe what `pip install` gives you. Build,
+  # validation and the commit to exmergo/docs live in docs-site.yml.
+  #
+  # Started as a run of its own (workflow_dispatch) rather than called as a
+  # reusable workflow: its deploy job reads the docs publisher app's key from
+  # the docs-site environment, and a reusable-workflow call does not receive
+  # that environment's secrets (the v1.14.1 release published nothing for that
+  # reason, while the same job dispatched by hand did). A dispatch made with
+  # GITHUB_TOKEN is one of the events GitHub does start a run for. Pre-releases
+  # and backports are not dispatched: they never replace the newest docs.
   docs-site:
     needs: publish
+    runs-on: ubuntu-latest
     permissions:
+      actions: write  # to start the Docs site workflow, and nothing else
       contents: read
-    uses: ./.github/workflows/docs-site.yml
-    with:
-      ref: ${{ github.ref_name }}
-      deploy: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # every tag, to tell the newest final release
+      - name: Start the Docs site workflow for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          newest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::notice::${TAG} is a pre-release; the docs are not published."
+            exit 0
+          fi
+          if [ "$TAG" != "$newest" ]; then
+            echo "::notice::${TAG} is not the newest release (${newest}); a backport never replaces newer docs."
+            exit 0
+          fi
+          gh workflow run docs-site.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" -f ref="$TAG"
+          echo "Started Docs site for ${TAG}; follow it under Actions > Docs site."
 
   # Anti-squat: claim and hold names people would guess for the engine, each a
   # placeholder that redirects users to exmergo-dex-core. This is a one-time
