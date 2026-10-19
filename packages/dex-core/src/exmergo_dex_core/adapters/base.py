@@ -174,6 +174,23 @@ VALUE_DOMAIN_MIN_ROWS = ceil(1 / VALUE_DOMAIN_MAX_FRACTION)
 
 
 @dataclass(frozen=True)
+class TableProbe:
+    """What one consolidated drift statement measured on one table (#275).
+
+    The same numbers :meth:`Adapter.exact_distinct_counts`,
+    :meth:`Adapter.distinct_combination_counts` and
+    :meth:`Adapter.column_aggregates` return, read from a single statement so a
+    connector that bills a per-statement minimum pays it once per table rather
+    than once per probe. ``aggregates`` is ``None`` when the statement carried
+    no null survey, so the caller runs that survey on its own as before.
+    """
+
+    distinct: dict[str, int]
+    combinations: dict[tuple[str, ...], int]
+    aggregates: list[ColumnAggregate] | None
+
+
+@dataclass(frozen=True)
 class QueryResult:
     """The result of one firewall-approved agent query, columnar.
 
@@ -355,13 +372,27 @@ def distinct_combination_sql(
     calling adapter, which also guards the result as a read-only SELECT.
     """
 
-    parts = [
+    parts = distinct_combination_parts(table_sql, combinations, quote_ident)
+    return f"SELECT {', '.join(parts)}"
+
+
+def distinct_combination_parts(
+    table_sql: str,
+    combinations: list[list[str]],
+    quote_ident: Callable[[str], str],
+    *,
+    alias: str = "d",
+) -> list[str]:
+    """The scalar subqueries :func:`distinct_combination_sql` selects, one per
+    combination and read back by ``{alias}_{i}``, for a caller folding them into
+    a statement of its own."""
+
+    return [
         "(SELECT COUNT(*) FROM (SELECT DISTINCT "  # noqa: S608
         + ", ".join(quote_ident(name) for name in combo)
-        + f" FROM {table_sql}) AS q_{i}) AS d_{i}"
+        + f" FROM {table_sql}) AS q_{i}) AS {alias}_{i}"
         for i, combo in enumerate(combinations)
     ]
-    return f"SELECT {', '.join(parts)}"
 
 
 COMPOSITE_PROBE_SKIPPED_NOTE = (
@@ -964,6 +995,14 @@ class Adapter(Protocol):
     - ``read_dev_target(scope)``: also read the namespace this command's own
       build writes into (``None`` stops), applied through
       :func:`with_dev_target`. The engine's adapter funnel sets it per command.
+    - ``table_probe_sql(identifier, *, distinct, combinations, null_columns)``
+      and ``table_probe(...)`` with the same arguments: the drift probes one
+      table needs (exact distinct counts, distinct combinations, a null survey)
+      as one statement, priced and run, returning :class:`TableProbe`. Worth
+      implementing where the warehouse bills a per-statement minimum, which
+      separate probes over one table each pay (#275). Both return ``None``
+      where the table cannot be probed in one statement; the caller then issues
+      the separate probes exactly as it would without the pair.
     """
 
     #: Stable connector name, e.g. "duckdb", "snowflake".
