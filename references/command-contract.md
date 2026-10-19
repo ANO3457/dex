@@ -1412,6 +1412,11 @@ Rules the envelope enforces, all of them Tier-2 eval targets:
   binding ceiling and ledger unit, and adds approximate compute-unit-hours from
   live per-replica memory plus optional USD from the configured price. Missing
   or partial capacity refuses before billed work.
+- **Trino is guarded as `db_load` in cluster-seconds.** `trino.deployment:
+  galaxy` is accepted by config validation, so the committed shape is final,
+  but refused by `connect`, the dev-target preflight and `transform init`,
+  with `compute_time` named as the paradigm it would need; a `self_hosted`
+  declaration reaching a `*.galaxy.starburst.io` host is refused too.
 - **Spend, the ledger, and the daily ceiling are governed by
   [`cost-controls.md`](cost-controls.md).** That file owns the
   `.dex/spend.jsonl` row shape, how reservations and settlements net, the

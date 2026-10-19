@@ -28,6 +28,7 @@
     "data-contracts",
     "redshift",
     "postgres",
-    "clickhouse"
+    "clickhouse",
+    "trino"
   ]
 }

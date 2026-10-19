@@ -1,0 +1,135 @@
+"""Values-free mode against the seeded Postgres (#591).
+
+The shipped conformance suite proves the guarantee on DuckDB with sentinel data.
+This proves it where a real server writes the error text: Postgres quotes the
+input a cast failed on (`invalid input syntax for type integer: "..."`), so a
+warehouse error is the leak the mode most needs to close. The seeded data has no
+sentinels, so profile checks inspect the value-bearing fields directly. Counts
+remain available even when they happen to equal a source value (the orders row
+count and maximum id are both 2000).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from .conftest import assert_ok
+from .test_postgres_connect import run_cli, seed_repo
+
+pytestmark = [pytest.mark.integration, pytest.mark.postgres]
+
+# Cast a text column that holds no integers; Postgres quotes the first value.
+CAST_FAILURE = "select sum(cast(email as integer)) from app.customers"
+
+
+@pytest.fixture(autouse=True)
+def _dsn_env(pg_dsn, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", pg_dsn)
+    monkeypatch.delenv("DEX_RESULT_MODE", raising=False)
+
+
+def test_values_free_profile_and_query_withhold_values_but_keep_counts(
+    tmp_path: Path, capsys
+):
+    seed_repo(tmp_path, schemas=["app"], budget=120)
+    root = ["--repo-root", str(tmp_path)]
+    rc, full = run_cli(
+        [
+            *root,
+            "explore",
+            "profile",
+            "app.orders",
+            "app.products",
+            "--columns",
+            "all",
+            "--confirm",
+        ],
+        capsys,
+    )
+    assert_ok(rc, full)
+    value_fields = {"min_value", "max_value", "value_domain"}
+    for field in value_fields:
+        assert any(
+            column.get(field) is not None
+            for dataset in full["data"]["datasets"]
+            for column in dataset["columns"]
+        ), f"the full profile surfaced no {field} to withhold"
+
+    rc, moded = run_cli(
+        [
+            *root,
+            "explore",
+            "profile",
+            "app.orders",
+            "app.products",
+            "--columns",
+            "all",
+            "--values-free",
+            "--confirm",
+        ],
+        capsys,
+    )
+    assert_ok(rc, moded)
+    assert moded["data"]["result_mode"] == "values_free"
+    assert {d["identifier"]: d["row_count"] for d in moded["data"]["datasets"]} == {
+        d["identifier"]: d["row_count"] for d in full["data"]["datasets"]
+    }
+    for dataset in moded["data"]["datasets"]:
+        assert set(dataset["withheld_fields"]) == value_fields
+        for column in dataset["columns"]:
+            assert not value_fields.intersection(column)
+
+    rc, counted = run_cli(
+        [
+            *root,
+            "explore",
+            "query",
+            "--values-free",
+            "--confirm",
+            "select count(*), count(distinct status), avg(total) from app.orders",
+        ],
+        capsys,
+    )
+    assert_ok(rc, counted)
+    assert counted["data"]["row_count"] == 1
+
+    _rc, grouped = run_cli(
+        [
+            *root,
+            "explore",
+            "query",
+            "--values-free",
+            "--confirm",
+            "select status, count(*) from app.orders group by status",
+        ],
+        capsys,
+    )
+    assert grouped["status"] == "error"
+    assert grouped["data"]["code"] == "group_by_column"
+    assert "cells" not in grouped["data"]
+
+
+def test_a_postgres_cast_error_quotes_its_input_only_outside_the_mode(
+    tmp_path: Path, capsys
+):
+    seed_repo(tmp_path, schemas=["app"], budget=120)
+    root = ["--repo-root", str(tmp_path)]
+    assert_ok(
+        *run_cli([*root, "explore", "profile", "app.customers", "--confirm"], capsys)
+    )
+
+    _rc, full = run_cli([*root, "explore", "query", "--confirm", CAST_FAILURE], capsys)
+    _rc, moded = run_cli(
+        [*root, "explore", "query", "--values-free", "--confirm", CAST_FAILURE],
+        capsys,
+    )
+
+    # The control: Postgres really does quote the value it failed on.
+    assert full["reason"] == "execution_failure"
+    assert "@" in full["errors"][0]
+    assert moded["reason"] == "execution_failure"
+    assert moded["data"]["code"] == "warehouse_refused"
+    assert "@" not in json.dumps(moded)

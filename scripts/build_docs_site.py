@@ -210,6 +210,17 @@ REFERENCE_PAGES: tuple[ReferencePage, ...] = (
         ),
     ),
     ReferencePage(
+        "trino.md",
+        "connectors/trino",
+        PageMeta(
+            "Trino connector",
+            "Connect dex to self-hosted Trino, Starburst Enterprise, or Trino on "
+            "EMR: three-part names, cluster-seconds priced from EXPLAIN, and "
+            "server-side caps.",
+            "Trino",
+        ),
+    ),
+    ReferencePage(
         "semantic-layer.md",
         "semantic-layers/overview",
         PageMeta(

@@ -36,7 +36,8 @@
               "connectors/databricks",
               "connectors/redshift",
               "connectors/postgres",
-              "connectors/clickhouse"
+              "connectors/clickhouse",
+              "connectors/trino"
             ]
           },
           {

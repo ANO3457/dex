@@ -48,7 +48,7 @@ the engine.
 
 Install the engine with the connector extra you use: `exmergo-dex-core[duckdb]`
 for the zero-credential on-ramp, or `[snowflake]`, `[bigquery]`, `[databricks]`,
-`[postgres]`, `[redshift]`, `[clickhouse]`, or `[all]` for every optional capability at once.
+`[postgres]`, `[redshift]`, `[clickhouse]`, `[trino]`, or `[all]` for every optional capability at once.
 Capabilities that are not a warehouse carry their own extras: `[semantic]` and
 `[semantic-api]` for the local and hosted dbt semantic-layer query backends,
 `[ossie]` for reading native Apache Ossie documents out of the repository,
@@ -82,7 +82,7 @@ credentials and no network.
 | Subcommand | Returns |
 |---|---|
 | `demo [path]` | generates a seeded local DuckDB warehouse (7 tables, 29,512 rows) plus a `.dex/config.yml` beside it, so a first run needs no warehouse, no credentials, and no network; both artifacts are listed in `data.created` and `data.next_steps` names the commands worth running next. The path is positional and resolves against the working directory, defaulting to `dex_demo.duckdb`; `--path` is refused here rather than honored, since everywhere else it names the warehouse dex *reads*. Create-only, with no `--confirm` that can talk past it: an existing file at the target is a refusal (`reason: guard`), a missing parent directory is a refusal (`reason: request`), no directories are ever created, and a `.dex/config.yml` at or above the target is left untouched with a warning rather than shadowed by a second one. The data is generated from a pinned seed, so the counts quoted in the docs are the counts a user sees, and it is deliberately flawed: a key that lost uniqueness to a double-loaded batch, a key mixing two id schemes, a join whose columns share a name and none of their values, an empty table, two columns whose declared type contradicts their content, and personal data alongside two designed false positives. Needs the `[duckdb]` extra and says so by name when it is absent (`reason: prerequisite`) |
-| `connect test` | capabilities, dialect, `read_only: true`; DuckDB takes `--path`, every warehouse connector takes repeatable `--scope` (a bare database on ClickHouse, whose identifiers are two-part `database.table`) (BigQuery also accepts its older `--project`/`--dataset`), never written to config; Snowflake and Databricks report the pinned warehouse and its credit or DBU rate; ClickHouse Cloud reports live replica memory and its derived compute-unit rate |
+| `connect test` | capabilities, dialect, `read_only: true`; DuckDB takes `--path`, every warehouse connector takes repeatable `--scope` (a bare database on ClickHouse, whose identifiers are two-part `database.table`; a `catalog` or `catalog.schema` on Trino, whose relations are always written in full) (BigQuery also accepts its older `--project`/`--dataset`), never written to config; Snowflake and Databricks report the pinned warehouse and its credit or DBU rate; ClickHouse Cloud reports live replica memory and its derived compute-unit rate; Trino reports `session_read_only: false`, since it has no read-only session mode a client can hold |
 | `config get [key]` | the effective value of every setting, or of those under `key`, as flat rows under `data.settings`: `value`, `source` (`file`; `default`; `derived`, computed by a validator from other keys; or `environment`, when `DBT_SL_HOST`/`DBT_SL_ENV_ID` beats the file), the `line` it was written on, and `as_written` when the file's spelling was normalized. A value under a credential-like name is `withheld`. Reads only the file, before any engine is built: no connection and no connector extra needed. Refuses a file no command could load, naming its problems |
 | `config validate` | every problem in `.dex/config.yml` by setting and line, without running anything else: syntax, values the schema refuses, keys dex does not read (with the key each was probably meant to be), keys written twice, credential-like keys. `data.problems[].fatal` marks the ones that stop every other command; the rest load and ride every envelope as warnings. Any problem is `status: error`, `reason: configuration`, so it gates CI on its own |
 | `config set <key> <value> [<key> <value>...]` | changes settings with an in-place edit that keeps every comment, the key order, and every other line. Unconfirmed it returns `needs_confirmation` with the diff and writes nothing; the same command with `--confirm` writes it. `<value>` is YAML, read the way the field reads it (`no` stays a string for a string field; `[a, b]` is a list). Several pairs make one change, for keys only valid together. Refuses a change that would add a problem stopping commands, and repairs a broken file one key at a time. Refuses a credential-like name in the key or anywhere inside the value, since the file is committed. `data.changes` is one row per value (`key`, `before`, `after`, or `withheld`), and the diff shows any value under a credential-like name as `<withheld>`, context lines included. Refuses per-run flags (`--connector`, `--budget`, ...) rather than ignoring them |
@@ -251,12 +251,14 @@ The magnitude is paradigm-relative:
 | Redshift | compute-seconds | heuristic, with an RPU-hour translation |
 | Postgres | database-seconds | free, via EXPLAIN |
 | ClickHouse | database-seconds, or compute-seconds in Cloud | free, via EXPLAIN ESTIMATE |
+| Trino | cluster-seconds (self-hosted; Galaxy is refused) | heuristic, free via EXPLAIN (TYPE IO) |
 | DuckDB | free and local | nothing to confirm |
 
 On every time paradigm the budget binds via a server-side statement timeout,
 except on ClickHouse, where it binds via `max_execution_time` **and**
 `max_bytes_to_read`, because time alone is checked only at block boundaries
-there. Actual spend comes back under `data.spend` and accumulates in the
+there, and on Trino, where it binds via the `query_max_run_time` and
+`query_max_scan_physical_bytes` session properties. Actual spend comes back under `data.spend` and accumulates in the
 `.dex/spend.jsonl` ledger. The daily cumulative ceiling, the ledger's row shape,
 the one-time ceiling ask, and what a refusal quotes back from spend history are
 in `references/cost-controls.md`.
@@ -269,7 +271,9 @@ via the AWS credential chain (a pinned Serverless workgroup mints IAM
 temporary database credentials) or the `REDSHIFT_*` environment, Postgres via
 `pg_service.conf`, `DATABASE_URL`, the `PG*` environment, or a dbt profile,
 ClickHouse via `CLICKHOUSE_URL`, the `CLICKHOUSE_*` environment, a committed
-non-secret target, or a dbt profile, and
+non-secret target, or a dbt profile, Trino via `TRINO_URL`, the `TRINO_*`
+environment, a committed non-secret target plus `TRINO_PASSWORD` or
+`TRINO_JWT_TOKEN`, or a dbt profile, and
 the hosted semantic layer via `DBT_SL_TOKEN` or `~/.dbt/dbt_cloud.yml`; never a
 pasted key or token), and result values appear only in
 `explore query`'s columnar payload after the query firewall has cleared

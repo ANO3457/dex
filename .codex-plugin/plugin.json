@@ -27,7 +27,8 @@
     "data-contracts",
     "redshift",
     "postgres",
-    "clickhouse"
+    "clickhouse",
+    "trino"
   ],
   "skills": "./skills/",
   "requires_local_executor": true,

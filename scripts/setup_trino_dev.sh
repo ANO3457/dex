@@ -123,13 +123,25 @@ if ! pair_exists || [[ "$AWS" == "1" || "$started_with_aws" == "1" ]]; then
         -e POSTGRES_PASSWORD="$catalog_password" \
         "$CATALOG_IMAGE" >/dev/null
 
+    # With --aws the Glue catalog joins the base ones. It cannot be mounted as a
+    # file inside the read-only catalog mount (Docker has to create its mount
+    # point there and the parent is read-only), so the whole directory is
+    # assembled outside the repo and mounted once. It has to outlive the
+    # container, because Trino reads it again whenever the container restarts.
+    catalog_dir="$ETC/catalog"
+    if [[ "$AWS" == "1" ]]; then
+        catalog_dir="${XDG_CACHE_HOME:-$HOME/.cache}/dex-trino/catalog"
+        rm -rf "$catalog_dir"
+        mkdir -p "$catalog_dir"
+        cp "$ETC"/catalog/*.properties "$ETC"/catalog-aws/*.properties "$catalog_dir/"
+    fi
     trino_args=(
         -d --name "$TRINO" --network "$NETWORK"
         "${TRINO_HARDENING[@]}"
         --label "dex.trino.aws=$AWS"
         -e DEX_TRINO_CATALOG_PASSWORD="$catalog_password"
         -p "127.0.0.1:$PORT:8080"
-        -v "$ETC/catalog:/etc/trino/catalog:ro"
+        -v "$catalog_dir:/etc/trino/catalog:ro"
         -v "$ETC/access-control.properties:/etc/trino/access-control.properties:ro"
         -v "$ETC/rules.json:/etc/trino/rules.json:ro"
     )
@@ -137,10 +149,7 @@ if ! pair_exists || [[ "$AWS" == "1" || "$started_with_aws" == "1" ]]; then
     if [[ "$AWS" == "1" ]]; then
         region="${AWS_REGION:-$(aws configure get region 2>/dev/null || true)}"
         region="${region:-us-east-1}"
-        trino_args+=(
-            -v "$ETC/catalog-aws/iceberg_glue.properties:/etc/trino/catalog/iceberg_glue.properties:ro"
-            -e AWS_REGION="$region"
-        )
+        trino_args+=(-e AWS_REGION="$region")
         if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
             # Named without a value, so docker copies them from this environment
             # and they never appear on a command line.

@@ -84,6 +84,7 @@ _KNOWN_CONNECTORS = (
     "postgres",
     "redshift",
     "clickhouse",
+    "trino",
 )
 _DEFAULT_CONNECTOR = "duckdb"
 
@@ -92,10 +93,11 @@ _DEFAULT_CONNECTOR = "duckdb"
 # nothing it loads, dbt and package code included, can pick them up. A denylist
 # rather than an allowlist on purpose: connector discovery reads open-ended
 # families (DATABASE_URL, PG*, SNOWFLAKE_*, DATABRICKS_*, AWS_*, GOOGLE_*,
-# CLICKHOUSE_PASSWORD, DBT_SL_*) and dbt reads whatever env_var() a project names,
-# so an allowlist would break a working setup every time it missed one. A private
-# dbt package that authenticated through GITHUB_TOKEN should switch to dbt's own
-# DBT_ENV_SECRET_GIT_CREDENTIAL, which passes through.
+# CLICKHOUSE_PASSWORD, TRINO_*, DBT_SL_*) and dbt reads whatever env_var() a
+# project names, so an allowlist would break a working setup every time it
+# missed one. A private dbt package that authenticated through GITHUB_TOKEN
+# should switch to dbt's own DBT_ENV_SECRET_GIT_CREDENTIAL, which passes
+# through.
 _WITHHELD_FROM_ENGINE = (
     "CLICKHOUSE_CLOUD_API_KEY",
     "CLICKHOUSE_CLOUD_API_SECRET",

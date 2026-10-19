@@ -1,5 +1,5 @@
 """Connector adapters: DuckDB, BigQuery, Snowflake, Databricks, Postgres,
-Redshift, and ClickHouse.
+Redshift, ClickHouse, and Trino.
 
 ``get_adapter`` is the single entry point so callers never import a connector
 client directly; the client libraries stay behind their extras and are imported
