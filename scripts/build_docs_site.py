@@ -275,6 +275,17 @@ REFERENCE_PAGES: tuple[ReferencePage, ...] = (
         ),
     ),
     ReferencePage(
+        "values-free-mode.md",
+        "guardrails/values-free-mode",
+        PageMeta(
+            "Values-free mode",
+            "Explore a warehouse with no table value in any result: how a host "
+            "pins the mode, the aggregate-only query rule, code-only errors, and "
+            "the conformance suite.",
+            "Values-free mode",
+        ),
+    ),
+    ReferencePage(
         "canonical-model.md",
         "concepts/source-of-truth",
         PageMeta(

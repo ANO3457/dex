@@ -21,7 +21,8 @@ What comes before rendering belongs to the layer, because only the layer can rea
 its own request: the PII request-gate on the grouped and filtered dimensions, and
 the grain check. The gate's evidence is shared, though: :meth:`GovernedSql.pii_lookup`
 resolves a dimension token to its physical column through the ``physical_columns``
-mapping the layer supplies, and answers from that column's cached flag.
+mapping the layer supplies, and answers from that column's cached flag, or, for an
+element defined as an expression, to every column the expression reads.
 
 Every layer that renders metric SQL runs through this for one reason: a second
 copy of the order is a second place for it to drift, and the drift would be
@@ -39,10 +40,12 @@ from ...cache import mask_overridden, match_identifier
 from ...config import QueryLimits, pii_override_paths
 from ...guards import PII_BLOCK_CONFIDENCE
 from .backend import SemanticBackendError, SemanticQueryRefusedError
-from .policy import cap_columnar
+from .policy import READS, UNREADABLE, cap_columnar
 
 #: ``dimension token -> (relation, physical column)``, as the layer resolves it.
 PhysicalColumns = Mapping[str, tuple[str, str]]
+#: ``dimension token -> (relation, SQL expression)``, for a computed element.
+ComputedColumns = Mapping[str, tuple[str, str]]
 
 
 class GovernedSql:
@@ -50,7 +53,10 @@ class GovernedSql:
 
     ``physical_columns`` is asked for the mapping only when the PII lookup needs
     it, so a layer whose catalog read is the expensive part never pays for it on
-    a command with no cache to look the columns up in. A layer that cannot
+    a command with no cache to look the columns up in. ``computed_columns`` is
+    the same for elements defined as an expression, and is asked even without a
+    cache, because reading the expression is what lets the gate screen the
+    columns behind the element rather than its name. A layer that cannot
     answer returns an empty mapping, which leaves the gate on the name heuristic:
     the fail-closed floor, and the posture an unprofiled relation already gets.
 
@@ -67,6 +73,7 @@ class GovernedSql:
         physical_columns: Callable[[], PhysicalColumns],
         *,
         recompile_hint: str,
+        computed_columns: Callable[[], ComputedColumns] | None = None,
     ) -> None:
         # The dex engine, not an adapter: the connection is opened through it on
         # the one billed path below, so no layer becomes a second place that
@@ -75,6 +82,7 @@ class GovernedSql:
         self._connector = connector
         self._limits = limits
         self._physical_columns = physical_columns
+        self._computed_columns = computed_columns or dict
         self._recompile_hint = recompile_hint
 
     def run(
@@ -170,36 +178,45 @@ class GovernedSql:
         return mask_overridden(cache, overrides)
 
     def pii_lookup(self, cache):
-        """A ``dimension token -> {"pii": True}`` lookup backed by the cache.
+        """A ``dimension token -> verdict`` lookup backed by the cache.
 
         A semantic dimension (``session__is_deleted``) maps to a physical column on
         its owning model, so the token is resolved through ``physical_columns`` to
         (relation, column) and that column's cached PII flag decides. This is the
         value-evidence-backed adjudication the profiler produced; the name
         heuristic in ``screen_dimension_refs`` remains the floor underneath it, so
-        an unprofiled column is still caught by its name. Returns None for a token
-        the cache cannot speak to, which leaves the heuristic in charge.
+        an unprofiled column is still caught by its name.
+
+        A token defined as an expression resolves through ``computed_columns``
+        instead, and is read for every column the expression reads: any of them
+        flagged refuses it, and it is cleared only where every one of them was
+        profiled and cleared. The columns travel back under ``reads`` so the name
+        heuristic screens them too, and an expression that cannot be read comes
+        back ``unreadable``, which the gate refuses rather than passing on the
+        element's name.
+
+        Returns None for a token neither map speaks to, which leaves the
+        heuristic in charge.
         """
 
-        if cache is None:
+        # Without a cache no column can be adjudicated, so the mapping is not
+        # asked for. An expression is still read: the columns it reads are what
+        # the name heuristic screens, and one it cannot read is refused.
+        columns = self._physical_columns() if cache is not None else {}
+        computed = self._computed_columns()
+        if not columns and not computed:
             return None
-        columns = self._physical_columns()
-        if not columns:
-            return None
-        known = [dataset.identifier for dataset in cache.datasets]
+        datasets = list(cache.datasets) if cache is not None else []
+        known = [dataset.identifier for dataset in datasets]
 
-        def lookup(ref: str):
-            target = columns.get(ref)
-            if target is None:
-                return None
-            relation, column_name = target
+        def verdict(relation: str, column_name: str):
             # A partially qualified relation can match more than one dataset.
             # Any of them flagging the column refuses it, and it is cleared only
             # where every match profiled the column and cleared it: one that
             # cannot speak leaves the name heuristic in charge.
             matches = set(match_identifier(relation, known))
             cleared: set[str] = set()
-            for dataset in cache.datasets:
+            for dataset in datasets:
                 if dataset.identifier not in matches:
                     continue
                 for column in dataset.columns:
@@ -214,6 +231,33 @@ class GovernedSql:
                 # so say so rather than leaving it to the name heuristic.
                 return {"pii": False}
             return None
+
+        try:
+            dialect: str | None = get_dialect(self._connector)
+        except ValueError:
+            # No dialect to read an expression in, so none can be read.
+            dialect = None
+
+        def lookup(ref: str):
+            target = columns.get(ref)
+            if target is not None:
+                return verdict(*target)
+            expression = computed.get(ref)
+            if expression is None:
+                return None
+            relation, sql = expression
+            reads = expression_columns(sql, dialect) if dialect else None
+            if reads is None:
+                return {UNREADABLE: True}
+            verdicts = [verdict(relation, column) for column in reads]
+            for column, found in zip(reads, verdicts, strict=True):
+                if found is not None and found.get("pii"):
+                    return {**found, "column": column, READS: reads}
+            if all(found is not None for found in verdicts):
+                # Every column it reads was profiled and cleared, which includes
+                # an expression that reads none: a constant carries no data.
+                return {"pii": False, READS: reads}
+            return {READS: reads}
 
         return lookup
 
@@ -313,6 +357,34 @@ class GovernedSql:
                 unprofiled,
             )
         return None, unprofiled
+
+
+def expression_columns(expression: str, dialect: str) -> list[str] | None:
+    """The columns a computed element's SQL expression reads, or None.
+
+    Read with the connector's own dialect, because that is the dialect the layer
+    renders the expression into. None where the expression does not parse, or
+    reads a subquery, whose columns belong to a relation the gate was not told
+    about: either way the gate cannot say what the element projects, and refuses
+    it rather than screening its name.
+
+    A brace is refused before parsing. It is templating (Jinja, a ``{column}``
+    placeholder) filled after the gate has run, and DuckDB reads ``{{ x }}`` as a
+    struct literal that names no column, which would clear it as a constant.
+    """
+
+    if "{" in expression or "}" in expression:
+        return None
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(expression, read=dialect)
+    except Exception:
+        return None
+    if tree is None or tree.find(exp.Select, exp.Subquery) is not None:
+        return None
+    return list(dict.fromkeys(column.name for column in tree.find_all(exp.Column)))
 
 
 def unprofiled_note(relations: list[str]) -> list[str]:

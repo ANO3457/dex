@@ -108,7 +108,7 @@ parses to a stable schema and no reader has to interpret an absent key.
 | `connector` | the connector that billed. Several can share one file, so filter on it before summing |
 | `command` | the command that wrote the row |
 | `entry` | the kind: `reservation`, `settlement` or `release`, and nothing else |
-| `reservation_id` | ties one command's rows together. `null` on a `transform build` settlement, which settles outside any gate because dbt runs the statements |
+| `reservation_id` | ties one command's rows together. `null` on a `transform build` settlement that settled with no gate (pricing degraded before a connection opened) |
 | `billed_bytes` or `billed_seconds` | the magnitude, in the connector's unit. Signed |
 | `estimate` | the whole-command preflight figure the settlement was admitted on. `null` on the other two kinds, and on a settlement whose pricing degraded to no estimate at all |
 | `job_id` | the warehouse's identifier for the job, where it has one |

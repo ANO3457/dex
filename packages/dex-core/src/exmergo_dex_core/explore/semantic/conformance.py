@@ -997,6 +997,22 @@ class SemanticBackendContract:
             found = backend.filter_refs([clause])
             assert found is None or isinstance(found, list)
 
+    # --- the time axis -------------------------------------------------------------
+
+    def test_a_metric_it_does_not_have_has_no_time_axis(self) -> None:
+        """``time_axis_refs`` answers for every backend, and never raises.
+
+        A time grouping projects columns the caller never named, so the PII gate
+        asks the backend which dimensions it buckets. None is the stated position
+        that it cannot say, which leaves the time token on the name heuristic and
+        the result disclosing it; a metric the layer does not have is the case
+        every backend can state that position for.
+        """
+
+        backend = self.make_backend()
+
+        assert backend.time_axis_refs(["__no_such_metric__"]) is None
+
 
 class SemanticCatalogContract:
     """What the catalog has to say about a layer whose contents are known. Mix in
@@ -1279,6 +1295,38 @@ class SemanticCatalogContract:
         assert tier.name in groupable
         assert tier.name != tier.definition
         assert tier.name.endswith("pricing_tier")
+
+    def test_the_time_token_resolves_to_the_metrics_time_axis_or_declines(
+        self,
+    ) -> None:
+        """A time grouping is screened as the dimensions it buckets, or the
+        backend says it cannot resolve them.
+
+        ``time_axis_refs`` is what the PII gate screens in place of the time
+        token (``metric_time``, or the column a ``--grain`` buckets), so a token
+        it returns has to be one a query could group by, sitting on the column
+        the metric's ``time_axis`` names: anything else screens the wrong column
+        and reports that as evidence. None is a position rather than a failure,
+        and the gate discloses the name-only screening it leads to.
+        """
+
+        backend = self.make_reference_backend()
+        catalog = backend.list_definitions()
+        rows = {dimension.name: dimension for dimension in catalog.dimensions}
+
+        for metric in catalog.metrics:
+            if not metric.time_axis:
+                continue
+            found = backend.time_axis_refs([metric.name])
+            if found is None:
+                continue
+            assert found, f"{metric.name}: an empty answer claims no time axis"
+            for token in found:
+                assert token in rows, f"{metric.name}: {token} is not a dimension"
+                assert rows[token].definition in metric.time_axis, (
+                    f"{metric.name}: {token} is not on the metric's time axis "
+                    f"{metric.time_axis}"
+                )
 
     def test_the_values_of_a_pii_dimension_are_refused(self) -> None:
         """PII is flagged, never surfaced, and this command's whole output is

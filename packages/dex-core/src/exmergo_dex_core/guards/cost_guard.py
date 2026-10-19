@@ -487,7 +487,7 @@ def settled_ratios(entries: list[dict], *, connector: str, field: str) -> list[f
     own point would report six ratios of a sixth each. Entries are grouped by
     ``reservation_id``, which is exactly the "these settlements are one
     command" fact the ledger already records. A settlement without one (a dbt
-    build, which settles once outside any gate) is its own group.
+    build that settled with no gate) is its own group.
 
     **Nothing that did not finish paying.** A killed process leaves its
     reservation standing with no release, which the ledger documents as the safe
@@ -897,6 +897,17 @@ class CostGate:
                 self, estimate, paradigm=self.paradigm
             ),
         )
+
+    @property
+    def reservation_id(self) -> str:
+        """The token tying this gate's reservation, settlements, and release together.
+
+        ``transform build`` settles its dbt subprocess outside the gate and stamps
+        that row with this token when a gate exists, so the dbt row and any folded
+        ``--verify`` statement rows join as one command in :func:`settled_ratios`.
+        """
+
+        return self._reservation_id
 
     @property
     def billed(self) -> float:

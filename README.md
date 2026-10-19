@@ -380,6 +380,22 @@ two share a word rather than a job.
 The host owns authentication; dex still builds the cost gate from your store, so
 the session budget binds either way.
 
+A host whose model may see no value read from a table pins the engine to
+values-free mode:
+
+```python
+with DexEngine(connector="duckdb", path="shop.duckdb", result_mode="values_free") as eng:
+    eng.profile("orders")       # no min/max or value domains
+    eng.query("select count(*), avg(total) from orders")   # aggregates only
+```
+
+Every result then says `result_mode == ResultMode.VALUES_FREE`, a query that would
+return a cell value is refused with a code, and an error carries a code instead of
+the warehouse's words. The CLI spelling is `--values-free`, or
+`DEX_RESULT_MODE=values_free` to pin it for every command; the repository's
+config never selects it. The rules, and the risks it does not close, are in
+[`references/values-free-mode.md`](references/values-free-mode.md).
+
 An application that splits the loop across processes has its own seam,
 `exmergo_dex_core.host`: a stored plan exports as a document a second process can
 verify and apply with no plan store and no network, that plan's dependencies and

@@ -354,7 +354,7 @@ def test_a_column_with_no_mapped_warehouse_column_is_disclosed(tmp_path, capsys)
 
     assert rc == 0, envelope["errors"]
     assert any(
-        "recent.status fell back to the name heuristic" in note
+        "name heuristic alone for recent.status" in note
         for note in envelope["data"]["notes"]
     )
 
@@ -383,6 +383,101 @@ def test_a_grain_on_a_pii_time_dimension_is_refused(tmp_path, capsys):
     assert envelope["reason"] == "guard"
     assert "patients.date_of_birth" in _errors(envelope)
     assert "would surface PII" in _errors(envelope)
+
+
+# --- what a query reads without naming it (#698) -----------------------------------
+
+# A column computed from a flagged one, named nothing like PII, and a saved measure
+# over the same column: only reading the expression or the formula reaches it.
+COMPUTED = {
+    **ORDERS,
+    "columns": [
+        *ORDERS["columns"],
+        {"name": "contact_key", "type": "TEXT", "sql": "upper(contact_email)"},
+    ],
+    "measures": [
+        *ORDERS["measures"],
+        {"name": "reach", "formula": "contact_email:count_distinct"},
+    ],
+}
+
+
+@pytest.mark.parametrize("profiled", [True, False])
+@pytest.mark.parametrize(
+    "request_argv",
+    [
+        ("--group-by", "orders.contact_key"),
+        ("--where", "contact_key = 'A@EXAMPLE.COM'"),
+    ],
+)
+def test_a_computed_column_over_a_pii_column_is_refused(
+    tmp_path, capsys, monkeypatch, request_argv, profiled
+):
+    """Screened by the columns its `sql` reads, with the profile's flag where one
+    exists and the read column's own name where none does."""
+
+    root = _repo(tmp_path, COMPUTED, CUSTOMERS)
+    if profiled:
+        rc, envelope = _run(capsys, root, "explore", "profile", "shop.main.orders")
+        assert rc == 0, envelope["errors"]
+    monkeypatch.setattr(render.SlayerRenderer, "render", _never_rendered)
+
+    rc, envelope = _query(capsys, root, "orders.revenue", *request_argv)
+
+    assert rc != 0
+    assert envelope["reason"] == "guard"
+    assert "would surface PII" in _errors(envelope)
+    assert "read from contact_email" in _errors(envelope)
+    if profiled:
+        assert "profiled and flagged" in _errors(envelope)
+
+
+def test_a_saved_measure_over_a_pii_column_in_a_filter_is_refused(
+    tmp_path, capsys, monkeypatch
+):
+    """`reach > 1` renders `HAVING COUNT(DISTINCT contact_email) > 1`, so the
+    filter reads that column, not one called `reach`."""
+
+    root = _repo(tmp_path, COMPUTED, CUSTOMERS)
+    monkeypatch.setattr(render.SlayerRenderer, "render", _never_rendered)
+
+    rc, envelope = _query(capsys, root, "orders.revenue", "--where", "reach > 1")
+
+    assert rc != 0
+    assert envelope["reason"] == "guard"
+    assert "orders.contact_email" in _errors(envelope)
+
+
+def test_a_grain_on_a_flagged_time_column_with_a_neutral_name_is_refused(
+    tmp_path, capsys, monkeypatch
+):
+    """The time axis `--grain` buckets is looked up in the profile like a grouped
+    column, so a flag decides even where the column's token reads clean."""
+
+    patients = model(
+        "patients",
+        default_time_dimension="event_day",
+        columns=[
+            {"name": "patient_id", "type": "INT", "primary_key": True},
+            {"name": "event_day", "type": "DATE", "sql": "date_of_birth"},
+        ],
+        measures=[{"name": "patient_count", "formula": "*:count"}],
+    )
+    root = _repo(tmp_path, patients)
+    conn = duckdb.connect(str(root / "shop.duckdb"))
+    conn.execute("CREATE TABLE patients (patient_id INT, date_of_birth DATE)")
+    conn.execute("INSERT INTO patients VALUES (1, '1990-04-02'), (2, '1985-11-30')")
+    conn.close()
+    rc, envelope = _run(capsys, root, "explore", "profile", "shop.main.patients")
+    assert rc == 0, envelope["errors"]
+    monkeypatch.setattr(render.SlayerRenderer, "render", _never_rendered)
+
+    rc, envelope = _query(capsys, root, "patients.patient_count", "--grain", "day")
+
+    assert rc != 0
+    assert envelope["reason"] == "guard"
+    assert "patients.event_day" in _errors(envelope)
+    assert "profiled and flagged" in _errors(envelope)
 
 
 @pytest.mark.parametrize("clause", ["status =", "status == {state}"])

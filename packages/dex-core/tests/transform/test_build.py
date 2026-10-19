@@ -1160,7 +1160,7 @@ def test_billed_build_sums_bytes_billed_into_the_ledger(
 
     from exmergo_dex_core.envelope import Paradigm
 
-    _install_fake_pricing(
+    adapter = _install_fake_pricing(
         monkeypatch,
         connector="bigquery",
         paradigm=Paradigm.BYTES_SCANNED,
@@ -1237,12 +1237,11 @@ def test_billed_build_sums_bytes_billed_into_the_ledger(
     # that refusal.
     assert entry["entry"] == "settlement"
     assert entry["estimate"] == envelope["cost"]["estimate"] == 5_000_000.0
-    # Issue #277: the whole row, not only the keys this test cares about. A build
-    # settles outside any gate, and the row it wrote used to say so by omission,
-    # carrying no `reservation_id` at all where every gate-written row carries
-    # one. A reader joining settlements on that key skipped or mis-joined every
-    # build, so the row now declares the absence instead of leaving it to be
-    # inferred, and pinning the shape here is what keeps the next writer honest.
+    # Issue #277 / #666: the whole row, not only the keys this test cares about.
+    # A build settles its dbt run outside the gate and stamps the gate's
+    # `reservation_id` when a gate exists (so a `--verify` build's dbt row and
+    # verification count rows join as one command in `settled_ratios`). Pinning
+    # the shape here is what keeps the next writer honest.
     assert set(entry) == {
         "at",
         "connector",
@@ -1254,7 +1253,7 @@ def test_billed_build_sums_bytes_billed_into_the_ledger(
         "job_id",
         "statement_sha256",
     }
-    assert entry["reservation_id"] is None
+    assert entry["reservation_id"] == adapter.cost_gate.reservation_id
 
 
 def test_a_billed_build_that_billed_nothing_still_reports_a_spend_of_zero(
@@ -2814,8 +2813,16 @@ def test_a_verified_metered_build_reports_the_count_spend_beside_the_build(
     dbt bills outside the gate and the counts bill through it, so reporting
     dbt's figure alone would under-report the command. Under-reporting is the
     one direction a cost guard must never round.
+
+    Issue #666: both the dbt row and the verification count row carry the gate's
+    `reservation_id`, so `settled_ratios` folds them into one calibration point
+    against the combined estimate rather than splitting the command in two.
     """
 
+    from exmergo_dex_core.guards.cost_guard import settled_ratios
+    from exmergo_dex_core.storage import FilesystemStore
+
+    store = FilesystemStore(tmp_path)
     adapter = _install_fake_pricing(
         monkeypatch,
         connector="bigquery",
@@ -2824,6 +2831,7 @@ def test_a_verified_metered_build_reports_the_count_spend_beside_the_build(
         per_node={"fct_orders": 1000.0},
         confirmed=True,
         ceiling=1_000_000.0,
+        store=store,
         query_estimate=50_000.0,
         objects=[
             _Meta("dex-test.raw.orders", 1000),
@@ -2860,10 +2868,25 @@ def test_a_verified_metered_build_reports_the_count_spend_beside_the_build(
     assert len(adapter.queries) == 1, "the counts are one batched statement"
     # 3000 from dbt, 50000 from the count statement dex issued through the gate.
     assert envelope["data"]["spend"]["bytes_billed"] == 53_000.0
+    assert envelope["data"]["spend"]["session_spent_today"] == 53_000.0
     verification = envelope["data"]["verification"]
     assert verification["ran"] is True
     assert verification["scope"] == ["fct_orders"]
     assert [f["code"] for f in verification["findings"]] == ["row_loss"]
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / ".dex" / "spend.jsonl").read_text().splitlines()
+    ]
+    settlements = [r for r in rows if r["entry"] == "settlement"]
+    assert len(settlements) == 2
+    assert [r["reservation_id"] for r in settlements] == [
+        adapter.cost_gate.reservation_id,
+        adapter.cost_gate.reservation_id,
+    ]
+    assert settled_ratios(rows, connector="bigquery", field="billed_bytes") == [
+        pytest.approx(53_000.0 / 51_000.0)
+    ]
 
 
 def test_a_verified_build_whose_dev_target_is_out_of_scope_says_so(
@@ -3248,12 +3271,15 @@ def test_a_snowflake_build_settled_without_the_uptime_model_says_it_is_a_floor()
         "elapsed_seconds": 4.0,
     }
     cost = Cost(paradigm=Paradigm.COMPUTE_TIME, estimate=None, ceiling=600.0)
+    store = MemoryStore()
     result = _shape_build_result(
-        summary, cost, Paradigm.COMPUTE_TIME, "snowflake", MemoryStore(), adapter=None
+        summary, cost, Paradigm.COMPUTE_TIME, "snowflake", store, adapter=None
     )
     assert result.spend["seconds_billed"] == pytest.approx(1.5)
     assert any("which is a lower bound" in w for w in result.warnings)
     assert "elapsed_seconds" not in result.data()
+    # Settled with no gate, so the row declares `reservation_id: null`.
+    assert store.spend_entries()[0]["reservation_id"] is None
 
 
 def _sf_build(repo: Path, capsys, *, confirm: bool = True):
@@ -3291,7 +3317,7 @@ def test_a_build_that_resumed_the_warehouse_settles_its_uptime(
     rows = [json.loads(line) for line in run.ledger.read_text().splitlines()]
     settlements = [r for r in rows if r["entry"] == "settlement"]
     assert len(settlements) == 1, "the uptime joins dbt's row, keeping one ratio"
-    assert settlements[0]["reservation_id"] is None
+    assert settlements[0]["reservation_id"] == rows[0]["reservation_id"]
     [note] = _uptime_notes(envelope)
     assert "This command resumed DEX_WH" in note
     assert "elapsed_seconds" not in envelope["data"]

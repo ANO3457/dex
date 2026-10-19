@@ -6,7 +6,9 @@ input a cast failed on (`invalid input syntax for type integer: "..."`), so a
 warehouse error is the leak the mode most needs to close. The seeded data has no
 sentinels, so profile checks inspect the value-bearing fields directly. Counts
 remain available even when they happen to equal a source value (the orders row
-count and maximum id are both 2000).
+count and maximum id are both 2000). The values to search for are read from a
+full-mode profile first: whatever that run surfaced, the values-free run must
+not.
 """
 
 from __future__ import annotations
@@ -29,6 +31,21 @@ CAST_FAILURE = "select sum(cast(email as integer)) from app.customers"
 def _dsn_env(pg_dsn, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", pg_dsn)
     monkeypatch.delenv("DEX_RESULT_MODE", raising=False)
+
+
+def _surfaced_values(envelope: dict) -> set[str]:
+    """Every min, max and value-domain value a full profile reported, as text
+    long enough to be distinctive rather than a digit that occurs anywhere."""
+
+    found: set[str] = set()
+    for dataset in envelope["data"]["datasets"]:
+        for column in dataset["columns"]:
+            for key in ("min_value", "max_value"):
+                if column.get(key) is not None:
+                    found.add(str(column[key]))
+            for entry in (column.get("value_domain") or {}).get("values", []):
+                found.add(str(entry["value"]))
+    return {value for value in found if len(value) >= 4}
 
 
 def test_values_free_profile_and_query_withhold_values_but_keep_counts(
@@ -57,6 +74,8 @@ def test_values_free_profile_and_query_withhold_values_but_keep_counts(
             for dataset in full["data"]["datasets"]
             for column in dataset["columns"]
         ), f"the full profile surfaced no {field} to withhold"
+    surfaced = _surfaced_values(full)
+    assert surfaced, "the full profile surfaced no value to search for"
 
     rc, moded = run_cli(
         [
@@ -81,6 +100,8 @@ def test_values_free_profile_and_query_withhold_values_but_keep_counts(
         assert set(dataset["withheld_fields"]) == value_fields
         for column in dataset["columns"]:
             assert not value_fields.intersection(column)
+    text = json.dumps(moded)
+    assert not [value for value in surfaced if value in text]
 
     rc, counted = run_cli(
         [

@@ -224,6 +224,7 @@ def init_project(
         project_dir=result.project_dir,
         connector=result.connector,
         connector_source=source,
+        warehouse_path=result.warehouse_path,
         created=result.created,
         diffs=result.diffs,
         warnings=preflight,
@@ -909,6 +910,7 @@ def test_mutations(
                 prices=prices,
                 equivalence=equivalence,
                 uptime=getattr(adapter, "warehouse_uptime", None),
+                adapter=adapter,
             )
             runs, spend, run_warnings = result.pop("_meta")
             warnings.extend(run_warnings)
@@ -1173,6 +1175,9 @@ def _price_mutations(
     each statement keyed the way the run loop asks for it, and notes.
     """
 
+    translate = getattr(adapter, "compute_spend_translation", None)
+    if translate is not None:
+        translate(0.0)
     estimator = getattr(adapter, "query_estimate", None)
     if estimator is None:
         if equivalence is not None:
@@ -1275,6 +1280,7 @@ def _run_mutants(
     prices: dict[str, float] | None = None,
     equivalence: _EquivalenceCheck | None = None,
     uptime=None,
+    adapter=None,
 ):
     """The baseline, then one run per mutant, stopping if the budget runs out.
 
@@ -1291,7 +1297,10 @@ def _run_mutants(
         ceiling=ceiling,
         prices=prices,
         fallback=(estimate or 0.0) / max(len(batch.mutants) + 1, 1),
-        uptime=uptime,
+        uptime=(
+            uptime if uptime is not None else getattr(adapter, "warehouse_uptime", None)
+        ),
+        adapter=adapter,
     )
 
     shadow.write(model_path, batch.identity)
@@ -1425,6 +1434,7 @@ class _BatchSpend:
         prices: dict[str, float] | None = None,
         fallback: float = 0.0,
         uptime=None,
+        adapter=None,
     ):
         self._paradigm = paradigm
         self._connector = connector
@@ -1432,7 +1442,10 @@ class _BatchSpend:
         self._ceiling = ceiling
         self._prices = prices or {}
         self._fallback = fallback
-        self._uptime = uptime
+        self._uptime = (
+            uptime if uptime is not None else getattr(adapter, "warehouse_uptime", None)
+        )
+        self._adapter = adapter
         self._spent = 0.0
         self.spend: dict[str, float | None] | None = None
         self.runs = 0
@@ -1476,19 +1489,26 @@ class _BatchSpend:
         one more row of this command's own (no estimate, like the runs'), and
         add it to the batch's spend. Returns the notes that explain it."""
 
-        if self._uptime is None:
-            return []
-        overhead, notes = self._uptime.settle()
-        if overhead > 0:
-            self.spend = _merge_spend(
-                self.spend,
-                _record_build_spend(
-                    self._store,
-                    self._connector,
-                    overhead,
-                    self._paradigm,
-                    command="transform test",
-                ),
+        from ..guards.cost_guard import spend_field
+
+        notes: list[str] = []
+        if self._uptime is not None:
+            overhead, notes = self._uptime.settle()
+            if overhead > 0:
+                self.spend = _merge_spend(
+                    self.spend,
+                    _record_build_spend(
+                        self._store,
+                        self._connector,
+                        overhead,
+                        self._paradigm,
+                        command="transform test",
+                    ),
+                )
+        translate = getattr(self._adapter, "compute_spend_translation", None)
+        if translate is not None and self.spend is not None:
+            self.spend.update(
+                translate(self.spend.get(spend_field(self._paradigm)) or 0.0)
             )
         return notes
 
@@ -2693,6 +2713,7 @@ def _record_build_spend(
     *,
     gate_billed: float = 0.0,
     command: str = "transform build",
+    reservation_id: str | None = None,
 ) -> dict[str, float | None]:
     """Account a billed dbt run in the spend ledger and report what it cost.
 
@@ -2723,6 +2744,12 @@ def _record_build_spend(
     an operator most needs the history of. ``None`` where pricing degraded and
     there was no estimate to record, which :func:`settled_ratios` skips rather
     than counting as a ratio of nothing.
+
+    ``reservation_id`` is the gate's token when the build ran with one, so a
+    verified build's dbt row and its folded ``--verify`` statement rows join as
+    one command in :func:`settled_ratios`. ``None`` when the build settled with
+    no gate (pricing degraded before a connection opened, or a batch runner
+    with no gate of its own).
     """
 
     from ..guards.cost_guard import (
@@ -2738,16 +2765,19 @@ def _record_build_spend(
             # Through the shared builder rather than a dict of its own, which is
             # what keeps a build's row the same row a gate writes. It carries the
             # kind every gate-written settlement carries, because that is what it
-            # is, and declares `reservation_id` as null rather than omitting it:
-            # a reader joining settlements on that key reads an absent key and a
-            # null one as different claims, and only the null one says "this
-            # settled outside any reservation".
+            # is, and stamps the gate's `reservation_id` when a gate exists (so a
+            # `--verify` build's dbt row and verification rows join as one
+            # command) or declares it as null rather than omitting it when no
+            # gate exists: a reader joining settlements on that key reads an
+            # absent key and a null one as different claims, and only the null
+            # one says "this settled outside any reservation".
             ledger_row(
                 connector=connector,
                 command=command,
                 entry="settlement",
                 field=field,
                 amount=billed,
+                reservation_id=reservation_id,
                 estimate=estimate,
             )
         )
@@ -2796,6 +2826,7 @@ def _settle_dbt_spend(
     gate_billed: float = 0.0,
     uptime_seconds: float = 0.0,
     command: str = "transform build",
+    reservation_id: str | None = None,
     uncapped: bool = False,
 ) -> tuple[dict[str, float | None] | None, list[str]]:
     """What one finished dbt run cost, ledgered, with the note that explains it.
@@ -2869,6 +2900,7 @@ def _settle_dbt_spend(
             estimate,
             gate_billed=gate_billed,
             command=command,
+            reservation_id=reservation_id,
         )
     elif paradigm is Paradigm.COMPUTE_TIME:
         cap_note = (
@@ -2892,6 +2924,7 @@ def _settle_dbt_spend(
             estimate,
             gate_billed=gate_billed,
             command=command,
+            reservation_id=reservation_id,
         )
         translate = getattr(adapter, "compute_spend_translation", None)
         if translate is not None:
@@ -2919,6 +2952,7 @@ def _settle_dbt_spend(
             estimate,
             gate_billed=gate_billed,
             command=command,
+            reservation_id=reservation_id,
         )
     return spend, notes
 
@@ -3187,6 +3221,7 @@ def _shape_build_result(
         adapter=adapter,
         gate_billed=gate_billed,
         uptime_seconds=uptime_seconds,
+        reservation_id=gate.reservation_id if gate is not None else None,
         uncapped=uncapped,
     )
     notes = [

@@ -47,6 +47,7 @@ if dependency.installed_version() != SLAYER_VERSION:
 
 from exmergo_dex_core.adapters import get_dialect
 from exmergo_dex_core.cache import match_identifier
+from exmergo_dex_core.explore.semantic import SemanticBackendError
 from exmergo_dex_core.explore.semantic.model import SemanticQuery
 from exmergo_dex_core.guards.sql_guard import assert_select_only, referenced_relations
 from exmergo_dex_core.slayer import render
@@ -268,3 +269,182 @@ def test_databricks_stays_out_while_slayer_buckets_with_spark_s_trunc(monkeypatc
 
     assert "TRUNC(orders.ordered_at, 'DAY')" in day.sql
     assert "PERCENTILE_APPROX(orders.amount, 0.5)" in median.sql
+
+
+# --- Snowflake weeks (#699) --------------------------------------------------------
+
+#: SLayer renders both weeks through ``DATE_TRUNC('WEEK', ...)``, whose start day
+#: is the session's ``WEEK_START``; dex pins it to the Monday SLayer means, so an
+#: account set to Sunday buckets the same as one on the default.
+SNOWFLAKE_WEEKS = {
+    "week": """\
+SELECT
+  DATEADD(DAY, 1 - DAYOFWEEKISO(orders.ordered_at), DATE_TRUNC('DAY', orders.ordered_at)) AS "orders.ordered_at",
+  COUNT(*) AS "orders.order_count"
+FROM shop.public.orders AS orders
+WHERE
+  orders.status <> 'test'
+GROUP BY
+  DATEADD(DAY, 1 - DAYOFWEEKISO(orders.ordered_at), DATE_TRUNC('DAY', orders.ordered_at))""",  # noqa: E501
+    # The Monday week of the next day, moved back one: Sunday, once the Monday
+    # it is built from no longer depends on the account.
+    "week_sunday": """\
+SELECT
+  DATEADD(
+    DAY,
+    -1,
+    DATEADD(
+      DAY,
+      1 - DAYOFWEEKISO(CAST(DATEADD(DAY, 1, orders.ordered_at) AS TIMESTAMP)),
+      DATE_TRUNC('DAY', CAST(DATEADD(DAY, 1, orders.ordered_at) AS TIMESTAMP))
+    )
+  ) AS "orders.ordered_at",
+  COUNT(*) AS "orders.order_count"
+FROM shop.public.orders AS orders
+WHERE
+  orders.status <> 'test'
+GROUP BY
+  DATEADD(
+    DAY,
+    -1,
+    DATEADD(
+      DAY,
+      1 - DAYOFWEEKISO(CAST(DATEADD(DAY, 1, orders.ordered_at) AS TIMESTAMP)),
+      DATE_TRUNC('DAY', CAST(DATEADD(DAY, 1, orders.ordered_at) AS TIMESTAMP))
+    )
+  )""",
+}
+
+
+@pytest.mark.parametrize("grain", sorted(SNOWFLAKE_WEEKS))
+def test_a_snowflake_week_is_pinned_to_the_day_slayer_means(grain):
+    query = SemanticQuery(metrics=["orders.order_count"], grain=grain)
+
+    assert rendered("snowflake", query).sql == SNOWFLAKE_WEEKS[grain]
+
+
+@pytest.mark.parametrize("grain", sorted(SNOWFLAKE_WEEKS))
+def test_the_pinned_week_still_passes_dex_s_guards(grain):
+    sql = SNOWFLAKE_WEEKS[grain]
+
+    assert_select_only(sql, dialect="snowflake")
+    (relation,) = referenced_relations(sql, dialect="snowflake")
+    assert match_identifier(relation, [TABLES["snowflake"]]) == [TABLES["snowflake"]]
+
+
+@pytest.mark.parametrize("grain", GRAINS)
+def test_no_snowflake_grain_leaves_a_week_to_week_start(grain):
+    """Every grain, not only the two weeks: a bare week truncation anywhere in a
+    Snowflake statement would answer from the account's ``WEEK_START``."""
+
+    sql = rendered(
+        "snowflake", SemanticQuery(metrics=["orders.revenue"], grain=grain)
+    ).sql
+
+    assert not re.search(r"DATE_TRUNC\(\s*'WEEK'", sql, flags=re.I), sql
+
+
+def test_a_statement_with_no_week_is_left_byte_for_byte():
+    """The month golden is SLayer's own output: the pin regenerates nothing it
+    does not have to."""
+
+    assert render.pin_snowflake_weeks(GOLDENS["snowflake"]) == GOLDENS["snowflake"]
+
+
+@pytest.mark.parametrize("connector", sorted(set(GOLDENS) - {"snowflake"}))
+def test_only_snowflake_s_weeks_are_rewritten(connector):
+    """Elsewhere a week is SLayer's own spelling: BigQuery anchors it, and
+    DuckDB, Postgres and Redshift truncate to an ISO Monday unconditionally."""
+
+    sql = rendered(
+        connector, SemanticQuery(metrics=["orders.revenue"], grain="week")
+    ).sql
+
+    assert "DAYOFWEEKISO" not in sql
+
+
+# --- Redshift identifier case (#699) -----------------------------------------------
+
+
+def title(name: str) -> str:
+    return "_".join(part.capitalize() for part in name.split("_"))
+
+
+def mixed_case(table: str) -> dict[str, Any]:
+    """The golden's model spelt the way a model author might: ``Orders.Status``."""
+
+    return {
+        **orders(table),
+        "name": "Orders",
+        "default_time_dimension": "Ordered_At",
+        "filters": ["Status <> 'test'"],
+        "columns": [
+            {"name": "Order_Id", "type": "INT", "primary_key": True},
+            {"name": "Status", "type": "TEXT"},
+            {"name": "Amount", "type": "DOUBLE"},
+            {"name": "Ordered_At", "type": "TIMESTAMP"},
+        ],
+        "measures": [
+            {"name": "Revenue", "formula": "Amount:sum"},
+            {"name": "Order_Count", "formula": "*:count"},
+        ],
+    }
+
+
+MIXED_QUERY = SemanticQuery(
+    metrics=["Orders.Revenue", "Orders.Order_Count"],
+    group_by=["Orders.Status"],
+    grain="month",
+)
+MIXED_KEYS = [
+    "Orders.Status",
+    "Orders.Ordered_At",
+    "Orders.Revenue",
+    "Orders.Order_Count",
+]
+
+
+def rendered_model(connector: str, spelt: dict[str, Any], query: SemanticQuery):
+    path = f"models/wh/{spelt['name']}.yaml"
+    result = validate_model_contents({path: yaml.safe_dump(spelt)})
+    assert not result.errors, result.notes()
+    view = semantic_catalog(result.models, connector=connector)
+    renderer = SlayerRenderer(result.models, connector=connector, now=NOW)
+    return renderer.render(to_slayer_query(query, view))
+
+
+def test_a_mixed_case_model_on_redshift_reads_back_as_model_column():
+    """Redshift returns ``"Orders.Status"`` as ``orders.status`` unless the
+    cluster is case-sensitive, so the keys are what it returns, and a
+    case-sensitive cluster's own spelling needs no entry at all."""
+
+    result = rendered_model("redshift", mixed_case(TABLES["redshift"]), MIXED_QUERY)
+    returned = [key.lower() for key in MIXED_KEYS]
+
+    assert [result.result_keys.get(name, name) for name in returned] == MIXED_KEYS
+    assert [result.result_keys.get(name, name) for name in MIXED_KEYS] == MIXED_KEYS
+
+
+@pytest.mark.parametrize("connector", ["duckdb", "postgres", "snowflake"])
+def test_a_quoted_name_that_keeps_its_case_needs_no_decoding(connector):
+    result = rendered_model(connector, mixed_case(TABLES[connector]), MIXED_QUERY)
+
+    assert result.result_keys == {}
+
+
+def test_two_keys_redshift_would_fold_together_are_refused_by_name():
+    spelt = orders(
+        TABLES["redshift"],
+        measures=[
+            {"name": "revenue", "formula": "amount:sum"},
+            {"name": "Revenue", "formula": "amount:max"},
+        ],
+    )
+    query = SemanticQuery(metrics=["orders.revenue", "orders.Revenue"])
+
+    with pytest.raises(SemanticBackendError) as caught:
+        rendered_model("redshift", spelt, query)
+
+    message = str(caught.value)
+    assert "'orders.Revenue' and 'orders.revenue'" in message
+    assert "differ only in case" in message

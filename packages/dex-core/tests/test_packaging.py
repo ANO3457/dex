@@ -314,10 +314,11 @@ def test_the_all_extra_installs_every_optional_capability(wheel: str):
     dbt adapters and MetricFlow in one environment, it is also the only place a
     version conflict between them can surface at all.
 
-    `dev` and the three `*-conformance` extras are excluded deliberately:
+    `dev` and the four `*-conformance` extras are excluded deliberately:
     contributor tooling, not capabilities. They carry a test runner for people
-    implementing a storage backend, a project format, or a semantic backend, and
-    nobody installing "everything dex can do" wants pytest.
+    implementing a storage backend, a project format, or a semantic backend, or
+    checking values-free mode, and nobody installing "everything dex can do"
+    wants pytest.
     """
 
     extras = _project_metadata()["optional-dependencies"]
@@ -331,6 +332,7 @@ def test_the_all_extra_installs_every_optional_capability(wheel: str):
         "storage-conformance",
         "project-conformance",
         "semantic-conformance",
+        "values-free-conformance",
     }
     assert referenced == set(extras) - tooling, (
         f"[all] does not cover {sorted(set(extras) - tooling - referenced)}"
@@ -1637,6 +1639,26 @@ def test_the_semantic_source_contract_needs_only_a_test_runner(wheel: str):
 
     assert done.returncode == 0, done.stdout + done.stderr
     assert done.stdout.strip() == "[]"
+
+
+def test_the_values_free_contract_runs_from_its_own_extra(wheel: str):
+    """A host checks values-free mode against the release it pins, so the
+    contract has to import and run from the wheel with nothing but its own extra:
+    pytest and the DuckDB client its fixture warehouse needs."""
+
+    done = _run_isolated(
+        wheel,
+        "import tempfile, pathlib\n"
+        "from exmergo_dex_core import values_free_conformance as c\n"
+        "assert c.ValuesFreeContract\n"
+        "path = pathlib.Path(tempfile.mkdtemp()) / 'sentinel.duckdb'\n"
+        "c.build_sentinel_warehouse(path)\n"
+        "print(path.exists())\n",
+        extras=["values-free-conformance"],
+    )
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout.strip() == "True"
 
 
 # --- the SLayer install boundary, from an actual wheel -------------------------

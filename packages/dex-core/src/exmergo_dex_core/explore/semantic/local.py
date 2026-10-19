@@ -23,6 +23,8 @@ from typing import Any, ClassVar
 from ... import envelope as env
 from ... import metricflow_dialect
 from ...config import QueryLimits
+from ...metricflow_dialect import METRIC_TIME
+from ...semantic_catalog import time_axis_tokens
 from ..results import SemanticQueryResult, SemanticValuesResult
 from . import (
     DIMENSIONS_PER_DECLARATION,
@@ -38,12 +40,14 @@ from . import (
     resolve_values_request,
     screen_dimension_refs,
     screen_values_request,
+    unadjudicated_refs,
     validate_grain,
     values_reach_note,
 )
 from .governed import GovernedSql
 from .governed import unprofiled_note as _unprofiled_note  # noqa: F401  (re-export)
 from .local_runtime import metricflow_engine
+from .policy import name_only_note
 
 # Said only when the join graph could not be resolved, which is an install that
 # picked no extras. A list that names a metric's single-hop dimensions and reads
@@ -114,6 +118,7 @@ class LocalMetricFlowBackend:
         self._connector = connector
         self._mf_engine = None
         self._dim_columns: dict[str, tuple[str, str]] | None = None
+        self._dim_expressions: dict[str, tuple[str, str]] | None = None
         self._catalog_view = None
         # Everything that happens to the SQL once MetricFlow has rendered it.
         self._governed = GovernedSql(
@@ -122,6 +127,7 @@ class LocalMetricFlowBackend:
             limits,
             self._dimension_columns,
             recompile_hint=_RECOMPILE_HINT,
+            computed_columns=self._dimension_expressions,
         )
 
     @classmethod
@@ -228,11 +234,14 @@ class LocalMetricFlowBackend:
         cache = self._load_cache()
 
         # PII request-gate, before rendering. Catching a flagged dimension at the
-        # request is cheaper and more precise than parsing rendered SQL.
-        blocked = screen_dimension_refs(
-            requested_dimension_refs(q, filter_refs=self.filter_refs),
-            meta_lookup=self._cache_pii_lookup(cache),
-        )
+        # request is cheaper and more precise than parsing rendered SQL. A token
+        # carrying a grain is screened as the dimension it buckets, and
+        # `metric_time` as the time dimensions of the metrics queried, since
+        # those are the columns the result groups by.
+        refs = requested_dimension_refs(q, filter_refs=self.filter_refs)
+        aliases = self._screening_aliases(refs, q.metrics)
+        lookup = self._cache_pii_lookup(cache)
+        blocked = screen_dimension_refs(refs, meta_lookup=lookup, aliases=aliases)
         if blocked:
             named = ", ".join(f"{ref} ({reason})" for ref, reason in blocked)
             raise SemanticQueryRefusedError(
@@ -262,7 +271,49 @@ class LocalMetricFlowBackend:
             backend=self,
             command="explore semantic query",
             result_type=SemanticQueryResult,
+            extra_notes=name_only_note(
+                unadjudicated_refs(refs, meta_lookup=lookup, aliases=aliases)
+            ),
         )
+
+    def time_axis_refs(self, metrics: list[str]) -> list[str] | None:
+        """The dimension tokens ``metric_time`` resolves to for these metrics.
+
+        Each input measure's agg time dimension, on its own semantic model, as
+        the token a caller would group that dimension by: the gate screens those
+        in place of ``metric_time``, which names no column of its own. None where
+        the project cannot place every one of them, which leaves ``metric_time``
+        on the name heuristic and the result saying so.
+        """
+
+        view = self._readable_view()
+        return time_axis_tokens(view, metrics) if view is not None else None
+
+    def _screening_aliases(
+        self, refs: list[str], metrics: list[str]
+    ) -> dict[str, list[str]]:
+        """What each requested token is screened as, where that is not itself."""
+
+        view = self._readable_view()
+        grains = tuple(
+            dict.fromkeys(
+                grain
+                for element in (
+                    (*view.metrics, *view.dimensions) if view is not None else ()
+                )
+                for grain in (element.queryable_granularities or ())
+            )
+        )
+        aliases: dict[str, list[str]] = {}
+        for ref in refs:
+            name, _grain = metricflow_dialect.split_grain(ref, grains=grains or None)
+            if name == METRIC_TIME:
+                axis = self.time_axis_refs(metrics)
+                if axis:
+                    aliases[ref] = axis
+            elif name != ref:
+                aliases[ref] = [name]
+        return aliases
 
     def values(self, dimension: str, metrics: list[str]) -> SemanticValuesResult:
         """One dimension's value domain, rendered by MetricFlow and executed here.
@@ -372,11 +423,37 @@ class LocalMetricFlowBackend:
         """
 
         if self._dim_columns is None:
-            try:
-                self._dim_columns = dict(self._semantic_view().physical_columns)
-            except SemanticBackendError:
-                self._dim_columns = {}
+            view = self._readable_view()
+            self._dim_columns = dict(view.physical_columns) if view else {}
         return self._dim_columns
+
+    def _dimension_expressions(self) -> dict[str, tuple[str, str]]:
+        """``dimension token -> (relation, expression)`` for computed elements.
+
+        The tokens :meth:`_dimension_columns` leaves out because their reference
+        is an expression: the gate reads the expression for the columns it reads
+        rather than screening the token's name alone.
+        """
+
+        if self._dim_expressions is None:
+            view = self._readable_view()
+            self._dim_expressions = dict(view.computed_columns) if view else {}
+        return self._dim_expressions
+
+    def _readable_view(self):
+        """The catalog, or None where the project cannot be read at all.
+
+        For the gate's evidence only: a project that cannot answer leaves the
+        gate on the name heuristic, the fail-closed floor, and the command
+        refuses for the unreadable project a step later, when it renders.
+        """
+
+        from ...errors import DexError
+
+        try:
+            return self._semantic_view()
+        except (SemanticBackendError, DexError):
+            return None
 
     def _render(self, q: SemanticQuery) -> str:
         from metricflow.engine.metricflow_engine import MetricFlowQueryRequest

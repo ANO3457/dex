@@ -1180,7 +1180,18 @@ all three accept `--refresh`.
 
 Global flags (shared resolution path): `--connector`, `--path` (DuckDB),
 `--scope`, `--project` and `--dataset` (BigQuery only), `--repo-root`,
-`--confirm`, `--budget`, `--session-ceiling` and `--no-session-ceiling`.
+`--confirm`, `--budget`, `--session-ceiling`, `--no-session-ceiling`, and
+`--values-free`.
+
+`--values-free` runs the command in values-free mode, where no value read from a
+table appears in any result, refusal, error, note or warning: `explore profile`
+withholds `min_value`, `max_value` and `value_domain`, `explore query` accepts only
+aggregate-only statements, an error carries a code instead of a warehouse's words,
+and a command not reviewed for the mode refuses. A host pins it for every command
+with `DEX_RESULT_MODE=values_free` in the environment, and no flag turns it off;
+`.dex/config.yml` never selects it. Every envelope the mode produces carries
+`data.result_mode: "values_free"`. The rules, the command allowlist and the
+residual risks are in [`values-free-mode.md`](values-free-mode.md).
 
 `--session-ceiling <value>` and `--no-session-ceiling` are the two answers to the
 one-time cumulative-ceiling ask below. Either one writes the answer into
@@ -1294,6 +1305,12 @@ The gate, in order:
    is the one that follows the call rather than the statement, because it is the
    one protecting agent context: a call answering ten statements must not emit
    ten times what one statement is allowed.
+
+   In values-free mode a statement is first held to the aggregate-only shape (one
+   row of allowlisted aggregates, no column-keyed GROUP BY, no DISTINCT, LIMIT,
+   ORDER BY or window), before anything is opened or profiled, and its result is
+   held to one untruncated row of numbers afterwards: the mode refuses rather than
+   cuts. See [`values-free-mode.md`](values-free-mode.md).
 5. **Record.** Every decision, allowed, refused, or failed, is appended to
    `.dex/queries.jsonl` (SQL text and counts, never result values). An allowed
    query that projected sub-threshold flagged columns records those warnings
@@ -1303,7 +1320,8 @@ The gate, in order:
    the ledger as a spend. One entry per statement whatever the call carried; a
    call carrying several adds `batch_index` and `batch_size` to each and gives
    them all one timestamp, so an auditor can see that six statements were one
-   authorization event rather than six.
+   authorization event rather than six. In values-free mode a refused or failed
+   entry's `reason` is the error's code, never its words.
 
 Results are row-major (`columns`, `cells` as a list of lists, `row_count`,
 `truncated`, `notes`), which is cheaper in tokens than records and keeps the
@@ -1363,6 +1381,11 @@ Every command prints one object of this shape (`exmergo_dex_core.envelope`):
   "errors": []
 }
 ```
+
+In values-free mode `data.result_mode` is `"values_free"` on every envelope, and
+an error envelope adds `data.code`, a stable code that quotes no value (see
+[`values-free-mode.md`](values-free-mode.md)). Outside the mode neither key is
+present.
 
 Rules the envelope enforces, all of them Tier-2 eval targets:
 

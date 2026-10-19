@@ -236,6 +236,16 @@ project-conformance = ["pytest>=8"]
 # an implementer runs the suite against their own backend without installing
 # MetricFlow or httpx to do it. Packaging tests hold that true for both.
 semantic-conformance = ["pytest>=8"]
+# The values-free conformance contract (`exmergo_dex_core.values_free_conformance`),
+# for a host that relies on values-free mode (#591) and wants to check the release
+# it pins rather than take the changelog's word for it. Named on the same rule as
+# the three above.
+#
+# Unlike them it needs a warehouse: the suite builds a small DuckDB file seeded with
+# sentinel values and runs real profiles and queries against it, because the
+# guarantee is about what comes back from a warehouse and cannot be checked
+# without one. So it self-references [duckdb], which brings the dialect engine too.
+values-free-conformance = ["pytest>=8", "exmergo-dex-core[duckdb]"]
 # One command for users who want every optional capability at once: every
 # connector, both semantic-layer backends, and clustering. Self-references the
 # other extras so their requirement lists stay defined in exactly one place, which

@@ -70,6 +70,9 @@ class InitResult(BaseModel):
     # Relative to the repo root; also what gets pinned as dbt_project_dir.
     project_dir: str
     connector: str
+    # The duckdb warehouse path as written to config: relative when the
+    # warehouse is inside the repo, absolute when it is not.
+    warehouse_path: str | None = None
     created: list[str] = Field(default_factory=list)
     diffs: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -152,7 +155,7 @@ def init_project(
         assert_deployment_supported(connector, config)
     except ConfigurationError as exc:
         raise InitError(str(exc)) from exc
-    profiles_text = render_profile(project_name, path, config, root)
+    profiles_text = render_profile(project_name, path, config, root, project_dir)
 
     files: dict[str, str] = {
         f"{project_prefix}{PROJECT_FILE}": _project_yaml(
@@ -200,6 +203,9 @@ def init_project(
         project_name=project_name,
         project_dir=project_dir,
         connector=connector,
+        warehouse_path=(
+            config.duckdb.path if connector == "duckdb" and config.duckdb else None
+        ),
         created=created,
         diffs=diffs,
     )
@@ -209,11 +215,22 @@ def init_project(
 
 
 def _duckdb_profile(
-    project_name: str, path: str | None, config: DexConfig, root: Path
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
 ) -> str:
     """A single dbt-duckdb ``dev`` target wired to the warehouse dex already
     knows. Also records the resolved path in ``config.duckdb`` so later commands
-    inherit it."""
+    inherit it.
+
+    A warehouse inside the repo is written repo-relative in ``.dex/config.yml``
+    and project-relative in ``profiles.yml``, so the committed files carry no
+    absolute path and still resolve to the same file everywhere: connect.py
+    resolves config paths against the repo root, and dbt resolves profile paths
+    against its cwd, the project dir. A warehouse outside the repo keeps an
+    absolute path in both, because a relative one could not reach it."""
 
     raw = path or (config.duckdb.path if config.duckdb else None)
     if not raw:
@@ -224,26 +241,53 @@ def _duckdb_profile(
         )
     warehouse = Path(raw)
     if not warehouse.is_absolute():
-        # profiles.yml paths resolve against dbt's working directory, which is
-        # not the repo root; an absolute path keeps the target unambiguous.
         warehouse = (root / warehouse).resolve()
-    config.duckdb = DuckDBTarget(path=str(warehouse))
+
+    # An absolute path keeps the target unambiguous, but only when the warehouse
+    # lives outside the repo: an in-repo one is portable as a relative path, and
+    # an absolute one leaks the author's home directory into committed files.
+    config_path = str(warehouse)
+    profile_path = str(warehouse)
+    root_resolved = root.resolve()
+    if warehouse.is_relative_to(root_resolved):
+        # Forward slashes on every platform, so a repo committed on one OS
+        # resolves identically on another.
+        config_path = warehouse.relative_to(root_resolved).as_posix()
+        profile_path = _relative_to_project(warehouse, root_resolved / project_dir)
+    config.duckdb = DuckDBTarget(path=config_path)
     return yaml.safe_dump(
         {
             project_name: {
                 "target": "dev",
-                "outputs": {"dev": {"type": "duckdb", "path": str(warehouse)}},
+                "outputs": {"dev": {"type": "duckdb", "path": profile_path}},
             }
         },
         sort_keys=False,
     )
 
 
+def _relative_to_project(warehouse: Path, project_dir: Path) -> str:
+    """Express an absolute warehouse path relative to the dbt project dir, the
+    cwd dbt runs with, with forward slashes on every platform. ``relpath`` (not
+    ``Path.relative_to``) so a warehouse next to the project dir still gets a
+    portable ``../`` form. Falls back to the absolute path when no relative form
+    exists (a different Windows drive)."""
+
+    try:
+        return Path(os.path.relpath(warehouse, project_dir.resolve())).as_posix()
+    except ValueError:
+        return str(warehouse)
+
+
 _DEFAULT_BQ_DEV_DATASET = "dbt_dev"
 
 
 def _bigquery_profile(
-    project_name: str, path: str | None, config: DexConfig, root: Path
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
 ) -> str:
     """A single dbt-bigquery ``dev`` target authenticated by ADC (method:
     oauth), so no secret is ever rendered. Writes go to a dedicated dev
@@ -314,7 +358,11 @@ _DEFAULT_SF_DEV_SCHEMA = "DBT_DEV"
 
 
 def _snowflake_profile(
-    project_name: str, path: str | None, config: DexConfig, root: Path
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
 ) -> str:
     """A single dbt-snowflake ``dev`` target from the discovered connection,
     with no secret ever rendered: key-pair auth becomes a ``private_key_path``
@@ -406,7 +454,11 @@ _DEFAULT_DBX_DEV_SCHEMA = "dbt_dev"
 
 
 def _databricks_profile(
-    project_name: str, path: str | None, config: DexConfig, root: Path
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
 ) -> str:
     """A single dbt-databricks ``dev`` target from the discovered connection,
     with no secret ever rendered: a user OAuth connection stays
@@ -502,7 +554,11 @@ _DEFAULT_PG_DEV_SCHEMA = "dbt_dev"
 
 
 def _postgres_profile(
-    project_name: str, path: str | None, config: DexConfig, root: Path
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
 ) -> str:
     """A single dbt-postgres ``dev`` target from the discovered connection,
     with no secret ever rendered: the password is an ``env_var`` reference
@@ -617,7 +673,11 @@ _DEFAULT_REDSHIFT_DEV_SCHEMA = "dbt_dev"
 
 
 def _redshift_profile(
-    project_name: str, path: str | None, config: DexConfig, root: Path
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
 ) -> str:
     """A single dbt-redshift ``dev`` target from the discovered connection,
     with no secret ever rendered. IAM discovery renders ``method: iam`` (the
@@ -852,7 +912,11 @@ def _clickhouse_connection_fields(params: dict, target: Any) -> dict:
 
 
 def _clickhouse_profile(
-    project_name: str, path: str | None, config: DexConfig, root: Path
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
 ) -> str:
     """A single dbt-clickhouse ``dev`` target from the discovered connection,
     with no secret ever rendered: the password is an ``env_var`` reference
@@ -1003,7 +1067,9 @@ def _trino_profile(
     )
 
 
-_PROFILE_RENDERERS: dict[str, Callable[[str, str | None, DexConfig, Path], str]] = {
+_PROFILE_RENDERERS: dict[
+    str, Callable[[str, str | None, DexConfig, Path, str], str]
+] = {
     "duckdb": _duckdb_profile,
     "bigquery": _bigquery_profile,
     "snowflake": _snowflake_profile,

@@ -432,8 +432,12 @@ spine, in order:
 
 1. **PII request-gate.** Each grouped or filtered dimension is resolved through the
    manifest to its physical column, and that column's `.dex/` cache flag decides.
-   The evidence rules, in both directions, and the name heuristic that floors them
-   are in [`pii-policy.md`](pii-policy.md).
+   `metric_time` is resolved to each input measure's agg time dimension, a grain
+   suffix to the dimension it buckets, and a dimension defined as an expression to
+   every column the expression reads (refused when dex cannot parse it). The
+   evidence rules, in both directions, and the name heuristic that floors them are
+   in [`pii-policy.md`](pii-policy.md). A result names each dimension that only
+   the heuristic screened.
 2. **SELECT-only assertion.** Before anything else touches the statement or the
    connection, the rendered SQL is proven read-only.
 3. **Relation pre-check.** The rendered SQL bakes in `relation_name` from the
@@ -501,8 +505,9 @@ The PII gate's column resolution comes through the same seam: the format maps ev
 dimension and entity token to the `(relation, column)` behind it, resolved paths
 included, so a token the join resolution added is adjudicated from its column's
 evidence rather than dropping to the name heuristic. A token whose reference is a
-computed expression is absent rather than guessed, since guessing a column out of
-an expression would make the gate over-claim.
+computed expression is absent from that map rather than guessed, since guessing a
+column out of an expression would make the gate over-claim. The format hands the
+expression over separately instead, and the gate screens every column it reads.
 
 ## Hosted backend (`--api`, dbt Cloud Semantic Layer)
 
@@ -560,6 +565,14 @@ heuristic. Asking per metric is what keeps the layer authoritative for every
 dimension a query touches, and the aliases keep it to one round trip. A group-by
 token that carries a time grain (`user__created_at__month`) is looked up under the
 dimension name too, since no dimension name carries a grain.
+
+`metric_time` is the exception. dbt Cloud resolves it server-side, and nothing
+the gate reads before sending a query says which dimension it resolves to: the
+metadata is keyed by token, and a measure's agg time dimension arrives as a bare
+name with no semantic model to qualify it by. So `metric_time` is screened by its
+name, and the result names it among the dimensions only the heuristic screened.
+Group by the time dimension's own token to have the layer's metadata adjudicate
+it.
 
 The same request carries the layer's queryable grains per metric, which is what
 `--grain` is validated against. It is one more field on a document that was already
@@ -964,10 +977,13 @@ the safety contract:
    clause names. A clause is read with SLayer's own filter grammar, against the
    model the query is rooted at: a bare column belongs to that model, and a dotted
    one is walked through the model's declared joins, so a filter on a joined PII
-   column is caught too, including inside an aggregation's argument. Each column is
-   looked up in the `.dex/` cache through the catalog's physical columns, with the
-   name heuristic as the floor, and a result whose relations were never profiled
-   says so. A clause dex cannot read is refused rather than screened by half.
+   column is caught too, including inside an aggregation's argument. A saved
+   measure named in a clause (`revenue > 100`) is read as the columns its formula
+   reads, since that is what SLayer renders in its place. Each column is looked up
+   in the `.dex/` cache through the catalog's physical columns, and a column
+   defined by `sql` through every column that expression reads, with the name
+   heuristic as the floor. A result names each column that only the heuristic
+   screened. A clause dex cannot read is refused rather than screened by half.
 2. **The grain check**, then **translation** into a SLayer query, which refuses
    whatever this release does not map (below).
 3. **A dry-run render**, in the dialect of dex's own connector. A SLayer resolution
@@ -1001,7 +1017,15 @@ What a query can say, in this release:
   grouped columns. Anything else would reach a column the gate never screened.
 - **Result columns are named `model.column`** on every connector. BigQuery rejects
   a dotted output column, so the statement emits `orders___status` there and dex
-  renames it on the way back.
+  renames it on the way back. Redshift folds a quoted name to lowercase unless
+  `enable_case_sensitive_identifier` is on, so a model spelt `Orders.Status`
+  comes back as `orders.status` and dex restores the model's spelling; two result
+  columns that differ only in case are refused there, since the rows could not
+  tell them apart.
+- **A week starts on the day its grain names.** `week` is Monday-based and
+  `week_sunday` Sunday-based on every connector. Snowflake's own week truncation
+  follows the account's `WEEK_START`, so dex rewrites it to a Monday computed with
+  `DAYOFWEEKISO`, which ignores that setting.
 
 `explore semantic values` runs the same spine behind a different front. The token
 is resolved against the catalog first, so an unknown dimension, or an unknown
