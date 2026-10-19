@@ -264,10 +264,12 @@ def _imports_slayer(path: Path) -> bool:
 
 
 #: The only modules that import SLayer: the reader, the schema axis that runs
-#: SLayer's own drift rules, the renderer, the query translation, and the filter
-#: dialect. Named one by one rather than as a package, so a new importer is a
-#: decision this list records.
+#: SLayer's own drift rules, the renderer, the query translation, the filter
+#: dialect, and the guard each of them imports first, which keeps SLayer's
+#: sqlglot reserved keywords out of dex's own SQL. Named one by one rather than
+#: as a package, so a new importer is a decision this list records.
 SLAYER_IMPORTERS = {
+    "slayer/sqlglot_keywords.py",
     "slayer/loader.py",
     "slayer/schema.py",
     "slayer/render.py",

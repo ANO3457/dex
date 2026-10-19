@@ -42,6 +42,12 @@ from looking like "this declares nothing".
 
 from __future__ import annotations
 
+# First, before any SLayer import: importing SLayer rewrites sqlglot's reserved
+# keywords process-wide, and this module undoes that (see `sqlglot_keywords`).
+from . import sqlglot_keywords  # noqa: F401
+
+# isort: split
+
 import types
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field

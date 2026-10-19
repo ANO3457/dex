@@ -32,6 +32,11 @@ policy is applied by probing the live schema through SLayer's own connection,
 and with a fixed clock, so a relative date (``last 7 days``) resolves to the
 same SQL however long a command takes between rendering and pricing.
 
+**A render runs with SLayer's reserved keywords, and only a render does.**
+SLayer quotes a reserved-word identifier through sqlglot's generator sets,
+which dex keeps at sqlglot's own outside a SLayer call
+(:mod:`.sqlglot_keywords`), so the render installs SLayer's for its length.
+
 **A result is named as SLayer would name it.** SLayer emits a projection alias
 in a form the dialect accepts and decodes it on the rows it reads back:
 BigQuery rejects a dotted output column, so ``orders.status`` reaches the
@@ -42,6 +47,12 @@ same ``model.column`` names on every connector.
 """
 
 from __future__ import annotations
+
+# First, before any SLayer import: importing SLayer rewrites sqlglot's reserved
+# keywords process-wide, and this module undoes that (see `sqlglot_keywords`).
+from .sqlglot_keywords import slayer_keywords
+
+# isort: split
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -270,14 +281,15 @@ class SlayerRenderer:
     def render(self, query: Any) -> RenderedQuery:
         """The SQL SLayer would run for ``query``, rendered without executing it."""
 
-        response = self._engine.execute_sync(query, dry_run=True)
+        with slayer_keywords():
+            response = self._engine.execute_sync(query, dry_run=True)
+            dialect = dialect_for_ds_type(self.storage.datasource_type)
+            emitted = {dialect.emit_alias(key): key for key in response.columns}
         if not response.sql:
             raise SemanticBackendError(
                 "SLayer rendered no SQL for this query, so there is nothing for "
                 "dex to run"
             )
-        dialect = dialect_for_ds_type(self.storage.datasource_type)
-        emitted = {dialect.emit_alias(key): key for key in response.columns}
         return RenderedQuery(
             sql=response.sql,
             result_keys={name: key for name, key in emitted.items() if name != key},
