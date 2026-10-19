@@ -1017,7 +1017,15 @@ What a query can say, in this release:
   grouped columns. Anything else would reach a column the gate never screened.
 - **Result columns are named `model.column`** on every connector. BigQuery rejects
   a dotted output column, so the statement emits `orders___status` there and dex
-  renames it on the way back.
+  renames it on the way back. Redshift folds a quoted name to lowercase unless
+  `enable_case_sensitive_identifier` is on, so a model spelt `Orders.Status`
+  comes back as `orders.status` and dex restores the model's spelling; two result
+  columns that differ only in case are refused there, since the rows could not
+  tell them apart.
+- **A week starts on the day its grain names.** `week` is Monday-based and
+  `week_sunday` Sunday-based on every connector. Snowflake's own week truncation
+  follows the account's `WEEK_START`, so dex rewrites it to a Monday computed with
+  `DAYOFWEEKISO`, which ignores that setting.
 
 `explore semantic values` runs the same spine behind a different front. The token
 is resolved against the catalog first, so an unknown dimension, or an unknown
