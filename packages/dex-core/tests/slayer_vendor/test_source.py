@@ -264,9 +264,14 @@ def _imports_slayer(path: Path) -> bool:
 
 
 #: The only modules that import SLayer: the reader, the schema axis that runs
-#: SLayer's own drift rules, and the renderer. Named one by one rather than as a
-#: package, so a new importer is a decision this list records.
-SLAYER_IMPORTERS = {"slayer/loader.py", "slayer/schema.py", "slayer/render.py"}
+#: SLayer's own drift rules, the renderer, and the filter dialect. Named one by
+#: one rather than as a package, so a new importer is a decision this list records.
+SLAYER_IMPORTERS = {
+    "slayer/loader.py",
+    "slayer/schema.py",
+    "slayer/render.py",
+    "slayer_dialect.py",
+}
 
 
 def test_no_core_module_imports_slayer():
