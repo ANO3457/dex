@@ -25,7 +25,7 @@ from typing import NamedTuple
 
 from pydantic import BaseModel, Field
 
-from ..adapters.base import Adapter, ColumnMeta, distinct_combination_sql
+from ..adapters.base import Adapter, ColumnMeta, TableProbe, distinct_combination_sql
 from ..cache import Dataset, Relationship, match_identifier
 from ..dbt_project import ProjectDefinitions
 from ..explore import relationships as rel_mod
@@ -1019,31 +1019,162 @@ def _declared_composites(
     return by_identifier, notes
 
 
-def grain_estimate(adapter: Adapter, plan: GrainPlan) -> tuple[float, dict[str, float]]:
+class ProbeNeeds(NamedTuple):
+    """The probes one table owes a drift run, gathered into one statement."""
+
+    distinct: list[str]
+    combinations: list[list[str]]
+    null_columns: list[ColumnMeta]
+
+
+def batched_probes(
+    adapter: Adapter,
+    plan: GrainPlan,
+    cardinality_checks: list[CardinalityCheck] | None = None,
+) -> dict[str, ProbeNeeds]:
+    """The tables whose drift probes run as one statement each (#275).
+
+    A table can owe the run several separate statements: a distinct count over
+    its proven keys, a combination probe per composite list and per declared
+    join arity, a null survey, and, under ``maintain check``, a distinct count
+    for the dimensions the semantic layer reads from it. A warehouse with a
+    per-statement billing minimum (BigQuery's 10 MB, charged per statement and
+    per table referenced) bills each of those its own minimum, so the cost of a
+    sweep tracked how many probes it asked rather than what they read.
+
+    Only an adapter offering ``table_probe_sql``/``table_probe`` is batched, and
+    only a table that would otherwise issue two or more statements, so a table
+    with one probe runs exactly what it ran before. A table the adapter cannot
+    probe in one statement keeps its separate probes; one whose null survey
+    cannot ride along (a block-sampled table) is batched without it. The
+    estimate and the run both read this map, so they price and execute the
+    same statements.
+    """
+
+    probe_sql = getattr(adapter, "table_probe_sql", None)
+    if not callable(probe_sql) or not callable(getattr(adapter, "table_probe", None)):
+        return {}
+    distinct: dict[str, list[str]] = {}
+    combinations: dict[str, list[list[str]]] = {}
+    null_columns: dict[str, list[ColumnMeta]] = {}
+    statements: dict[str, int] = {}
+
+    def add_distinct(identifier: str, columns: list[str]) -> None:
+        target = distinct.setdefault(identifier, [])
+        target.extend(column for column in columns if column not in target)
+        statements[identifier] = statements.get(identifier, 0) + 1
+
+    def add_combinations(identifier: str, combos: list[list[str]]) -> None:
+        target = combinations.setdefault(identifier, [])
+        target.extend(list(combo) for combo in combos if list(combo) not in target)
+        statements[identifier] = statements.get(identifier, 0) + 1
+
+    # Mirrors what `grain_drift` and `cardinality_drift` would each issue, list
+    # by list, including the statements they never issue.
+    for dataset, keys, _rows in plan.key_checks:
+        if keys:
+            add_distinct(dataset.identifier, keys)
+    if getattr(adapter, "distinct_combination_counts", None) is not None:
+        for dataset, combos, _rows in (
+            plan.composite_checks + plan.declared_composite_checks
+        ):
+            if combos:
+                add_combinations(dataset.identifier, combos)
+        for check in plan.join_cardinality_checks or []:
+            add_combinations(check.identifier, [check.columns])
+    if callable(getattr(adapter, "column_aggregates", None)):
+        for dataset, columns, row_count in plan.null_checks or []:
+            if row_count == 0 or not columns:
+                continue  # reported as no_rows without a scan
+            null_columns[dataset.identifier] = list(columns)
+            statements[dataset.identifier] = statements.get(dataset.identifier, 0) + 1
+    for identifier, columns in _live_cardinality_columns(
+        adapter, cardinality_checks or []
+    ).items():
+        if columns:
+            add_distinct(identifier, columns)
+
+    batched: dict[str, ProbeNeeds] = {}
+    for identifier, count in statements.items():
+        if count < 2:
+            continue
+        needs = ProbeNeeds(
+            distinct.get(identifier, []),
+            combinations.get(identifier, []),
+            null_columns.get(identifier, []),
+        )
+        if probe_sql(identifier, **needs._asdict()) is None:
+            if not needs.null_columns or count - 1 < 2:
+                continue
+            needs = needs._replace(null_columns=[])
+            if probe_sql(identifier, **needs._asdict()) is None:
+                continue
+        batched[identifier] = needs
+    return batched
+
+
+def run_batched_probes(
+    adapter: Adapter, batched: dict[str, ProbeNeeds]
+) -> dict[str, TableProbe]:
+    """Run each batched table's one statement. A table the adapter declined at
+    run time (a statement it would not plan, a budget that could not cover it)
+    is absent, so its probes run separately and degrade on their own terms."""
+
+    results: dict[str, TableProbe] = {}
+    for identifier, needs in batched.items():
+        probe = adapter.table_probe(identifier, **needs._asdict())
+        if probe is not None:
+            results[identifier] = probe
+    return results
+
+
+def grain_estimate(
+    adapter: Adapter,
+    plan: GrainPlan,
+    batched: dict[str, ProbeNeeds] | None = None,
+) -> tuple[float, dict[str, float]]:
     """Free dry-run pricing of the plan's scans; zero on free adapters.
 
     Every list on the plan is priced, declared combinations included: the plan is
     the single survey both this and ``grain_drift`` read, so a scan that reaches
     execution without appearing here would be spend the operator never saw.
+
+    ``batched`` is :func:`batched_probes` for the same plan (computed here when
+    omitted): a batched table is priced as its one statement, and its separate
+    probes are not priced again. It may carry cardinality columns as well, and
+    :func:`cardinality_estimate` is handed the same map so neither prices them
+    twice.
     """
 
     query_estimate = getattr(adapter, "query_estimate", None)
     if query_estimate is None:
         return 0.0, {}
+    if batched is None:
+        batched = batched_probes(adapter, plan)
     per_table: dict[str, float] = {}
+    for identifier, needs in batched.items():
+        per_table[identifier] = query_estimate(
+            adapter.table_probe_sql(identifier, **needs._asdict())
+        )
     for dataset, keys, _row_count in plan.key_checks:
+        if dataset.identifier in batched:
+            continue
         per_table[dataset.identifier] = query_estimate(
             _distinct_count_sql(dataset.identifier, keys, adapter.dialect)
         )
     for dataset, combos, _row_count in (
         plan.composite_checks + plan.declared_composite_checks
     ):
+        if dataset.identifier in batched:
+            continue
         per_table[dataset.identifier] = per_table.get(
             dataset.identifier, 0.0
         ) + query_estimate(
             _distinct_combination_stand_in(dataset.identifier, combos, adapter.dialect)
         )
     for check in plan.join_cardinality_checks or []:
+        if check.identifier in batched:
+            continue
         per_table[check.identifier] = per_table.get(
             check.identifier, 0.0
         ) + query_estimate(
@@ -1057,16 +1188,22 @@ def grain_estimate(adapter: Adapter, plan: GrainPlan) -> tuple[float, dict[str, 
     if probes:
         per_table["(join overlap probes)"] = sum(query_estimate(sql) for sql in probes)
     profile_estimate = getattr(adapter, "profile_estimate", None)
-    if profile_estimate is not None and plan.null_checks:
-        identifiers = [
-            dataset.identifier for dataset, _columns, _rows in plan.null_checks
-        ]
+    # A survey riding a batched statement is priced with it above.
+    null_checks = [
+        (dataset, columns, rows)
+        for dataset, columns, rows in plan.null_checks or []
+        if not (
+            dataset.identifier in batched and batched[dataset.identifier].null_columns
+        )
+    ]
+    if profile_estimate is not None and null_checks:
+        identifiers = [dataset.identifier for dataset, _columns, _rows in null_checks]
         # A NULL fraction is meaningful for binary columns too, unlike an
         # explore value profile; opt blobs back into the survey so the estimate
         # and the aggregate execution cover exactly the same columns.
         include_blobs = {
             f"{dataset.identifier}.{column.name}"
-            for dataset, columns, _rows in plan.null_checks
+            for dataset, columns, _rows in null_checks
             for column in columns
         }
         _total, null_per_table = profile_estimate(
@@ -1075,6 +1212,25 @@ def grain_estimate(adapter: Adapter, plan: GrainPlan) -> tuple[float, dict[str, 
         for identifier, estimate in null_per_table.items():
             per_table[identifier] = per_table.get(identifier, 0.0) + estimate
     return sum(per_table.values()), per_table
+
+
+def _combination_counts(
+    probes: dict[str, TableProbe],
+    combo_counts,
+    identifier: str,
+    combos: list[list[str]],
+) -> dict[tuple[str, ...], int]:
+    """``combos``' distinct counts from the table's batched statement when it
+    ran, else from the adapter's own combination probe."""
+
+    probe = probes.get(identifier)
+    if probe is None:
+        return combo_counts(identifier, combos)
+    return {
+        tuple(combo): probe.combinations[tuple(combo)]
+        for combo in combos
+        if tuple(combo) in probe.combinations
+    }
 
 
 def _grain_severity(row_count: int, min_rows: int) -> tuple[str, dict, str]:
@@ -1103,6 +1259,7 @@ def grain_drift(
     *,
     timeout_seconds: float = 30.0,
     min_rows: int = 100,
+    probes: dict[str, TableProbe] | None = None,
 ) -> list[DriftFinding]:
     """Cardinality and identity drift, from aggregates only: exact distinct
     counts against the baseline's proven keys, the grains the project declares
@@ -1121,11 +1278,23 @@ def grain_drift(
     count (see :func:`_grain_severity`); it does not apply to
     ``join_orphans_increased``, which already grades its own severity from the
     measured orphan fraction rather than asserting ``high`` unconditionally.
+
+    ``probes`` holds what :func:`run_batched_probes` already measured, one
+    statement per table; run here from the plan when omitted. A table it covers
+    is read from it and every other table is probed separately, so the findings
+    are the same either way and only the statement count differs.
     """
 
+    if probes is None:
+        probes = run_batched_probes(adapter, batched_probes(adapter, plan))
     findings: list[DriftFinding] = []
     for dataset, keys, row_count in plan.key_checks:
-        distinct = adapter.exact_distinct_counts(dataset.identifier, keys)
+        probe = probes.get(dataset.identifier)
+        distinct = (
+            probe.distinct
+            if probe is not None
+            else adapter.exact_distinct_counts(dataset.identifier, keys)
+        )
         # Re-read the metadata after the distinct scan: adapters whose
         # inventory row counts are planner estimates (Postgres reltuples)
         # upgrade to the exact COUNT(*) that scan carried, so an over-estimate
@@ -1166,7 +1335,7 @@ def grain_drift(
     for dataset, combos, row_count in plan.composite_checks:
         if combo_counts is None:
             break  # an adapter without combination probes cannot re-verify
-        counts = combo_counts(dataset.identifier, combos)
+        counts = _combination_counts(probes, combo_counts, dataset.identifier, combos)
         live_meta, _ = adapter.table_metadata(dataset.identifier)
         if live_meta.row_count is not None:
             row_count = live_meta.row_count
@@ -1209,7 +1378,7 @@ def grain_drift(
     for dataset, combos, row_count in plan.declared_composite_checks:
         if combo_counts is None:
             break
-        counts = combo_counts(dataset.identifier, combos)
+        counts = _combination_counts(probes, combo_counts, dataset.identifier, combos)
         live_meta, _ = adapter.table_metadata(dataset.identifier)
         if live_meta.row_count is not None:
             row_count = live_meta.row_count
@@ -1248,9 +1417,9 @@ def grain_drift(
     for check in plan.join_cardinality_checks or []:
         if combo_counts is None:
             break
-        count = combo_counts(check.identifier, [check.columns]).get(
-            tuple(check.columns)
-        )
+        count = _combination_counts(
+            probes, combo_counts, check.identifier, [check.columns]
+        ).get(tuple(check.columns))
         row_count = check.row_count
         live_meta, _ = adapter.table_metadata(check.identifier)
         if live_meta.row_count is not None:
@@ -1345,7 +1514,13 @@ def grain_drift(
             for _baseline, relation in plan.fanout_pairs
             if relation.from_dataset == dataset.identifier
         ]
-        for aggregate in aggregate_columns(dataset.identifier, columns):
+        probe = probes.get(dataset.identifier)
+        aggregates = (
+            probe.aggregates
+            if probe is not None and probe.aggregates is not None
+            else aggregate_columns(dataset.identifier, columns)
+        )
+        for aggregate in aggregates:
             fraction = aggregate.null_fraction
             if fraction is None or fraction < 0.95:
                 continue
@@ -1790,13 +1965,21 @@ def _cardinality_in_scope(
 
 
 def cardinality_estimate(
-    adapter: Adapter, checks: list[CardinalityCheck]
+    adapter: Adapter,
+    checks: list[CardinalityCheck],
+    batched: dict[str, ProbeNeeds] | None = None,
 ) -> tuple[float, dict[str, float]]:
+    """Free dry-run pricing of the dimension-cardinality scan. A table in
+    ``batched`` (see :func:`batched_probes`) is priced by
+    :func:`grain_estimate` as part of its one statement, so it is left out."""
+
     query_estimate = getattr(adapter, "query_estimate", None)
     if query_estimate is None or not checks:
         return 0.0, {}
     per_table: dict[str, float] = {}
     for identifier, columns in _checks_by_table(checks).items():
+        if batched and identifier in batched:
+            continue
         per_table[identifier] = query_estimate(
             _distinct_count_sql(identifier, columns, adapter.dialect)
         )
@@ -1807,31 +1990,34 @@ def cardinality_drift(
     adapter: Adapter,
     checks: list[CardinalityCheck],
     current_semantic: SemanticLayer | None,
+    probes: dict[str, TableProbe] | None = None,
 ) -> list[DriftFinding]:
     """The billed half of the semantic axis: exact distinct counts on the
     categorical dimension columns versus the baseline. A moved count means the
     dimension widened or narrowed underneath its metrics; naming the new value
-    is deliberately left to a firewalled `explore query` if the user asks."""
+    is deliberately left to a firewalled `explore query` if the user asks.
+
+    ``probes`` is what ``maintain check`` already measured in each table's one
+    batched statement (see :func:`batched_probes`), read in place of a
+    separate distinct count where present."""
 
     findings: list[DriftFinding] = []
     if not checks:
         return findings
-    current = {meta.identifier for meta in adapter.list_objects()}
     semantic = current_semantic or SemanticLayer()
     models_by_name = {sm.name: sm for sm in semantic.semantic_models}
 
-    for identifier in _checks_by_table(checks):
-        if identifier not in current:
-            continue
-        _meta, live_columns = adapter.table_metadata(identifier)
-        live_names = {c.name for c in live_columns}
+    for identifier, columns in _live_cardinality_columns(adapter, checks).items():
         live = [
             check
             for check in checks
-            if check.identifier == identifier and check.column in live_names
+            if check.identifier == identifier and check.column in columns
         ]
-        counts = adapter.exact_distinct_counts(
-            identifier, sorted({check.column for check in live})
+        probe = (probes or {}).get(identifier)
+        counts = (
+            probe.distinct
+            if probe is not None
+            else adapter.exact_distinct_counts(identifier, columns)
         )
         for check in live:
             after = counts.get(check.column)
@@ -1941,6 +2127,32 @@ def rank_findings(findings: list[DriftFinding]) -> list[DriftFinding]:
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+def _live_cardinality_columns(
+    adapter: Adapter, checks: list[CardinalityCheck]
+) -> dict[str, list[str]]:
+    """Per table that still exists, the checked columns it still has, sorted:
+    exactly what :func:`cardinality_drift` counts. A vanished table or column
+    is the schema axis's story."""
+
+    if not checks:
+        return {}
+    current = {meta.identifier for meta in adapter.list_objects()}
+    live: dict[str, list[str]] = {}
+    for identifier in _checks_by_table(checks):
+        if identifier not in current:
+            continue
+        _meta, live_columns = adapter.table_metadata(identifier)
+        live_names = {c.name for c in live_columns}
+        live[identifier] = sorted(
+            {
+                check.column
+                for check in checks
+                if check.identifier == identifier and check.column in live_names
+            }
+        )
+    return live
 
 
 def _checks_by_table(checks: list[CardinalityCheck]) -> dict[str, list[str]]:

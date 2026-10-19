@@ -751,8 +751,11 @@ def grain_drift(engine: DexEngine, objects: list[str] | None = None) -> DriftRes
         composed_definitions,
         semantic=_vendor_semantic_layer(engine),
     )
+    # One statement per table where the adapter can take it (#275), surveyed
+    # once so the handshake prices exactly what the run below executes.
+    batched = drift_mod.batched_probes(adapter, plan)
     if plan.scans():
-        estimate, per_table = drift_mod.grain_estimate(adapter, plan)
+        estimate, per_table = drift_mod.grain_estimate(adapter, plan, batched)
         command_args.billed_handshake(
             "maintain grain", adapter, estimate, per_table=per_table
         )
@@ -761,6 +764,7 @@ def grain_drift(engine: DexEngine, objects: list[str] | None = None) -> DriftRes
         plan,
         timeout_seconds=engine.config.query.timeout_seconds,
         min_rows=engine.config.maintain.grain_min_rows,
+        probes=drift_mod.run_batched_probes(adapter, batched),
     )
     noted = (
         {dataset.identifier for dataset, _keys, _rows in plan.key_checks}
@@ -1451,10 +1455,14 @@ def check(engine: DexEngine, objects: list[str] | None = None) -> DriftResult:
     warnings.extend(plan.notes)
     checks = drift_mod.cardinality_plan(current_semantic, snap, names)
     scans_needed = plan.scans() or bool(checks)
+    # The grain probes and the dimension-cardinality counts share each table's
+    # one statement where the adapter can take it (#275), so they share one map
+    # for the estimate and the run alike.
+    batched = drift_mod.batched_probes(adapter, plan, checks)
     offer: ConfirmationRequest | None = None
     if scans_needed and command_args.cost_gate(adapter) is not None:
-        grain_total, grain_per = drift_mod.grain_estimate(adapter, plan)
-        card_total, card_per = drift_mod.cardinality_estimate(adapter, checks)
+        grain_total, grain_per = drift_mod.grain_estimate(adapter, plan, batched)
+        card_total, card_per = drift_mod.cardinality_estimate(adapter, checks, batched)
         per_table = dict(grain_per)
         for identifier, estimate in card_per.items():
             per_table[identifier] = per_table.get(identifier, 0.0) + estimate
@@ -1503,14 +1511,17 @@ def check(engine: DexEngine, objects: list[str] | None = None) -> DriftResult:
         result.pending_offer = offer
         return result
 
+    probes = drift_mod.run_batched_probes(adapter, batched)
     grain_findings = drift_mod.grain_drift(
         adapter,
         plan,
         timeout_seconds=config.query.timeout_seconds,
         min_rows=config.maintain.grain_min_rows,
+        probes=probes,
     )
     semantic_findings = semantic_findings + _semantic_scope(
-        drift_mod.cardinality_drift(adapter, checks, current_semantic), scope_names
+        drift_mod.cardinality_drift(adapter, checks, current_semantic, probes),
+        scope_names,
     )
 
     drift_mod.annotate_impacts(schema_findings + volume_findings + grain_findings, snap)
