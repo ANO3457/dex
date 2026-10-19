@@ -2686,6 +2686,7 @@ def _record_build_spend(
     *,
     gate_billed: float = 0.0,
     command: str = "transform build",
+    reservation_id: str | None = None,
 ) -> dict[str, float | None]:
     """Account a billed dbt run in the spend ledger and report what it cost.
 
@@ -2716,6 +2717,12 @@ def _record_build_spend(
     an operator most needs the history of. ``None`` where pricing degraded and
     there was no estimate to record, which :func:`settled_ratios` skips rather
     than counting as a ratio of nothing.
+
+    ``reservation_id`` is the gate's token when the build ran with one, so a
+    verified build's dbt row and its folded ``--verify`` statement rows join as
+    one command in :func:`settled_ratios`. ``None`` when the build settled with
+    no gate (pricing degraded before a connection opened, or a batch runner
+    with no gate of its own).
     """
 
     from ..guards.cost_guard import (
@@ -2731,16 +2738,19 @@ def _record_build_spend(
             # Through the shared builder rather than a dict of its own, which is
             # what keeps a build's row the same row a gate writes. It carries the
             # kind every gate-written settlement carries, because that is what it
-            # is, and declares `reservation_id` as null rather than omitting it:
-            # a reader joining settlements on that key reads an absent key and a
-            # null one as different claims, and only the null one says "this
-            # settled outside any reservation".
+            # is, and stamps the gate's `reservation_id` when a gate exists (so a
+            # `--verify` build's dbt row and verification rows join as one
+            # command) or declares it as null rather than omitting it when no
+            # gate exists: a reader joining settlements on that key reads an
+            # absent key and a null one as different claims, and only the null
+            # one says "this settled outside any reservation".
             ledger_row(
                 connector=connector,
                 command=command,
                 entry="settlement",
                 field=field,
                 amount=billed,
+                reservation_id=reservation_id,
                 estimate=estimate,
             )
         )
@@ -2789,6 +2799,7 @@ def _settle_dbt_spend(
     gate_billed: float = 0.0,
     uptime_seconds: float = 0.0,
     command: str = "transform build",
+    reservation_id: str | None = None,
 ) -> tuple[dict[str, float | None] | None, list[str]]:
     """What one finished dbt run cost, ledgered, with the note that explains it.
 
@@ -2857,6 +2868,7 @@ def _settle_dbt_spend(
             estimate,
             gate_billed=gate_billed,
             command=command,
+            reservation_id=reservation_id,
         )
     elif paradigm is Paradigm.COMPUTE_TIME:
         cap_note = _COMPUTE_TIME_CAP_NOTES.get(
@@ -2878,6 +2890,7 @@ def _settle_dbt_spend(
             estimate,
             gate_billed=gate_billed,
             command=command,
+            reservation_id=reservation_id,
         )
         translate = getattr(adapter, "compute_spend_translation", None)
         if translate is not None:
@@ -2900,6 +2913,7 @@ def _settle_dbt_spend(
             estimate,
             gate_billed=gate_billed,
             command=command,
+            reservation_id=reservation_id,
         )
     return spend, notes
 
@@ -3167,6 +3181,7 @@ def _shape_build_result(
         adapter=adapter,
         gate_billed=gate_billed,
         uptime_seconds=uptime_seconds,
+        reservation_id=gate.reservation_id if gate is not None else None,
     )
     notes = [
         *notes,
