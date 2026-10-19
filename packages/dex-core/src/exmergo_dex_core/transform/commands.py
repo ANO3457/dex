@@ -905,6 +905,7 @@ def test_mutations(
                 prices=prices,
                 equivalence=equivalence,
                 uptime=getattr(adapter, "warehouse_uptime", None),
+                adapter=adapter,
             )
             runs, spend, run_warnings = result.pop("_meta")
             warnings.extend(run_warnings)
@@ -1169,6 +1170,9 @@ def _price_mutations(
     each statement keyed the way the run loop asks for it, and notes.
     """
 
+    translate = getattr(adapter, "compute_spend_translation", None)
+    if translate is not None:
+        translate(0.0)
     estimator = getattr(adapter, "query_estimate", None)
     if estimator is None:
         if equivalence is not None:
@@ -1271,6 +1275,7 @@ def _run_mutants(
     prices: dict[str, float] | None = None,
     equivalence: _EquivalenceCheck | None = None,
     uptime=None,
+    adapter=None,
 ):
     """The baseline, then one run per mutant, stopping if the budget runs out.
 
@@ -1287,7 +1292,10 @@ def _run_mutants(
         ceiling=ceiling,
         prices=prices,
         fallback=(estimate or 0.0) / max(len(batch.mutants) + 1, 1),
-        uptime=uptime,
+        uptime=(
+            uptime if uptime is not None else getattr(adapter, "warehouse_uptime", None)
+        ),
+        adapter=adapter,
     )
 
     shadow.write(model_path, batch.identity)
@@ -1421,6 +1429,7 @@ class _BatchSpend:
         prices: dict[str, float] | None = None,
         fallback: float = 0.0,
         uptime=None,
+        adapter=None,
     ):
         self._paradigm = paradigm
         self._connector = connector
@@ -1428,7 +1437,10 @@ class _BatchSpend:
         self._ceiling = ceiling
         self._prices = prices or {}
         self._fallback = fallback
-        self._uptime = uptime
+        self._uptime = (
+            uptime if uptime is not None else getattr(adapter, "warehouse_uptime", None)
+        )
+        self._adapter = adapter
         self._spent = 0.0
         self.spend: dict[str, float | None] | None = None
         self.runs = 0
@@ -1472,19 +1484,26 @@ class _BatchSpend:
         one more row of this command's own (no estimate, like the runs'), and
         add it to the batch's spend. Returns the notes that explain it."""
 
-        if self._uptime is None:
-            return []
-        overhead, notes = self._uptime.settle()
-        if overhead > 0:
-            self.spend = _merge_spend(
-                self.spend,
-                _record_build_spend(
-                    self._store,
-                    self._connector,
-                    overhead,
-                    self._paradigm,
-                    command="transform test",
-                ),
+        from ..guards.cost_guard import spend_field
+
+        notes: list[str] = []
+        if self._uptime is not None:
+            overhead, notes = self._uptime.settle()
+            if overhead > 0:
+                self.spend = _merge_spend(
+                    self.spend,
+                    _record_build_spend(
+                        self._store,
+                        self._connector,
+                        overhead,
+                        self._paradigm,
+                        command="transform test",
+                    ),
+                )
+        translate = getattr(self._adapter, "compute_spend_translation", None)
+        if translate is not None and self.spend is not None:
+            self.spend.update(
+                translate(self.spend.get(spend_field(self._paradigm)) or 0.0)
             )
         return notes
 
