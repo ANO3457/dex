@@ -25,7 +25,14 @@ the query:
 - a dotted reference that does not resolve to exactly one model through the
   declared joins (unknown, ambiguous, or circular), because the token the gate
   would screen is then a guess;
-- a node the pinned release's grammar did not have when this was written.
+- a node the pinned release's grammar did not have when this was written;
+- a saved measure whose formula reaches itself, or carries ``{var}`` syntax.
+
+**A saved measure reads its formula's columns.** ``revenue > 100`` names no
+column called ``revenue``: SLayer renders the measure's formula in its place
+(``HAVING SUM(orders.amount) > 100``). So a reference to a saved measure is
+reported as the columns its formula reads, read the same way and relative to the
+measure's own model, rather than as a token no profile could adjudicate.
 
 **Every reference counts, aggregation arguments included.** SLayer's
 ``walk_parsed_refs`` treats an aggregation's and a transform's arguments as
@@ -128,7 +135,8 @@ def filter_refs(
             if has_variable_syntax(clause):
                 return None
             parsed = parse_filter_expr(clause)
-            refs.extend(_token(node, source, models) for node in _references(parsed))
+            for node in _references(parsed):
+                refs.extend(_tokens(node, source, models, frozenset()))
         return refs
     except Exception:
         return None
@@ -151,19 +159,48 @@ def _references(node: object) -> Iterator[Ref | DottedRef]:
         raise ValueError(type(node).__name__)
 
 
-def _token(
-    node: Ref | DottedRef, source: SlayerModel, models: Mapping[str, SlayerModel]
-) -> str:
-    """The ``model.column`` a reference names, resolved through declared joins."""
+def _tokens(
+    node: Ref | DottedRef,
+    source: SlayerModel,
+    models: Mapping[str, SlayerModel],
+    expanding: frozenset[str],
+) -> list[str]:
+    """The ``model.column`` tokens a reference reads, resolved through declared
+    joins.
+
+    A reference to a saved measure (``revenue > 100``) reads no column of that
+    name: SLayer renders the measure's formula in its place (``HAVING
+    SUM(orders.amount) > 100``), so the columns that formula reads are what the
+    filter reads, and those are reported instead. A formula is a Mode-B
+    expression like the filter itself, read relative to the measure's own model,
+    and a measure reached again while it is being expanded is a cycle this
+    cannot account for.
+    """
 
     if isinstance(node, Ref):
-        return f"{source.name}.{node.name}"
-    *qualifiers, leaf = node.parts
-    target = resolve_ref_target(
-        qualifiers=tuple(qualifiers),
-        source_model=source,
-        models_by_name=dict(models),
-    )
-    if target is None:
-        raise ValueError(".".join(node.parts))
-    return f"{target.name}.{leaf}"
+        target, leaf = source, node.name
+    else:
+        *qualifiers, leaf = node.parts
+        target = resolve_ref_target(
+            qualifiers=tuple(qualifiers),
+            source_model=source,
+            models_by_name=dict(models),
+        )
+        if target is None:
+            raise ValueError(".".join(node.parts))
+    token = f"{target.name}.{leaf}"
+    measure = next((m for m in target.measures if m.name == leaf), None)
+    if measure is None:
+        return [token]
+    # A placeholder in a formula is filled after the gate has run, exactly as
+    # in a filter, and a cycle has no columns to report.
+    if token in expanding or has_variable_syntax(measure.formula):
+        raise ValueError(token)
+    # Columns and measures share one namespace in a model, so a measure's name
+    # never also names a column.
+    formula = parse_filter_expr(measure.formula)
+    return [
+        found
+        for inner in _references(formula)
+        for found in _tokens(inner, target, models, expanding | {token})
+    ]

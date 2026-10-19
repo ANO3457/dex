@@ -3598,6 +3598,10 @@ def _compose_semantic_catalogs(
             **hosted_view.physical_columns,
             **local_view.physical_columns,
         },
+        computed_columns={
+            **hosted_view.computed_columns,
+            **local_view.computed_columns,
+        },
     )
 
 

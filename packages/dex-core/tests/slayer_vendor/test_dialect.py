@@ -238,3 +238,58 @@ def test_the_backend_contract_on_a_foreign_dialect() -> None:
     contract = SemanticBackendContract()
     contract.make_backend = _DialectBackend  # type: ignore[method-assign]
     contract.test_reading_a_foreign_filter_dialect_answers_or_declines()
+
+
+# A saved measure in a filter reads the columns of its formula, not a column of
+# its own name (#698): `revenue > 100` renders `HAVING SUM(orders.amount) > 100`.
+MEASURED = models_by_name(
+    model(
+        "orders",
+        ["order_id", "customer_id", "amount", "contact_email"],
+        measures=[
+            {"name": "revenue", "formula": "amount:sum"},
+            {"name": "contacts", "formula": "contact_email:count_distinct"},
+            {"name": "order_count", "formula": "*:count"},
+            # A measure over another measure, and one over a joined model's.
+            {"name": "per_order", "formula": "revenue / order_count"},
+            {"name": "reach", "formula": "customers.email:count_distinct"},
+        ],
+        joins=[join("customers", "customer_id", "customer_id")],
+    ),
+    model("customers", ["customer_id", "email"]),
+)
+
+
+@pytest.mark.parametrize(
+    ("clause", "expected"),
+    [
+        ("revenue > 100", ["orders.amount"]),
+        ("contacts > 5", ["orders.contact_email"]),
+        ("order_count > 2", []),
+        ("per_order > 1", ["orders.amount"]),
+        ("reach > 1", ["customers.email"]),
+        ("orders.revenue > 100", ["orders.amount"]),
+    ],
+)
+def test_a_saved_measure_reads_the_columns_of_its_formula(
+    clause: str, expected: list[str]
+) -> None:
+    assert refs(clause, layer=MEASURED) == expected
+
+
+def test_a_measure_cycle_is_none() -> None:
+    """A formula that reaches itself has no columns to report, so the filter is
+    one the gate cannot screen."""
+
+    layer = models_by_name(
+        model(
+            "orders",
+            ["order_id"],
+            measures=[
+                {"name": "a", "formula": "b + 1"},
+                {"name": "b", "formula": "a + 1"},
+            ],
+        )
+    )
+
+    assert refs("a > 1", layer=layer) is None
