@@ -144,6 +144,14 @@ the point of the pattern form. Both `explore profile` and `explore map` emit
 this warning with the same text, so a scheduled `map` is enough to catch a
 rename that left an override pointing at nothing.
 
+## Broader than PII: values-free mode
+
+This policy keeps personal data out of results column by column. A host that must
+keep every value out, whatever the column holds, selects values-free mode instead,
+which this policy does not replace: no `min_value`, `max_value` or value domain on
+any column, aggregate-only queries, and errors as codes. See
+[`values-free-mode.md`](values-free-mode.md).
+
 ## Where the policy is enforced
 
 [`command-contract.md`](command-contract.md) carries the surfaces that gate a

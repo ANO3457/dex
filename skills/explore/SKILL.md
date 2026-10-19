@@ -162,6 +162,11 @@ need is not described here.
   the probe playbook.
 - A warning that a flag sits below the blocking threshold is information to pass
   to the user, not an error to fix.
+- When envelopes carry `data.result_mode: "values_free"`, the host has pinned
+  values-free mode: no table value may reach you. Ask counts and other one-row
+  aggregates only (no column in `GROUP BY`, no `MIN`/`MAX`, `DISTINCT` or
+  `LIMIT`), never try to leave the mode, and treat a `data.code` refusal as final
+  for that shape. The rule is in `${CLAUDE_SKILL_DIR}/references/commands.md`.
 - If the user says a refused column is not personal data, recommend a
   `pii_overrides` entry in `.dex/config.yml` (the fully qualified column, with an
   optional reason), proposed with `dex config set pii_overrides '<list>'` (the

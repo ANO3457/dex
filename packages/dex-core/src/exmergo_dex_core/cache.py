@@ -204,6 +204,12 @@ class Dataset(BaseModel):
     #: it is folded in only under `--use-project` and stated in the payload rather
     #: than inferred from its absence.
     semantic_models: list[str] = Field(default_factory=list)
+    #: Written by a profile in values-free mode (#591), which keeps no column
+    #: value: ``min_value``, ``max_value`` and ``value_domain`` are absent on every
+    #: column. A profile outside that mode treats such an entry as stale and scans
+    #: again, so it is never served as though it were complete. Defaults to
+    #: False, so a cache written before it reads as complete, which it is.
+    values_withheld: bool = False
 
     def notable_columns(
         self,

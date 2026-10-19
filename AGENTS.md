@@ -79,6 +79,25 @@ With no warehouse to point at yet, `demo` generates one and writes the config fo
 it, so `demo` then `explore map` is a working first run on a machine with no
 credentials and no network.
 
+A host whose model may see no value read from a table selects **values-free
+mode**: `--values-free` on a command, `DEX_RESULT_MODE=values_free` in the
+environment to pin it for every command (no flag turns it off), or
+`DexEngine(result_mode="values_free")` on the library, which pins the engine.
+`.dex/config.yml` never selects it, since an agent may have written that file.
+In the mode `explore profile` withholds `min_value`, `max_value` and
+`value_domain` (numeric ones too), `explore query` runs only statements whose
+every output column is an allowlisted aggregate returning one row, an error
+carries a stable `data.code` instead of a warehouse's words, a command not
+reviewed for the mode refuses (`code: command_not_values_free`), and every
+envelope carries `data.result_mode: "values_free"` so a host can assert it. The
+reviewed commands are `connect test`, `config get|validate`,
+`explore inventory|profile|relationships|map|diagram|query` and
+`explore semantic list`. A conformance suite ships in the package
+(`exmergo_dex_core.values_free_conformance`, extra `[values-free-conformance]`)
+so a host can check the release it pins. The rules and the residual risks it
+does not close (membership probing, small counts, an aggregate over one row) are
+in `references/values-free-mode.md`.
+
 | Subcommand | Returns |
 |---|---|
 | `demo [path]` | generates a seeded local DuckDB warehouse (7 tables, 29,512 rows) plus a `.dex/config.yml` beside it, so a first run needs no warehouse, no credentials, and no network; both artifacts are listed in `data.created` and `data.next_steps` names the commands worth running next. The path is positional and resolves against the working directory, defaulting to `dex_demo.duckdb`; `--path` is refused here rather than honored, since everywhere else it names the warehouse dex *reads*. Create-only, with no `--confirm` that can talk past it: an existing file at the target is a refusal (`reason: guard`), a missing parent directory is a refusal (`reason: request`), no directories are ever created, and a `.dex/config.yml` at or above the target is left untouched with a warning rather than shadowed by a second one. The data is generated from a pinned seed, so the counts quoted in the docs are the counts a user sees, and it is deliberately flawed: a key that lost uniqueness to a double-loaded batch, a key mixing two id schemes, a join whose columns share a name and none of their values, an empty table, two columns whose declared type contradicts their content, and personal data alongside two designed false positives. Needs the `[duckdb]` extra and says so by name when it is absent (`reason: prerequisite`) |
@@ -299,7 +318,8 @@ them.
    unguarded surface: `references/cost-controls.md`.
 5. Nothing reaches agent context except through the sanitized envelope.
    Credentials never; data values only from profiled, PII-cleared columns,
-   bounded and capped.
+   bounded and capped, and none at all in values-free mode, which a host
+   selects and the repository cannot (`references/values-free-mode.md`).
 6. PII is flagged (column, category, confidence), never surfaced, and a flag is
    never removed by evidence: value-shape statistics computed in the profiling
    scan only move its confidence, in both directions and fail-closed. Only a
@@ -332,6 +352,9 @@ them.
 - The contract in full: `references/command-contract.md`.
 - The PII policy: what a flag means, which surfaces gate on presence and which
   on the threshold, and how a human clears one: `references/pii-policy.md`.
+- Values-free mode: how a host selects and pins it, what each command keeps and
+  withholds, the aggregate-only query rule, the error codes, and the shipped
+  conformance suite: `references/values-free-mode.md`.
 - The cost guard: the confirm handshake, the spend ledger, the cumulative daily
   ceiling, and the one surface where no ceiling is possible:
   `references/cost-controls.md`.
