@@ -416,7 +416,7 @@ listed only in the table's second tier reads its nearest listed ancestor, so
 | value | meaning |
 |---|---|
 | `exact` | BigQuery: a dry run is what the job will bill |
-| `approximate` | a model of the run (Snowflake, Databricks, Redshift, Postgres, ClickHouse) |
+| `approximate` | a model of the run (Snowflake, Databricks, Redshift, Postgres, ClickHouse, Trino) |
 | `unknown` | pricing was attempted and produced no number |
 | absent | nothing was priced |
 

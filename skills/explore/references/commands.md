@@ -319,8 +319,8 @@ it as `execution` (`dex` or `vendor`).
   `values` is rooted at the dimension's own model (`scoped_to` empty, the
   model's own filters applied), or at the `--metric` model when one is named,
   in which case the dimension must be groupable for it. Connectors: DuckDB,
-  BigQuery, Snowflake, Postgres, and Redshift; Databricks and ClickHouse refuse
-  with the reason. `--api` is refused, since dex reads no hosted SLayer.
+  BigQuery, Snowflake, Postgres, and Redshift; Databricks, ClickHouse and Trino
+  refuse with the reason. `--api` is refused, since dex reads no hosted SLayer.
 
 `dimension_scope` says whether a dimension row is one declaration or one
 groupable path, which is why two backends can report different dimension counts

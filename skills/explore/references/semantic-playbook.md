@@ -214,7 +214,7 @@ read differently:
 - **Not every connector.** DuckDB, BigQuery, Snowflake, Postgres and Redshift
   are supported. Databricks and ClickHouse refuse with the reason, because
   SLayer's SQL for them would run and return wrong numbers or would need a live
-  server. On those, take the physical route: a dimension's `semantic_model`,
+  server, and Trino refuses until its rendered SQL has been reviewed. On those, take the physical route: a dimension's `semantic_model`,
   that model's `relation`, then `explore profile` and `explore query`.
 
 A model file dex refuses (a stale `version`, a duplicate name, a join to a model

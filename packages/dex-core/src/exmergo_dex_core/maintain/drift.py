@@ -587,16 +587,16 @@ class GrainPlan(NamedTuple):
     probes. Built once so the cost estimate and the confirmed run price and
     execute exactly the same statements."""
 
-    key_checks: list[tuple[Dataset, list[str], int]]
+    key_checks: list[tuple[Dataset, list[str], int | None]]
     fanout_pairs: list[tuple[Relationship, Relationship]]
     # Proven multi-column keys re-verified as combinations: their members are
     # not individually unique, so they never enter key_checks.
-    composite_checks: list[tuple[Dataset, list[list[str]], int]]
+    composite_checks: list[tuple[Dataset, list[list[str]], int | None]]
     # Grains the *project* declares (model-level unique_combination_of_columns)
     # that measurement never proved. Kept apart from `composite_checks` because
     # a failure here is a different fact with a different finding code: nothing
     # lapsed, the declaration was never true. Priced identically.
-    declared_composite_checks: list[tuple[Dataset, list[list[str]], int]]
+    declared_composite_checks: list[tuple[Dataset, list[list[str]], int | None]]
     # What the plan could not survey, so an unchecked declaration never reads as
     # a clean bill.
     notes: list[str]
@@ -604,7 +604,9 @@ class GrainPlan(NamedTuple):
     # baseline measurement: a column that is wholly NULL in a non-empty result
     # is a defect in its present shape, not a before-and-after drift claim.
     # Last/defaulted to retain compatibility with focused detector test plans.
-    null_checks: list[tuple[Dataset, list[ColumnMeta], int]] | None = None
+    # The count is ``None`` where the connector has no free row count (Trino,
+    # Databricks before a sized scan): unknown, which is not the same as empty.
+    null_checks: list[tuple[Dataset, list[ColumnMeta], int | None]] | None = None
     # Joins the semantic layer declares an arity for, each side that arity says
     # is a key re-measured as one. Defaulted for the same reason as above.
     join_cardinality_checks: list[JoinCardinalityCheck] | None = None
@@ -686,9 +688,11 @@ def grain_plan(
         definitions, sorted(current), scope
     )
     _fold_semantic_keys(declared_by_identifier, notes, semantic, sorted(current), scope)
-    key_checks: list[tuple[Dataset, list[str], int]] = []
-    composite_checks: list[tuple[Dataset, list[list[str]], int]] = []
-    declared_checks: list[tuple[Dataset, list[list[str]], int]] = []
+    # A count of None is unknown (no free row count on this connector), not
+    # zero: the check is planned, and the scan that runs it supplies the count.
+    key_checks: list[tuple[Dataset, list[str], int | None]] = []
+    composite_checks: list[tuple[Dataset, list[list[str]], int | None]] = []
+    declared_checks: list[tuple[Dataset, list[list[str]], int | None]] = []
     for dataset in snap.warehouse.datasets:
         if scope is not None and dataset.identifier not in scope:
             continue
@@ -718,9 +722,9 @@ def grain_plan(
         # A combination with a vanished member is the schema axis's story,
         # same as a vanished single key.
         live_composites = [c for c in composites if set(c) <= columns]
-        if live_keys and row_count:
+        if live_keys and row_count != 0:
             key_checks.append((dataset, live_keys, row_count))
-        if live_composites and row_count:
+        if live_composites and row_count != 0:
             composite_checks.append((dataset, live_composites, row_count))
 
     # Declared grains are surveyed against the *current* warehouse rather than
@@ -766,10 +770,10 @@ def grain_plan(
             )
         if not live_declared:
             continue
-        if not row_count:
+        if row_count == 0:
             notes.append(
-                f"{identifier} has no row count to compare against, so its "
-                "declared grain was not verified"
+                f"{identifier} has no rows to compare against, so its declared "
+                "grain was not verified"
             )
             continue
         # A `Dataset` carrying only the identifier where the baseline has none:
@@ -810,7 +814,7 @@ def grain_plan(
             "grains on " + ", ".join(sorted(set(unsurveyed))) + " were not verified",
         ]
         declared_checks = []
-    null_checks: list[tuple[Dataset, list[ColumnMeta], int]] = []
+    null_checks: list[tuple[Dataset, list[ColumnMeta], int | None]] = []
     if callable(getattr(adapter, "column_aggregates", None)):
         for dataset in snap.warehouse.datasets:
             if scope is not None and dataset.identifier not in scope:
@@ -818,7 +822,7 @@ def grain_plan(
             if dataset.identifier not in current:
                 continue
             meta, columns = adapter.table_metadata(dataset.identifier)
-            null_checks.append((dataset, columns, meta.row_count or 0))
+            null_checks.append((dataset, columns, meta.row_count))
 
     cardinality_checks = _join_cardinality_checks(
         semantic, sorted(current), scope, describe, notes
@@ -1303,6 +1307,8 @@ def grain_drift(
         live_meta, _ = adapter.table_metadata(dataset.identifier)
         if live_meta.row_count is not None:
             row_count = live_meta.row_count
+        if row_count is None:
+            continue  # nothing counted the table, so uniqueness cannot be judged
         for key in keys:
             count = distinct.get(key)
             if count is None or count >= row_count:
@@ -1339,6 +1345,8 @@ def grain_drift(
         live_meta, _ = adapter.table_metadata(dataset.identifier)
         if live_meta.row_count is not None:
             row_count = live_meta.row_count
+        if row_count is None:
+            continue  # nothing counted the table, so uniqueness cannot be judged
         for combo in combos:
             count = counts.get(tuple(combo))
             if count is None or count >= row_count:
@@ -1382,6 +1390,8 @@ def grain_drift(
         live_meta, _ = adapter.table_metadata(dataset.identifier)
         if live_meta.row_count is not None:
             row_count = live_meta.row_count
+        if row_count is None:
+            continue  # nothing counted the table, so uniqueness cannot be judged
         for combo in combos:
             count = counts.get(tuple(combo))
             if count is None or count >= row_count:
@@ -1486,24 +1496,38 @@ def grain_drift(
             )
         )
     aggregate_columns = getattr(adapter, "column_aggregates", None)
+
+    def no_rows(dataset: Dataset) -> DriftFinding:
+        return DriftFinding(
+            axis="grain",
+            code="no_rows",
+            identifier=dataset.identifier,
+            severity="low",
+            detail=(
+                f"{dataset.identifier} has no rows; null fractions were not reported"
+            ),
+            data={"row_count": 0},
+        )
+
     for dataset, columns, row_count in plan.null_checks or []:
         if not callable(aggregate_columns):
             continue
         if row_count == 0:
-            findings.append(
-                DriftFinding(
-                    axis="grain",
-                    code="no_rows",
-                    identifier=dataset.identifier,
-                    severity="low",
-                    detail=(
-                        f"{dataset.identifier} has no rows; null fractions were not "
-                        "reported"
-                    ),
-                    data={"row_count": 0},
-                )
-            )
+            findings.append(no_rows(dataset))
             continue
+        probe = probes.get(dataset.identifier)
+        aggregates = list(
+            probe.aggregates
+            if probe is not None and probe.aggregates is not None
+            else aggregate_columns(dataset.identifier, columns)
+        )
+        if row_count is None:
+            # No free count before the scan; the scan's own COUNT(*) is the
+            # count, and adapters keep it for the rest of the command.
+            row_count = adapter.table_metadata(dataset.identifier)[0].row_count
+            if row_count == 0:
+                findings.append(no_rows(dataset))
+                continue
         joins = [
             {
                 "from_dataset": relation.from_dataset,
@@ -1514,12 +1538,6 @@ def grain_drift(
             for _baseline, relation in plan.fanout_pairs
             if relation.from_dataset == dataset.identifier
         ]
-        probe = probes.get(dataset.identifier)
-        aggregates = (
-            probe.aggregates
-            if probe is not None and probe.aggregates is not None
-            else aggregate_columns(dataset.identifier, columns)
-        )
         for aggregate in aggregates:
             fraction = aggregate.null_fraction
             if fraction is None or fraction < 0.95:

@@ -62,6 +62,7 @@ bills nothing; `null` means no connector was resolved.
 | Redshift | `compute_time` | compute-seconds | [`redshift.md`](redshift.md) |
 | Postgres | `db_load` | database-seconds | [`postgres.md`](postgres.md) |
 | ClickHouse | `db_load`, or `compute_time` on Cloud | database-seconds | [`clickhouse.md`](clickhouse.md) |
+| Trino | `db_load` (self-hosted; Galaxy is refused) | cluster-seconds | [`trino.md`](trino.md) |
 | DuckDB | `free_local` | nothing to confirm | [`duckdb.md`](duckdb.md) |
 | dbt Cloud Semantic Layer | `hosted` | no ceiling possible | see below |
 

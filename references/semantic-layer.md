@@ -776,9 +776,9 @@ Selection is deterministic given a document and a connector:
 2. the portable dialect, `ANSI_SQL`;
 3. the first declared SQL dialect, in the document's own order.
 
-It never falls through to a non-SQL language. DuckDB, Postgres, Redshift and
-ClickHouse have no token in Ossie's enum, so they fall to the portable dialect,
-which is correct and is stated here rather than left to be inferred. Every
+It never falls through to a non-SQL language. DuckDB, Postgres, Redshift,
+ClickHouse and Trino have no token in Ossie's enum, so they fall to the portable
+dialect, which is correct and is stated here rather than left to be inferred. Every
 declared dialect is preserved on the element's `vendor_params`, along with the
 datatype, the AI context, and any custom extensions, so nothing the document says
 is dropped and nothing is smuggled into an unrelated field.
@@ -1049,6 +1049,7 @@ for it has been read for that dialect:
 | DuckDB, BigQuery, Snowflake, Postgres, Redshift | supported |
 | Databricks | refused: SLayer buckets a timestamp with Spark's `TRUNC`, which answers NULL below a week, and renders a median with `PERCENTILE_APPROX`; both run and return wrong numbers |
 | ClickHouse | refused: SLayer probes the server through a live client while preparing a correlated semi-join, which a dry run would not survive |
+| Trino | refused: SLayer has a Trino dialect, but no golden of its rendered SQL has been read yet |
 
 Any other connector is refused too, rather than rendered in SLayer's Postgres
 fallback, because that SQL would run and the numbers would be wrong. `--api` is

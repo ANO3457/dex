@@ -280,22 +280,25 @@ it is better than the one a point below it.
 | <img src="https://www.exmergo.com/connectors/databricks.png" width="20" height="20" alt=""> **Databricks** | Cloud warehouse | ❌ | `databricks` | Warehouse-seconds, DBUs alongside | The SDK's unified chain: `databricks auth login`, `DATABRICKS_*` env, or a dbt profile |
 | <img src="https://www.exmergo.com/connectors/redshift.png" width="20" height="20" alt=""> **Amazon Redshift** | Cloud warehouse, Serverless-first | ❌ | `redshift` | Compute-seconds, RPU-hours alongside | The AWS credential chain (a pinned Serverless workgroup mints IAM temporary database credentials) or `REDSHIFT_*` env |
 | <img src="https://www.exmergo.com/connectors/clickhouse.png" width="20" height="20" alt=""> **ClickHouse** | Analytical database | ✅ | `clickhouse` | Compute-seconds on Cloud, with live allocated memory translating to approximate compute-unit-hours and optional USD; database-seconds self-hosted | `CLICKHOUSE_URL`, the `CLICKHOUSE_*` env, or a dbt profile |
+| <img src="https://www.exmergo.com/connectors/trino.png" width="20" height="20" alt=""> **Trino** | Federated query engine (Trino, Starburst Enterprise, Trino on EMR) | ✅ | `trino` | Cluster-seconds, no invoice | `TRINO_URL`, the `TRINO_*` env, or a dbt profile |
 | <img src="https://www.exmergo.com/connectors/duckdb.png" width="20" height="20" alt=""> **DuckDB** | Embedded analytical | ✅ | `duckdb` | Free and local, nothing to confirm | None, just a file path |
 | <img src="https://www.exmergo.com/connectors/postgresql.png" width="20" height="20" alt=""> **Postgres** | Operational database | ✅ | `postgres` | Database-seconds, no invoice | `pg_service.conf`, `DATABASE_URL`, the `PG*` env, or a dbt profile |
 
 Credentials are discovered, never asked for. Every scan is estimated and
 confirmed before it spends, and capped server-side: `maximum_bytes_billed` on
 BigQuery, a per-statement statement timeout on Snowflake, Databricks, Redshift,
-and Postgres, and `max_execution_time` plus `max_bytes_to_read` on ClickHouse.
-All settled spend is recorded in a local ledger.
+and Postgres, `max_execution_time` plus `max_bytes_to_read` on ClickHouse, and
+`query_max_run_time` plus `query_max_scan_physical_bytes` on Trino. All settled
+spend is recorded in a local ledger.
 
-Self-hosted Postgres and ClickHouse bill no dollars, and dex still gates them: an
-unbounded scan on a production Postgres primary or a shared ClickHouse cluster
-is a real cost even when nothing appears on an invoice.
+Self-hosted Postgres, ClickHouse, and Trino bill no dollars, and dex still gates
+them: an unbounded scan on a production Postgres primary, a shared ClickHouse
+cluster, or a Trino cluster federating into someone else's database is a real
+cost even when nothing appears on an invoice.
 
 ### Upcoming Connectors
 
-- Cloud warehouse: **Trino**, **Azure Synapse**, **Microsoft Fabric**
+- Cloud warehouse: **Starburst Galaxy**, **Azure Synapse**, **Microsoft Fabric**
 
 ## Semantic layers
 

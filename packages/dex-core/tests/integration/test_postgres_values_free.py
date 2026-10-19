@@ -4,8 +4,11 @@ The shipped conformance suite proves the guarantee on DuckDB with sentinel data.
 This proves it where a real server writes the error text: Postgres quotes the
 input a cast failed on (`invalid input syntax for type integer: "..."`), so a
 warehouse error is the leak the mode most needs to close. The seeded data has no
-sentinels, so the values to search for are read from a full-mode profile first:
-whatever that run surfaced, the values-free run must not.
+sentinels, so profile checks inspect the value-bearing fields directly. Counts
+remain available even when they happen to equal a source value (the orders row
+count and maximum id are both 2000). The values to search for are read from a
+full-mode profile first: whatever that run surfaced, the values-free run must
+not.
 """
 
 from __future__ import annotations
@@ -45,16 +48,32 @@ def _surfaced_values(envelope: dict) -> set[str]:
     return {value for value in found if len(value) >= 4}
 
 
-def test_values_free_profile_and_query_surface_nothing_a_full_profile_did(
+def test_values_free_profile_and_query_withhold_values_but_keep_counts(
     tmp_path: Path, capsys
 ):
     seed_repo(tmp_path, schemas=["app"], budget=120)
     root = ["--repo-root", str(tmp_path)]
     rc, full = run_cli(
-        [*root, "explore", "profile", "app.orders", "app.products", "--confirm"],
+        [
+            *root,
+            "explore",
+            "profile",
+            "app.orders",
+            "app.products",
+            "--columns",
+            "all",
+            "--confirm",
+        ],
         capsys,
     )
     assert_ok(rc, full)
+    value_fields = {"min_value", "max_value", "value_domain"}
+    for field in value_fields:
+        assert any(
+            column.get(field) is not None
+            for dataset in full["data"]["datasets"]
+            for column in dataset["columns"]
+        ), f"the full profile surfaced no {field} to withhold"
     surfaced = _surfaced_values(full)
     assert surfaced, "the full profile surfaced no value to search for"
 
@@ -65,6 +84,8 @@ def test_values_free_profile_and_query_surface_nothing_a_full_profile_did(
             "profile",
             "app.orders",
             "app.products",
+            "--columns",
+            "all",
             "--values-free",
             "--confirm",
         ],
@@ -72,6 +93,13 @@ def test_values_free_profile_and_query_surface_nothing_a_full_profile_did(
     )
     assert_ok(rc, moded)
     assert moded["data"]["result_mode"] == "values_free"
+    assert {d["identifier"]: d["row_count"] for d in moded["data"]["datasets"]} == {
+        d["identifier"]: d["row_count"] for d in full["data"]["datasets"]
+    }
+    for dataset in moded["data"]["datasets"]:
+        assert set(dataset["withheld_fields"]) == value_fields
+        for column in dataset["columns"]:
+            assert not value_fields.intersection(column)
     text = json.dumps(moded)
     assert not [value for value in surfaced if value in text]
 

@@ -1168,6 +1168,26 @@ def _clickhouse_cap_env(ceiling: int) -> dict[str, str]:
     }
 
 
+# Kept in step with adapters.trino._SCAN_BYTES_PER_SECOND, for the same reason
+# as ClickHouse's: the byte cap and the quote are two views of one number.
+_TRINO_SCAN_BYTES_PER_SECOND = 200 * 1024 * 1024
+
+
+def _trino_cap_env(ceiling: int) -> dict[str, str]:
+    """dbt-trino sends the profile's ``session_properties`` with every
+    statement, CTAS included; a dex-rendered profile references these two
+    variables so the value can be tightened per invocation. Rendered with the
+    units Trino's duration and data-size properties take."""
+
+    from . import init
+
+    scan_bytes = ceiling * _TRINO_SCAN_BYTES_PER_SECOND
+    return {
+        init.TRINO_QUERY_MAX_RUN_TIME_ENV: f"{ceiling}s",
+        init.TRINO_QUERY_MAX_SCAN_BYTES_ENV: f"{scan_bytes}B",
+    }
+
+
 # Which environment variable carries the server-side cap into the dbt
 # subprocess, per connector. Keyed by connector rather than by paradigm because
 # there is more than one db-load connector and they cap by different mechanisms;
@@ -1178,6 +1198,7 @@ def _clickhouse_cap_env(ceiling: int) -> dict[str, str]:
 _CAP_ENV_BUILDERS: dict[str, Callable[[int], dict[str, str]]] = {
     "postgres": _postgres_cap_env,
     "clickhouse": _clickhouse_cap_env,
+    "trino": _trino_cap_env,
 }
 
 

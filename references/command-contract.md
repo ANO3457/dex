@@ -1030,8 +1030,8 @@ handshake and columnar cap as the local MetricFlow backend, so SLayer never open
 a datasource, never reads a credential, and never touches the warehouse. A query's
 metrics are saved measures on one model, grouped by that model's own columns, with
 `--where` in SLayer's own filter syntax; an ad-hoc formula is refused. DuckDB,
-BigQuery, Snowflake, Postgres and Redshift are supported, and Databricks and
-ClickHouse are refused with the reason. Values SLayer caches in a model file
+BigQuery, Snowflake, Postgres and Redshift are supported, and Databricks,
+ClickHouse and Trino are refused with the reason. Values SLayer caches in a model file
 (`sampled_values`) are never read. See `references/semantic-layer.md`.
 `maintain` reads the same models on every axis without opening a SLayer
 datasource or SLayer storage: the baseline records the SLayer release and model
@@ -1435,6 +1435,11 @@ Rules the envelope enforces, all of them Tier-2 eval targets:
   binding ceiling and ledger unit, and adds approximate compute-unit-hours from
   live per-replica memory plus optional USD from the configured price. Missing
   or partial capacity refuses before billed work.
+- **Trino is guarded as `db_load` in cluster-seconds.** `trino.deployment:
+  galaxy` is accepted by config validation, so the committed shape is final,
+  but refused by `connect`, the dev-target preflight and `transform init`,
+  with `compute_time` named as the paradigm it would need; a `self_hosted`
+  declaration reaching a `*.galaxy.starburst.io` host is refused too.
 - **Spend, the ledger, and the daily ceiling are governed by
   [`cost-controls.md`](cost-controls.md).** That file owns the
   `.dex/spend.jsonl` row shape, how reservations and settlements net, the

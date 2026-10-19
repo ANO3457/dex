@@ -1269,3 +1269,151 @@ def test_init_clickhouse_refuses_dev_database_source_collision(
     assert rc == 1
     assert "dev_database" in envelope["errors"][0]
     assert "clickhouse.databases" in envelope["errors"][0]
+
+
+def _seed_trino_config(repo: Path, **target) -> None:
+    (repo / ".dex").mkdir(parents=True, exist_ok=True)
+    (repo / ".dex" / "config.yml").write_text(
+        yaml.safe_dump({"trino": target}), encoding="utf-8"
+    )
+
+
+def _trino_env(monkeypatch, **env) -> None:
+    for var in (
+        "TRINO_URL",
+        "TRINO_HOST",
+        "TRINO_USER",
+        "TRINO_PASSWORD",
+        "TRINO_JWT_TOKEN",
+        "TRINO_HTTP_SCHEME",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+
+def _trino_output(repo: Path) -> tuple[str, dict]:
+    rendered = (repo / "analytics" / "profiles.yml").read_text(encoding="utf-8")
+    return rendered, yaml.safe_load(rendered)["analytics"]["outputs"]["dev"]
+
+
+def test_init_trino_renders_a_dev_only_profile_in_the_dev_catalog(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """dbt-trino's `database` is the Trino catalog, and dbt never creates one,
+    so the dev catalog is the committed one and the dev schema defaults."""
+
+    pytest.importorskip("trino")
+    _trino_env(monkeypatch, TRINO_URL="http://dex_ro@trino.internal:8080/memory/app")
+    _seed_trino_config(tmp_path, dev_catalog="lake", catalogs=["memory.app"])
+    rc, envelope = _run(_init_argv(tmp_path, "--connector", "trino"), capsys)
+    assert rc == 0, envelope
+    assert envelope["data"]["connector"] == "trino"
+
+    _rendered, output = _trino_output(tmp_path)
+    assert output["type"] == "trino"
+    assert output["method"] == "none"
+    assert output["host"] == "trino.internal"
+    assert output["port"] == 8080
+    assert output["http_scheme"] == "http"
+    assert output["database"] == "lake"
+    assert output["schema"] == "dbt_dev"
+    assert output["threads"] == 1
+    # The writing identity is separable from the reading one without editing
+    # the file: TRINO_USER, defaulting to the discovered user.
+    assert output["user"] == "{{ env_var('TRINO_USER', 'dex_ro') }}"
+
+    config = yaml.safe_load(
+        (tmp_path / ".dex" / "config.yml").read_text(encoding="utf-8")
+    )
+    assert config["trino"]["dev_schema"] == "dbt_dev"
+
+
+@pytest.mark.parametrize(
+    ("env", "method", "key", "secret"),
+    [
+        ({"TRINO_PASSWORD": "hunter2-never-rendered"}, "ldap", "password", "hunter2"),
+        ({"TRINO_JWT_TOKEN": "eyJ-never-rendered"}, "jwt", "jwt_token", "eyJ"),
+    ],
+)
+def test_init_trino_renders_the_discovered_method_with_no_secret(
+    tmp_path: Path, capsys, monkeypatch, env, method, key, secret
+):
+    pytest.importorskip("trino")
+    _trino_env(monkeypatch, **env)
+    _seed_trino_config(tmp_path, host="trino.internal", user="dbt", dev_catalog="lake")
+    rc, envelope = _run(_init_argv(tmp_path, "--connector", "trino"), capsys)
+    assert rc == 0, envelope
+
+    rendered, output = _trino_output(tmp_path)
+    assert output["method"] == method
+    assert output["http_scheme"] == "https"
+    # dbt-trino turns certificate checking off when cert is unset, for the very
+    # identity whose credential this profile sends.
+    assert output["cert"] is True
+    assert output["port"] == 443
+    assert secret not in rendered
+    assert "env_var(" in output[key]
+
+
+def test_init_trino_renders_a_cap_the_build_can_tighten(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """The references have to survive the yaml round trip intact: an f-string
+    collapses the closing `}}` to one brace, which renders a profile that
+    parses, applies, and caps nothing. The defaults are real caps: on Trino
+    '0s' fails every statement rather than meaning unlimited."""
+
+    pytest.importorskip("trino")
+    from exmergo_dex_core.transform import init
+
+    _trino_env(monkeypatch, TRINO_URL="http://dex_ro@trino.internal:8080")
+    _seed_trino_config(tmp_path, dev_catalog="lake")
+    rc, envelope = _run(_init_argv(tmp_path, "--connector", "trino"), capsys)
+    assert rc == 0, envelope
+
+    _rendered, output = _trino_output(tmp_path)
+    properties = output["session_properties"]
+    assert properties == init.trino_session_properties()
+    assert properties["query_max_run_time"] == (
+        "{{ env_var('" + init.TRINO_QUERY_MAX_RUN_TIME_ENV + "', '300s') }}"
+    )
+    assert properties["query_max_scan_physical_bytes"].endswith("', '100GB') }}")
+
+
+def test_init_trino_needs_a_dev_catalog(tmp_path: Path, capsys, monkeypatch):
+    pytest.importorskip("trino")
+    _trino_env(monkeypatch, TRINO_URL="http://dex_ro@trino.internal:8080")
+    _seed_trino_config(tmp_path)
+    rc, envelope = _run(_init_argv(tmp_path, "--connector", "trino"), capsys)
+    assert rc == 1
+    assert "trino.dev_catalog" in envelope["errors"][0]
+
+
+def test_init_trino_refuses_a_dev_target_that_is_a_source(
+    tmp_path: Path, capsys, monkeypatch
+):
+    pytest.importorskip("trino")
+    _trino_env(monkeypatch, TRINO_URL="http://dex_ro@trino.internal:8080")
+    _seed_trino_config(
+        tmp_path, dev_catalog="lake", dev_schema="app", catalogs=["lake.app"]
+    )
+    rc, envelope = _run(_init_argv(tmp_path, "--connector", "trino"), capsys)
+    assert rc == 1
+    assert "trino.catalogs" in envelope["errors"][0]
+
+
+def test_init_trino_refuses_galaxy_before_rendering(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """A profile for a deployment dex refuses would hand dbt a target the guard
+    can never see, so nothing is written."""
+
+    _trino_env(
+        monkeypatch, TRINO_URL="https://me:pw@acme.trino.galaxy.starburst.io:443"
+    )
+    _seed_trino_config(tmp_path, deployment="galaxy", dev_catalog="lake")
+    rc, envelope = _run(_init_argv(tmp_path, "--connector", "trino"), capsys)
+    assert rc == 1
+    assert "Starburst Galaxy" in envelope["errors"][0]
+    assert not (tmp_path / "analytics").exists()

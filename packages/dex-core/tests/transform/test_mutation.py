@@ -488,7 +488,7 @@ def test_the_comparison_projects_four_counts_and_nothing_else(dialect):
         assert projection.find(sqlglot.exp.AggFunc) is not None
 
 
-@pytest.mark.parametrize("dialect", ["redshift", "databricks", "clickhouse"])
+@pytest.mark.parametrize("dialect", ["redshift", "databricks", "clickhouse", "trino"])
 def test_a_warehouse_without_a_verified_fingerprint_gets_no_comparison(dialect):
     """A fingerprint that silently skipped a column would label a mutant that
     changes it as equivalent, so an unverified one is never guessed at."""

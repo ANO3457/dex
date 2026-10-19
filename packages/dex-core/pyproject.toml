@@ -26,6 +26,7 @@ keywords = [
   "redshift",
   "postgres",
   "clickhouse",
+  "trino",
   "metricflow",
   "ossie",
   "agent-skills",
@@ -132,6 +133,14 @@ redshift = [
 clickhouse = [
   "clickhouse-connect>=0.8",
   "dbt-clickhouse>=1.8",
+  "exmergo-dex-core[sql]",
+]
+# Like [clickhouse], the extra carries the dbt adapter so transform can build
+# against a Trino dev schema with one install. dbt-trino pins the same client
+# range, so the two always resolve to one trino package.
+trino = [
+  "trino>=0.336,<1",
+  "dbt-trino>=1.10",
   "exmergo-dex-core[sql]",
 ]
 # The local semantic-layer query backend (`explore semantic query --local`):
@@ -243,10 +252,10 @@ values-free-conformance = ["pytest>=8", "exmergo-dex-core[duckdb]"]
 # does mean this reference list is the part that rots, so a test asserts it covers
 # every extra. Excludes dev and storage-conformance, both contributor tooling rather
 # than a capability: nobody installing "everything dex can do" wants a test runner.
-# This is the heaviest install there is (seven dbt adapters, MetricFlow, and
+# This is the heaviest install there is (eight dbt adapters, MetricFlow, and
 # scikit-learn); the light default and the [duckdb] on-ramp are unchanged.
 all = [
-  "exmergo-dex-core[bigquery,clickhouse,cluster,databricks,duckdb,ossie,postgres,redshift,semantic,semantic-api,slayer,snowflake,sql]",
+  "exmergo-dex-core[bigquery,clickhouse,cluster,databricks,duckdb,ossie,postgres,redshift,semantic,semantic-api,slayer,snowflake,sql,trino]",
 ]
 # Contributor tooling, plus the optional libraries the suite exercises directly
 # (the clustering tests need scikit-learn, the firewall tests need the dialect
@@ -297,5 +306,7 @@ markers = [
   "redshift: Redshift-specific integration tests",
   "clickhouse: ClickHouse-specific integration tests",
   "clickhouse_cloud: narrow ClickHouse Cloud integration tests (protected credentials required)",
+  "trino: Trino-specific integration tests (the keyless local container)",
+  "trino_iceberg: narrow Trino integration tests against the Glue and S3 Iceberg catalog (protected credentials required)",
   "packaging: builds a wheel and runs against it in an isolated environment; slow, needs uv",
 ]

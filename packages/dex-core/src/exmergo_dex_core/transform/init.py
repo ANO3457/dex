@@ -57,6 +57,7 @@ VALID_CONNECTORS = (
     "postgres",
     "redshift",
     "clickhouse",
+    "trino",
 )
 
 
@@ -125,7 +126,8 @@ def init_project(
         raise InitError(
             f"connector '{connector}' is not yet supported for init; run "
             "`transform init <name> --connector "
-            "duckdb|bigquery|snowflake|databricks|postgres|redshift|clickhouse`"
+            + "|".join(c for c in VALID_CONNECTORS if c in _PROFILE_RENDERERS)
+            + "`"
         )
 
     # ``.`` or --in-place scaffolds at the run root using the directory name.
@@ -144,6 +146,15 @@ def init_project(
         )
 
     config = load_config(root) or DexConfig()
+    from ..connect import assert_deployment_supported
+    from ..errors import ConfigurationError
+
+    try:
+        # Before anything is rendered: a profile for a deployment dex refuses
+        # would hand dbt a target the guard can never see.
+        assert_deployment_supported(connector, config)
+    except ConfigurationError as exc:
+        raise InitError(str(exc)) from exc
     profiles_text = render_profile(project_name, path, config, root, project_dir)
 
     files: dict[str, str] = {
@@ -789,6 +800,63 @@ CH_MAX_BYTES_TO_READ_ENV = "DEX_CLICKHOUSE_MAX_BYTES_TO_READ"
 _CH_DEFAULT_MAX_EXECUTION_TIME = "300"
 _CH_DEFAULT_MAX_BYTES_TO_READ = "100000000000"
 
+# Trino's build cap rides the profile's session_properties, the same structural
+# parallel. The literal defaults are real caps for a hand-run `dbt build`: on
+# Trino '0s' is not "unlimited", it fails every statement at once.
+TRINO_QUERY_MAX_RUN_TIME_ENV = "DEX_TRINO_QUERY_MAX_RUN_TIME"
+TRINO_QUERY_MAX_SCAN_BYTES_ENV = "DEX_TRINO_QUERY_MAX_SCAN_PHYSICAL_BYTES"
+_TRINO_DEFAULT_QUERY_MAX_RUN_TIME = "300s"
+_TRINO_DEFAULT_QUERY_MAX_SCAN_BYTES = "100GB"
+
+#: Where a dex-rendered profile carries the env_var references `transform build`
+#: fills from the confirmed budget, per connector: the target's key and the
+#: variables it must reference. Only connectors whose cap rides the profile are
+#: listed. Postgres's cap rides the dbt subprocess's PGOPTIONS, which nothing in
+#: a profile can remove, so it has no entry and is always capped.
+#: ``dev_target.missing_cap_references`` reads profiles against this table, and
+#: the dev-target warning, the guarded-execution report and the build's cap note
+#: all ask it, so the three can never disagree about whether a build was capped.
+BUILD_CAP_REFERENCES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "clickhouse": (
+        "custom_settings",
+        (CH_MAX_EXECUTION_TIME_ENV, CH_MAX_BYTES_TO_READ_ENV),
+    ),
+    "trino": (
+        "session_properties",
+        (TRINO_QUERY_MAX_RUN_TIME_ENV, TRINO_QUERY_MAX_SCAN_BYTES_ENV),
+    ),
+}
+
+
+def _env_ref(name: str, default: str) -> str:
+    """An ``env_var`` reference with a literal default, as dbt renders it.
+
+    Built by concatenation, not by an f-string: ``}}`` is an escape for a single
+    ``}`` inside an f-string, so the Jinja close would silently become one brace
+    and dbt would read the whole thing as a literal string. That renders a
+    profile which parses, applies, and caps nothing.
+    """
+
+    return "{{ env_var('" + name + "', '" + default + "') }}"
+
+
+def trino_session_properties() -> dict[str, Any]:
+    """The ``session_properties`` block a dex-rendered Trino profile carries.
+
+    dbt-trino sends each entry as a session property on every statement it
+    issues, CTAS included, so these are the build's server-side caps. Shared
+    with the dev-target preflight through ``BUILD_CAP_REFERENCES``.
+    """
+
+    return {
+        "query_max_run_time": _env_ref(
+            TRINO_QUERY_MAX_RUN_TIME_ENV, _TRINO_DEFAULT_QUERY_MAX_RUN_TIME
+        ),
+        "query_max_scan_physical_bytes": _env_ref(
+            TRINO_QUERY_MAX_SCAN_BYTES_ENV, _TRINO_DEFAULT_QUERY_MAX_SCAN_BYTES
+        ),
+    }
+
 
 def clickhouse_custom_settings() -> dict[str, Any]:
     """The `custom_settings` block a dex-rendered ClickHouse profile carries.
@@ -799,19 +867,12 @@ def clickhouse_custom_settings() -> dict[str, Any]:
     caller sizing a budget has to be told which of the two they have.
     """
 
-    # Built by concatenation, not by an f-string: `}}` is an escape for a
-    # single `}` inside an f-string, so the Jinja close would silently become
-    # one brace and dbt would read the whole thing as a literal string. That
-    # renders a profile which parses, applies, and caps nothing.
-    def env_ref(name: str, default: str) -> str:
-        return "{{ env_var('" + name + "', '" + default + "') }}"
-
     return {
-        "max_execution_time": env_ref(
+        "max_execution_time": _env_ref(
             CH_MAX_EXECUTION_TIME_ENV, _CH_DEFAULT_MAX_EXECUTION_TIME
         ),
         "timeout_overflow_mode": "throw",
-        "max_bytes_to_read": env_ref(
+        "max_bytes_to_read": _env_ref(
             CH_MAX_BYTES_TO_READ_ENV, _CH_DEFAULT_MAX_BYTES_TO_READ
         ),
         "read_overflow_mode": "throw",
@@ -924,6 +985,92 @@ def _clickhouse_profile(
     )
 
 
+DEFAULT_TRINO_DEV_SCHEMA = "dbt_dev"
+
+
+def _trino_profile(
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
+) -> str:
+    """A single dbt-trino ``dev`` target from the discovered connection, with no
+    secret ever rendered.
+
+    The method follows what discovery found: ``none`` for a cluster that needs
+    no credential, ``ldap`` (dbt-trino's name for password auth) with the
+    password read from ``TRINO_PASSWORD``, or ``jwt`` with the token read from
+    ``TRINO_JWT_TOKEN``, both as ``env_var`` references. The user is an
+    ``env_var`` reference too, defaulting to the discovered one: dex usually
+    reads as a read-only identity, and ``TRINO_USER`` is how the dbt identity
+    that writes the dev schema differs from it without editing the file.
+
+    dbt-trino's ``database`` is the Trino catalog. dbt creates the dev schema
+    but never the catalog, so ``trino.dev_catalog`` must name one that exists
+    and accepts writes; there is no safe default for it.
+    """
+
+    from ..config import TrinoTarget
+    from ..connect import CredentialDiscoveryError, resolve_trino_connection
+
+    target = config.trino or TrinoTarget()
+    try:
+        params, _method, _warnings = resolve_trino_connection(target, os.environ, root)
+    except CredentialDiscoveryError as exc:
+        raise InitError(str(exc)) from exc
+    if not target.dev_catalog:
+        raise InitError(
+            "trino.dev_catalog is not set in .dex/config.yml: dbt builds into a "
+            "catalog it cannot create, so name a writable one (an iceberg, hive "
+            "or delta_lake catalog), e.g. `dex config set trino.dev_catalog lake`"
+        )
+    dev_schema = target.dev_schema or DEFAULT_TRINO_DEV_SCHEMA
+    dev = f"{target.dev_catalog}.{dev_schema}".lower()
+    if any(dev == entry.strip().lower() for entry in target.catalogs):
+        raise InitError(
+            f"the dev target {dev} is also a source in trino.catalogs; dbt builds "
+            "must write where dex does not read (set trino.dev_schema to a "
+            "dedicated schema)"
+        )
+
+    target.dev_schema = dev_schema
+    config.trino = target
+
+    output: dict[str, Any] = {"type": "trino"}
+    if params.get("jwt_token") is not None:
+        output["method"] = "jwt"
+        output["jwt_token"] = "{{ env_var('TRINO_JWT_TOKEN') }}"  # noqa: S105
+    elif params.get("password") is not None:
+        output["method"] = "ldap"
+        output["password"] = "{{ env_var('TRINO_PASSWORD') }}"  # noqa: S105
+    else:
+        output["method"] = "none"
+    output.update(
+        {
+            "user": _env_ref("TRINO_USER", str(params["user"])),
+            "host": str(params["host"]),
+            "port": int(params["port"]),
+            "http_scheme": str(params["http_scheme"]),
+            # dbt-trino hands the client verify=None when cert is unset, which
+            # turns TLS certificate checking off for the identity whose
+            # password or token this profile sends. Explicit, so dbt verifies
+            # as dex's own client does.
+            "cert": True,
+            "database": target.dev_catalog,
+            "schema": dev_schema,
+            # One thread keeps a shared cluster from parallel bursts; the
+            # per-statement load is the guarded quantity on db-load gating.
+            "threads": 1,
+            "session_properties": trino_session_properties(),
+        }
+    )
+    return yaml.safe_dump(
+        {project_name: {"target": "dev", "outputs": {"dev": output}}},
+        sort_keys=False,
+    )
+
+
 _PROFILE_RENDERERS: dict[
     str, Callable[[str, str | None, DexConfig, Path, str], str]
 ] = {
@@ -934,6 +1081,7 @@ _PROFILE_RENDERERS: dict[
     "postgres": _postgres_profile,
     "redshift": _redshift_profile,
     "clickhouse": _clickhouse_profile,
+    "trino": _trino_profile,
 }
 
 

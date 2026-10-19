@@ -619,6 +619,7 @@ class DexEngine:
                 t and (t.workgroup or t.cluster_identifier or t.host or t.dbname)
             ),
             "clickhouse": lambda t: bool(t and (t.host or t.database)),
+            "trino": lambda t: bool(t and t.host),
         }
         target = getattr(self.config, connector, None)
         if configured.get(connector, lambda _t: False)(target):
@@ -715,6 +716,14 @@ class DexEngine:
                 database=getattr(adapter, "_database", None)
                 or getattr(configured, "database", None),
                 databases=shown(self.scopes or getattr(configured, "databases", None)),
+            )
+        if connector == "trino":
+            # The adapter's host is the bare hostname discovery resolved, never
+            # the URL it may have come from, which can carry a password.
+            return compact(
+                host=getattr(adapter, "host", None)
+                or getattr(configured, "host", None),
+                catalogs=shown(self.scopes or getattr(configured, "catalogs", None)),
             )
         return {}
 

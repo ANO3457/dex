@@ -50,6 +50,17 @@ def test_the_three_wrappers_stay_byte_identical():
     assert len(contents) == 1, [path.as_posix() for path in WRAPPERS]
 
 
+def test_the_wrapper_knows_every_engine_connector(wrapper):
+    """An engine connector the wrapper does not name falls back to the DuckDB
+    extra, so the installed engine lacks the client and refuses every command for
+    a user who configured nothing wrong. Checked against the engine's own table,
+    so the next connector cannot land without the wrapper learning it."""
+
+    from exmergo_dex_core.adapters import _DIALECTS
+
+    assert set(wrapper._KNOWN_CONNECTORS) == set(_DIALECTS)
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
