@@ -989,7 +989,11 @@ DEFAULT_TRINO_DEV_SCHEMA = "dbt_dev"
 
 
 def _trino_profile(
-    project_name: str, path: str | None, config: DexConfig, root: Path
+    project_name: str,
+    path: str | None,
+    config: DexConfig,
+    root: Path,
+    project_dir: str = ".",
 ) -> str:
     """A single dbt-trino ``dev`` target from the discovered connection, with no
     secret ever rendered.

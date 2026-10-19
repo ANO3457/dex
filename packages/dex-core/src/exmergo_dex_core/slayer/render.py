@@ -118,6 +118,10 @@ EXCLUDED: dict[str, str] = {
         "SLayer probes a ClickHouse server's profile through a live client while "
         "preparing a correlated semi-join, which a dry run would not survive"
     ),
+    "trino": (
+        "SLayer has a Trino dialect, but no golden of the SQL it renders for "
+        "Trino has been read yet, so dex cannot vouch that its numbers are right"
+    ),
 }
 
 

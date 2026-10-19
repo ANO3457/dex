@@ -1515,7 +1515,12 @@ def grain_drift(
         if row_count == 0:
             findings.append(no_rows(dataset))
             continue
-        aggregates = list(aggregate_columns(dataset.identifier, columns))
+        probe = probes.get(dataset.identifier)
+        aggregates = list(
+            probe.aggregates
+            if probe is not None and probe.aggregates is not None
+            else aggregate_columns(dataset.identifier, columns)
+        )
         if row_count is None:
             # No free count before the scan; the scan's own COUNT(*) is the
             # count, and adapters keep it for the rest of the command.
@@ -1533,12 +1538,6 @@ def grain_drift(
             for _baseline, relation in plan.fanout_pairs
             if relation.from_dataset == dataset.identifier
         ]
-        probe = probes.get(dataset.identifier)
-        aggregates = (
-            probe.aggregates
-            if probe is not None and probe.aggregates is not None
-            else aggregate_columns(dataset.identifier, columns)
-        )
         for aggregate in aggregates:
             fraction = aggregate.null_fraction
             if fraction is None or fraction < 0.95:

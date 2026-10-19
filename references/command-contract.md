@@ -1030,8 +1030,8 @@ handshake and columnar cap as the local MetricFlow backend, so SLayer never open
 a datasource, never reads a credential, and never touches the warehouse. A query's
 metrics are saved measures on one model, grouped by that model's own columns, with
 `--where` in SLayer's own filter syntax; an ad-hoc formula is refused. DuckDB,
-BigQuery, Snowflake, Postgres and Redshift are supported, and Databricks and
-ClickHouse are refused with the reason. Values SLayer caches in a model file
+BigQuery, Snowflake, Postgres and Redshift are supported, and Databricks,
+ClickHouse and Trino are refused with the reason. Values SLayer caches in a model file
 (`sampled_values`) are never read. See `references/semantic-layer.md`.
 `maintain` reads the same models on every axis without opening a SLayer
 datasource or SLayer storage: the baseline records the SLayer release and model
