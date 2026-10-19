@@ -16,7 +16,8 @@
             "group": "Guardrails",
             "pages": [
               "guardrails/cost-controls",
-              "guardrails/pii-policy"
+              "guardrails/pii-policy",
+              "guardrails/values-free-mode"
             ]
           },
           {

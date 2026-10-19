@@ -578,11 +578,17 @@ class BigQueryAdapter:
                 # An unqueryable shape discovered only at query time (for
                 # example an external table whose source is unreadable):
                 # degrade to metadata-only rather than failing the profile.
+                # The note names BigQuery's structured reason and never its
+                # message: notes are cached and copied into `explore map`, and
+                # a server message can quote the value it failed on (#591).
+                reason = _bad_request_reason(exc)
                 self._note(
                     identifier,
-                    f"aggregate profiling failed and was skipped: {exc.message}"
-                    if hasattr(exc, "message")
-                    else "aggregate profiling failed and was skipped",
+                    "aggregate profiling failed and was skipped (BigQuery "
+                    f"refused the batch: {reason})"
+                    if reason
+                    else "aggregate profiling failed and was skipped (BigQuery "
+                    "refused the batch)",
                 )
                 results.extend(self._empty_aggregate(col) for col in batch)
                 continue
@@ -1384,3 +1390,18 @@ def _parse_bytes_billed_required(message: str) -> float | None:
 
     match = _BYTES_BILLED_REQUIRED_RE.search(message)
     return float(match.group(1)) if match else None
+
+
+def _bad_request_reason(exc: Exception) -> str | None:
+    """BigQuery's own code for a refusal (``invalidQuery``, ``accessDenied``),
+    read from the structured errors the client attaches, or None.
+
+    A code from a fixed vocabulary, so unlike the message it can never quote a
+    value; anything that does not look like one is dropped rather than echoed.
+    """
+
+    for error in getattr(exc, "errors", None) or []:
+        reason = error.get("reason") if isinstance(error, dict) else None
+        if isinstance(reason, str) and reason.isidentifier():
+            return reason
+    return None
