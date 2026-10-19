@@ -14,6 +14,139 @@ pending fragments into a new section below. See
 
 <!-- towncrier release notes start -->
 
+## [1.15.0] - 2026-10-19
+
+### Added
+
+- **`explore semantic query` and `values` run on a SLayer layer.** Under
+  `semantic.vendor: slayer` both commands used to refuse. They now answer locally:
+  SLayer renders the SQL as a dry run, and dex runs it through the same PII gate,
+  relation check, cost confirmation and result cap as a local dbt layer, so results
+  report `execution: dex`. SLayer never opens a datasource, reads a credential or
+  touches the warehouse. A query takes saved measures named `model.measure` from
+  one model, groups by that model's own columns (`orders.status`), buckets its
+  default time dimension with `--grain`, and filters with `--where` in SLayer's own
+  syntax (`status = 'paid'`). `values` reads a column's domain on its own model, or
+  the values present for one metric with `--metric`. DuckDB, BigQuery, Snowflake,
+  Postgres and Redshift are supported; Databricks and ClickHouse are refused with
+  the reason, because SLayer's SQL for them would return wrong numbers or need a
+  live server. ([#696](https://github.com/exmergo/dex/pull/696))
+- **Trino is a connector: self-hosted Trino, Starburst Enterprise and Trino on
+  EMR.** Install `exmergo-dex-core[trino]` and set `connector: trino`. The whole
+  explore, transform and maintain loop runs against `catalog.schema.table`
+  relations, always written in full, since dex connects with no session catalog.
+  Scans are priced in cluster-seconds from a free `EXPLAIN (TYPE IO)` and capped
+  server-side with `query_max_run_time` and `query_max_scan_physical_bytes`, on
+  dex's own queries and on dbt builds through the rendered profile. Connections
+  come from `TRINO_URL`, the `TRINO_*` environment, committed config, or a dbt
+  profile, with password or JWT auth over HTTPS. Starburst Galaxy is accepted in
+  config and refused until its uptime billing is modeled. Setup, the cost model
+  and an access-control rule that makes the dex identity read-only are in
+  `references/trino.md`.
+- **Values-free mode: explore a warehouse with no table value in any result.** A
+  host whose model may see no cell value selects it with `--values-free`, pins it
+  for every command with `DEX_RESULT_MODE=values_free`, or builds
+  `DexEngine(result_mode="values_free")`, which pins the engine so a call asking
+  for full results is refused. `.dex/config.yml` never selects it. In the mode
+  `explore profile` withholds `min_value`, `max_value` (numeric ones too) and
+  `value_domain`; `explore query` accepts only statements whose every output column
+  is an allowlisted aggregate (`COUNT`, `COUNT(DISTINCT ...)`, `SUM`, `AVG`, the
+  `STDDEV` and `VARIANCE` family, and the like) returning one row, and refuses
+  column-keyed `GROUP BY`, `MIN`/`MAX` and other value-returning aggregates,
+  `DISTINCT`, `LIMIT`, `ORDER BY` and windows with a stable code and no cell; an
+  error carries a code instead of a warehouse's words; commands not reviewed for the
+  mode refuse; and every envelope says `data.result_mode: "values_free"`. A
+  conformance suite ships in the package (`exmergo_dex_core.values_free_conformance`,
+  extra `[values-free-conformance]`) so a host can check the release it pins. The
+  mode does not stop membership probing (`count(*) where email = '...'`), a count of
+  one identifying a row, or an aggregate over a single row returning that row's
+  value; a host bounds those with a cost ceiling and a query budget.
+
+### Fixed
+
+- **`transform init` commits portable warehouse paths.** A warehouse inside
+  the repo is now written repo-relative in `.dex/config.yml`
+  (`warehouse/x.duckdb`) and project-relative in `profiles.yml`
+  (`../warehouse/x.duckdb`), so the committed files carry no absolute path
+  and still resolve to the same file on every machine: `connect.py`
+  resolves config paths against the repo root, and dbt resolves profile
+  paths against its cwd, the project dir. A warehouse outside the repo
+  still keeps an absolute path in both, because a relative one could not
+  reach it. The init envelope reports which form was chosen in
+  `warehouse_path`. ([#642](https://github.com/exmergo/dex/pull/642))
+- **Dynamic YAML snapshot relations no longer disappear from reference reports.** `transform references` now marks model or source queries incomplete when a snapshot's `relation` uses a dynamic `ref()` or `source()` argument, and identifies the snapshot file so callers do not mistake an unresolved read for an unused relation. ([#692](https://github.com/exmergo/dex/pull/692))
+- **`explore semantic list` reports a SLayer metric's column filter.** SLayer has
+  no per-metric filter: a predicate meant for one metric sits on the column its
+  formula aggregates (`Column.filter`). The catalog read only the model's own
+  `filters`, so a metric narrowed that way was listed as measuring every row. A
+  metric's `filter` now includes the column filter when every aggregation in its
+  formula reads a column carrying that same filter. A ratio with only one filtered
+  side is narrowed in part only, so it still reports just the model's filters. A
+  formula SLayer's parser cannot read reports the model's filters, with a note. ([#693](https://github.com/exmergo/dex/pull/693))
+- **Reading a SLayer layer no longer changes the SQL dex generates.** Importing
+  SLayer adds its reserved words to sqlglot's quoting rules for every dialect, for
+  the rest of the process. After any command read a SLayer model, the SQL dex
+  regenerates itself (the query firewall's row cap, `transform test --mutate`, row
+  attribution in `transform plan`) quoted those words too. On Snowflake,
+  `SELECT values FROM t` became `SELECT "values" FROM t`, which names a different,
+  case-sensitive column. dex now puts sqlglot's own rules back after SLayer
+  loads, and applies SLayer's only while SLayer renders a query or computes schema
+  drift. SLayer's own SQL still quotes them. ([#695](https://github.com/exmergo/dex/pull/695))
+- **`transform build --verify` settles as one calibration point.** A build's dbt
+  settlement row was written with a `null` `reservation_id`, while the folded
+  `--verify` count statements settled through the cost gate under the gate's
+  `reservation_id`. Both rows carried the combined build-plus-verification
+  estimate, so `settled_ratios` treated one verified build as two separate
+  runs (each dividing only its own half of the actual spend by the whole
+  estimate) and pulled over-ceiling calibration hints down and reached the
+  3-run sample threshold early. `transform build` now stamps its dbt settlement
+  row with the gate's `reservation_id` when a gate exists (`null` only when the
+  build settled with no gate), so the dbt row and verification rows join into a
+  single billed-over-estimated ratio. ([#697](https://github.com/exmergo/dex/pull/697))
+- **`transform test --mutate` now translates settled batch spend into credits and compute-unit-hours.** On Snowflake and ClickHouse Cloud, the settled `seconds_billed` of a mutation batch (including settled warehouse uptime) is translated once through the adapter's `compute_spend_translation` so `data.spend` reports `credits_billed` (and `usd_billed` when configured) or `compute_unit_hours_billed`, and ClickHouse Cloud proves live capacity during mutation pricing before the first `dbt test` run. ([#701](https://github.com/exmergo/dex/pull/701))
+- **`explore semantic query` screens the columns a query reads without naming
+  them.** The PII gate checked the tokens a caller named in `--group-by` and
+  `--where` against the profile. Some columns reach the result through a token
+  that has no column behind it, and those were screened by name only:
+  `metric_time`, a token carrying a grain suffix, a dimension defined as an
+  expression (`upper(email)` named `contact_key`), and a SLayer saved measure in a
+  filter (`revenue > 100` reads `amount`). Now `metric_time` is screened as each
+  measure's time dimension. A grain-suffixed token is screened as the dimension it
+  buckets. An expression is screened by every column it reads, and refused when
+  dex cannot parse it. A saved measure is screened by the columns its formula
+  reads. A `query` result also names each dimension that only the name heuristic
+  screened, as `values` already did. The hosted backend cannot resolve
+  `metric_time`, so it discloses that `metric_time` was screened by name. ([#707](https://github.com/exmergo/dex/pull/707))
+- **SLayer metric queries answer the same on every Snowflake and Redshift
+  account.** On Snowflake, `--grain week` and `--grain week_sunday` followed the
+  account's `WEEK_START`, so an account set to Sunday bucketed `week` from Sunday
+  and `week_sunday` from Saturday. dex now pins both to the day the grain names,
+  whatever `WEEK_START` says. On Redshift, a model or column spelt with capitals
+  (`Orders.Status`) came back under the lowercase name Redshift folds a quoted
+  identifier to; it now comes back as the model spells it, and two result columns
+  that differ only in case are refused by name. Postgres now has a live smoke run
+  of a SLayer query beside BigQuery, Snowflake and Redshift. ([#708](https://github.com/exmergo/dex/pull/708))
+- **`maintain check` and `maintain grain` pay BigQuery's 10 MB minimum once per table rather than once per probe.** The drift probes one table needs (key distinct counts, composite and declared grains, declared join arity, the null-fraction survey, and the semantic dimension counts under `check`) now run as one statement per table, so a sweep over many small tables bills a floor per table instead of two to four. The estimate drops the same way, and also stops reserving a profile's escalation queries that the null survey never issues. Findings are unchanged. A block-sampled table keeps its null survey as a separate statement, and a budget that cannot cover the combined statement falls back to the separate probes. Closes #275. ([#710](https://github.com/exmergo/dex/pull/710))
+- **A BigQuery profile note no longer quotes the server's message.** When BigQuery
+  refused a profiling batch, the `data_quality` note copied the server's error text,
+  which can quote the value a statement failed on, into the cache and from there
+  into `explore map`. The note now names BigQuery's structured reason code instead.
+
+### Security
+
+- **`explore query` refuses time travel.** The query firewall approved a read of a
+  table's past, such as `FOR VERSION AS OF` on Databricks, `FOR SYSTEM_TIME AS OF`
+  on BigQuery, or `AT(...)`, `BEFORE(...)` and `CHANGES(...)` on Snowflake, as if it
+  were a read of the table as it is now, and sent the clause on unchanged. The
+  exploration cache and its PII verdicts describe the current table, so `SELECT *`
+  over an older snapshot could return a column that had since been dropped and was
+  never profiled or flagged. Any table reference that carries a version, a point in
+  time, or a change stream is now refused before anything reaches the warehouse,
+  wherever it appears in the statement, including inside a `WHERE` subquery. The
+  check matches sqlglot's node shape rather than a dialect, so a dialect added
+  later is covered without a change here. Reading the current table is unaffected.
+
+
 ## [1.14.1] - 2026-10-18
 
 ### Added
