@@ -300,13 +300,14 @@ is a real cost even when nothing appears on an invoice.
 ## Semantic layers
 
 The semantic layer is a separate axis from the transformation project, chosen
-once per repository in `.dex/config.yml`. dex reads two vendors across three
+once per repository in `.dex/config.yml`. dex reads three vendors across four
 deployments today:
 
 | Semantic layer | Hosted | Queryable | `vendor` / `deployment` | Read through |
 | --- | :---: | :---: | --- | --- |
 | <img src="https://www.exmergo.com/connectors/dbt.png" width="20" height="20" alt=""> **dbt** | ✅ | ✅ | `dbt` / `local` or `dbt_cloud` | MetricFlow locally, with the rendered SQL run through the dex connector and its cost guard, or the hosted dbt Cloud Semantic Layer over its API |
 | <img src="https://www.exmergo.com/connectors/ossie.png" width="20" height="20" alt=""> **[Apache Ossie](https://github.com/apache/ossie)** (incubating) | ❌ | ❌ | `ossie` / `local` | Native documents read straight out of the repository, with no dbt project and no MetricFlow anywhere in the path |
+| **[SLayer](https://github.com/MotleyAI/slayer)** | ❌ | ✅ | `slayer` / `local` | SLayer model files in the repository, validated by one pinned SLayer release; SLayer renders a metric query and the dex connector runs it under the cost guard |
 
 Ossie is catalog-first, and that is a statement about the format rather than
 about how far we got: Ossie specifies interchange metadata and no portable query
