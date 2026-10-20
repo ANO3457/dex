@@ -138,6 +138,90 @@ def test_inventory_rank_states_its_basis(duckdb_file: Path, capsys):
     assert "connectivity" in basis
 
 
+def _inventory_from_a_stub(monkeypatch, rows: dict[str, int | None]):
+    """An inventory whose objects carry the row counts the connector reported.
+
+    The DuckDB fixture cannot stand in here: it always knows a row count, and the
+    defect this pins is what `--rank` says when nothing does (Trino's
+    `information_schema` carries none, and neither does any view on the other
+    connectors).
+    """
+
+    from exmergo_dex_core import DexEngine
+    from exmergo_dex_core.adapters.base import ObjectMeta
+    from exmergo_dex_core.envelope import Paradigm
+
+    class StubAdapter:
+        paradigm = Paradigm.FREE_LOCAL
+
+        def list_objects(self, *, include_views: bool = True):
+            return [
+                ObjectMeta(
+                    identifier=f"db.shop.{name}",
+                    object_type="table",
+                    schema="shop",
+                    name=name,
+                    row_count=row_count,
+                    byte_size=0,
+                    column_count=4,
+                )
+                for name, row_count in rows.items()
+            ]
+
+    monkeypatch.setattr(
+        DexEngine, "_adapter", lambda self, cmd=None, **kw: StubAdapter()
+    )
+    return DexEngine().inventory(rank=True)
+
+
+def test_inventory_rank_without_row_counts_does_not_claim_a_size_order(monkeypatch):
+    """No object reported a count, so size ranked nothing (#717).
+
+    The note used to say "ranked by size (row count)" over an inventory where
+    every object tied on that signal and the order was the catalog's, which is
+    exactly the state `explore inventory --rank` reports on Trino.
+    """
+
+    result = _inventory_from_a_stub(
+        monkeypatch, {"orders": None, "customers": None, "stg_orders": None}
+    )
+
+    basis = " ".join(result.notes)
+    assert "ranked by size" not in basis
+    assert "no object reported a count" in basis
+    assert "size (row count) contributed nothing" in basis
+    # The other two signals are still claimed, and they did order the list.
+    assert "naming convention" in basis
+    assert "shape (column count)" in basis
+
+
+def test_inventory_rank_with_row_counts_keeps_the_size_note(monkeypatch):
+    """One object with a count is enough for size to have ranked something."""
+
+    result = _inventory_from_a_stub(
+        monkeypatch, {"orders": 10, "customers": 5, "stg_orders": 2}
+    )
+
+    basis = " ".join(result.notes)
+    assert "ranked by size (row count)" in basis
+    assert "reported no row count" not in basis
+
+
+def test_inventory_rank_names_the_objects_size_could_not_rank(monkeypatch):
+    """A partial inventory says how much of it size could not order, rather than
+    letting the reader believe every object was compared by size."""
+
+    result = _inventory_from_a_stub(
+        monkeypatch, {"orders": 10, "customers": 5, "v_orders": None}
+    )
+
+    notes = result.notes
+    assert "ranked by size (row count)" in " ".join(notes)
+    assert (
+        "1 of 3 object(s) reported no row count, so size ranked only the rest" in notes
+    )
+
+
 def test_inventory_without_rank_reports_empty_notes(duckdb_file: Path, capsys):
     # always_reports_notes: an empty list is itself the "nothing to say" signal,
     # and it must still be present rather than omitted (map/diagram/query convention).
