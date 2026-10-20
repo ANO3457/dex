@@ -267,6 +267,7 @@ dev = ["ruff==0.15.19", "towncrier==26.9.0", "scikit-learn>=1.4", "exmergo-dex-c
 
 [project.urls]
 Homepage = "https://www.exmergo.com/dex"
+Documentation = "https://docs.exmergo.com/dex"
 Repository = "https://github.com/exmergo/dex"
 Changelog = "https://github.com/exmergo/dex/blob/main/CHANGELOG.md"
 Issues = "https://github.com/exmergo/dex/issues"
