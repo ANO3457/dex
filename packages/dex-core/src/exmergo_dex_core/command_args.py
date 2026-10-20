@@ -564,8 +564,13 @@ def stamp_spend(result: Result, adapter: Adapter) -> Result:
             result.cost = gate.cost()
         result.spend = spend
         # Settlement is the honest moment to say what did not bind: the command
-        # has spent, and the caller is looking at the number.
-        result.warnings = [*result.warnings, *gate.warnings()]
+        # has spent, and the caller is looking at the number. What settling
+        # added beyond the statements is explained beside it.
+        result.warnings = [
+            *result.warnings,
+            *gate.warnings(),
+            *gate.settlement_notes,
+        ]
     return result
 
 

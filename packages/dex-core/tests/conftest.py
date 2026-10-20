@@ -119,8 +119,9 @@ def fake_sf_connection():
     Requires the real snowflake-connector-python library (the [snowflake]
     extra) for its error types; skipped when absent, but CI and the release
     gate install the extra, so the Snowflake safety families run everywhere
-    that matters. The DEX_WH warehouse starts SUSPENDED so resume-minimum
-    behavior is on by default; tests that want a warm warehouse flip its state.
+    that matters. The DEX_WH warehouse starts SUSPENDED with a 60-second
+    AUTO_SUSPEND, so a billed command resumes it and owes the resume minimum and
+    the idle tail by default; tests that want a warm warehouse flip its state.
     """
 
     pytest.importorskip("snowflake.connector")
@@ -317,6 +318,78 @@ def fake_clickhouse_connection():
         FakeGrant(user_name="dbt_dev", access_type="SELECT", database="dbt_dev"),
     ]
     return FakeClickHouseConnection(tables=tables, grants=grants)
+
+
+@pytest.fixture
+def fake_trino_connection():
+    """The standard populated fake Trino connection (see tests/fakes/trino.py).
+
+    Requires the real trino client (the [trino] extra) for its error types;
+    skipped when absent, but CI and the release gate install the extra, so the
+    Trino safety families run everywhere that matters.
+
+    The shape mirrors the other connectors' fixtures (a small ``customers``, a
+    large ``events``) across the things only Trino has: several catalogs of
+    different kinds on one cluster, a nested ``array(varchar)`` column and a
+    ``char(10)`` one, a view, and a federated ``postgresql`` catalog whose
+    table has no statistics, so the floor estimate is on by default rather
+    than opt-in.
+    """
+
+    pytest.importorskip("trino")
+    from fakes.trino import FakeTrinoConnection, FakeTrinoTable
+
+    tables = [
+        FakeTrinoTable(
+            catalog="memory",
+            schema="shop",
+            name="customers",
+            columns=[
+                ("id", "bigint", True),
+                ("email", "varchar", True),
+                ("zip", "char(10)", True),
+                ("tags", "array(varchar)", True),
+                ("created_at", "timestamp(3)", True),
+            ],
+            estimate_bytes=5_000_000_000,  # 5 GB -> a non-trivial seconds estimate
+        ),
+        FakeTrinoTable(
+            catalog="memory",
+            schema="shop",
+            name="events",
+            columns=[
+                ("id", "bigint", True),
+                ("payload", "varchar", True),
+                ("occurred_at", "date", True),
+            ],
+            estimate_bytes=50_000_000_000,  # 50 GB
+        ),
+        FakeTrinoTable(
+            catalog="memory",
+            schema="shop",
+            name="v_totals",
+            columns=[("customer_id", "bigint", True), ("total", "double", True)],
+            estimate_bytes=1_000_000,
+            table_type="VIEW",
+        ),
+        FakeTrinoTable(
+            catalog="pg",
+            schema="public",
+            name="accounts",
+            columns=[("id", "integer", False), ("owner", "varchar(64)", True)],
+            estimate_bytes=None,
+        ),
+    ]
+    catalogs = {
+        "memory": "memory",
+        "pg": "postgresql",
+        "lake": "iceberg",
+        "tpch": "tpch",
+        "system": "system",
+    }
+    return FakeTrinoConnection(
+        tables=tables, catalogs=catalogs, empty_schemas={"lake": ["dbt_dev"]}
+    )
 
 
 def write_manifest(

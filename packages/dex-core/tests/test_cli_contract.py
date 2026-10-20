@@ -448,6 +448,87 @@ def test_every_group_carries_its_own_help_text():
         assert " ".join(help_text.split()) in normalized_out
 
 
+def _walk_parsers(parser, path=()):
+    """Yield (command path, parser) for the root and every subparser beneath it."""
+
+    import argparse
+
+    yield path, parser
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, child in action.choices.items():
+                yield from _walk_parsers(child, (*path, name))
+
+
+def test_every_subcommand_and_argument_has_help():
+    """`--help` is where agents look (they ran it in about half of the benchmark
+    trials) and what the published CLI reference renders from, so a flag added
+    without help, or a subcommand without a summary, fails here rather than
+    shipping as a bare name."""
+
+    import argparse
+    import importlib.util
+    import re
+
+    from exmergo_dex_core.cli import (
+        _EPILOG,
+        _GROUP_HELP,
+        _SUBCOMMAND_HELP,
+        _build_parser,
+    )
+
+    expected = {
+        (group, name) for group, names in COMMAND_SURFACE.items() for name in names
+    }
+    assert set(_SUBCOMMAND_HELP) == expected
+
+    parser = _build_parser()
+    gaps: list[str] = []
+    for path, sub in _walk_parsers(parser):
+        command = " ".join(("dex", *path))
+        if path and not sub.description:
+            gaps.append(f"{command}: no description")
+        for action in sub._actions:
+            if isinstance(action, argparse._HelpAction):
+                continue
+            label = action.option_strings[-1] if action.option_strings else action.dest
+            if isinstance(action, argparse._SubParsersAction):
+                # The groups' own lines are the orientation `dex --help` opens
+                # with, held to their own test above; the 60-character budget
+                # is for the subcommand lists beneath them.
+                limit = 60 if path else 200
+                gaps.extend(
+                    f"{command} {choice.dest}: summary missing or over {limit}"
+                    for choice in action._choices_actions
+                    if not choice.help or len(choice.help) > limit
+                )
+                continue
+            if not action.help or action.help == argparse.SUPPRESS:
+                gaps.append(f"{command} {label}: no help")
+            elif len(action.help) > 80:
+                gaps.append(f"{command} {label}: help over 80 characters")
+            if action.dest == "argument" and action.metavar is None:
+                gaps.append(f"{command}: positional shown as 'argument'")
+    assert not gaps, "\n".join(gaps)
+
+    checker_path = Path(__file__).resolve().parents[3] / "scripts/check_no_em_dashes.py"
+    if not checker_path.is_file():
+        pytest.skip("em-dash checker not present outside the repository")
+    spec = importlib.util.spec_from_file_location("check_no_em_dashes", checker_path)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    # The prose, not the rendered help, and with flag names masked: help text
+    # names `--scope` the way Markdown would put it in a code span, which the
+    # checker skips. A dash (`first -- it`) has no letter after it and stays.
+    prose = [_EPILOG, parser.description, *_GROUP_HELP.values()]
+    for _, sub in _walk_parsers(parser):
+        prose.append(sub.description or "")
+        prose += [a.help or "" for a in sub._actions]
+    prose = [re.sub(r"(?<![\w-])--(?=[a-z])", "", text) for text in prose]
+    findings = [(text, f) for text in prose for f in checker.check(text)]
+    assert not findings, findings
+
+
 def test_a_refusal_before_the_engine_exists_reports_the_flagged_connector(
     tmp_path: Path, capsys
 ):
@@ -541,11 +622,13 @@ _SUBCOMMAND_PARITY: dict[tuple[str, str | None], dict] = {
     },
     ("explore", "diagram"): {"method": "diagram", "args": {"full": "full"}},
     ("explore", "query"): {
-        "method": ("query", "query_batch"),
+        "method": ("query", "query_batch", "query_across"),
         "args": {
             "sql": _TRANSLATED,
             "sql_file": _TRANSLATED,
             "no_auto_profile": _TRANSLATED,
+            # Comma-separated and repeatable on the CLI, a list on the engine.
+            "across": "targets",
         },
     },
     ("explore", "cluster"): {
@@ -715,6 +798,14 @@ _SUBCOMMAND_PARITY: dict[tuple[str, str | None], dict] = {
             "edits_file": _TRANSLATED,
         },
     },
+    ("semantic", "slayer"): {
+        "method": "semantic_slayer",
+        "args": {
+            "mode": "mode",
+            "argument": _TRANSLATED,
+            "edits_file": _TRANSLATED,
+        },
+    },
     ("maintain", "snapshot"): {
         "method": "snapshot",
         "args": {"project_only": "project_only"},
@@ -772,6 +863,9 @@ _CONNECTION_DESTS = {
     # subparser via `_sub_connection_options()` same as --budget.
     "session_ceiling",
     "no_session_ceiling",
+    # Values-free mode (#591): an engine-construction concern like --budget, and
+    # the per-call `result_mode` keyword is the library's spelling of it.
+    "values_free",
 }
 
 

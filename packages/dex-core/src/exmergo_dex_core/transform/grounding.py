@@ -14,7 +14,16 @@ nothing" and "resolution did not finish" is invisible in an empty list, and a
 host reading the first when it should have read the second admits a change whose
 dependencies nobody checked. So :class:`Grounding` reports the verdict before the
 findings: ``completeness``, then what could not be resolved, then what more than
-one thing could have meant, then the dependencies themselves.
+one thing could have meant, then what nothing defines, then the dependencies
+themselves.
+
+**A name defined nowhere is a finding, not a gap.** ``unresolved``,
+``ambiguous`` and ``missing`` are one count taken three ways: a reference dex could
+not name, a name with more than one definition, and a name with none. Only the
+first is about whether dex finished reading, so only it (with ``limits``) lowers
+``completeness``. ``ref('no_such_model')`` is a finished answer that says the build
+has nothing to run, and folding it into the verdict would make ``partial`` mean
+both "dex did not finish" and "dex finished and found a broken name".
 
 **Staleness is reported beside completeness, not folded into it.** A fully
 resolved graph read out of a manifest older than the model sources is complete
@@ -47,7 +56,28 @@ from .plans import PlanEdit
 #: whether dex read dbt's own compiled artifact or scanned the source itself,
 #: because the first is what dbt will do and the second is dex's reading of what
 #: dbt will do.
-ORIGINS = ("manifest", "semantic_manifest", "source_scan", "cache")
+ORIGINS = ("manifest", "semantic_manifest", "source_scan")
+
+#: Where the definition a dependency resolves to lives once the plan lands, in
+#: the order dbt prefers them: the plan's own files and the rest of the project
+#: before an installed package.
+DEFINITIONS = ("plan", "project", "package", "missing")
+
+#: What ``ref()`` reaches. The reference index kinds a ``ref()`` by this
+#: project's own nodes and calls anything else a model, so a ref to a package's
+#: seed arrives as a model. The lookup spans all three and the dependency takes
+#: the kind of what it finds, which is also the kind the manifest files it under.
+_REF_KINDS = ("model", "seed", "snapshot")
+
+#: Kinds dbt resolves only against what the project and its packages declare, so
+#: zero definitions fails the parse. Every other kind can be satisfied by
+#: something a static read cannot see: dbt's own and the adapter's macros,
+#: ``--vars`` and a var's default, a dimension MetricFlow supplies itself.
+_CONCLUSIVE_KINDS = frozenset({*_REF_KINDS, "source", "metric", "measure"})
+
+#: Kinds with any definition to look up. Columns have none: a column is defined
+#: by whatever the warehouse returns, which no file says.
+_LOOKUP_KINDS = frozenset({*_CONCLUSIVE_KINDS, "macro", "var", "entity", "dimension"})
 
 #: What a plan can be found to depend on. The first eleven are the vocabulary
 #: `transform references` already answers in, so the two can be compared
@@ -73,6 +103,16 @@ DEPENDENCY_KINDS = (
 class GroundedDependency(BaseModel):
     """One thing the plan reads, and the evidence that it resolves.
 
+    ``defined`` and ``relation`` answer different questions and do not imply each
+    other. ``defined`` says whether the name exists once the plan lands, and
+    where: ``plan`` when a file this plan writes defines it (a rewrite counts, so
+    it does not mean "new"), ``project`` for a project file the plan leaves alone,
+    ``package`` when only an installed package does (``package`` then names it),
+    and ``missing`` when nothing does. It is absent where dex makes no claim: a
+    column, a macro or var the project does not declare, a ``ref()`` that names
+    another project, a name only the compiled semantic catalog knows, or a name
+    dex could not rule out because part of the project went unread.
+
     ``resolved_to`` is what the name turned out to name, where that differs from
     the name itself: a measure resolves to its semantic model, a semantic model
     to the transformation model it sits on. ``relation`` is the physical address
@@ -83,6 +123,7 @@ class GroundedDependency(BaseModel):
 
     kind: str
     name: str
+    defined: str | None = None
     resolved_to: str | None = None
     relation: str | None = None
     origin: str = "source_scan"
@@ -119,6 +160,19 @@ class AmbiguousReference(BaseModel):
     candidates: list[str] = Field(default_factory=list)
 
 
+class MissingReference(BaseModel):
+    """A name the plan reads that nothing defines once the plan lands.
+
+    The zero-definition counterpart of :class:`AmbiguousReference`, and as sure as
+    it: one is only made when dex read everything that could have defined the
+    name. ``used_in`` is where the plan reads it, which is where the fix goes.
+    """
+
+    kind: str
+    name: str
+    used_in: list[str] = Field(default_factory=list)
+
+
 class GroundingBinding(BaseModel):
     """What this grounding was computed from.
 
@@ -139,20 +193,25 @@ class GroundingBinding(BaseModel):
 class Grounding(BaseModel):
     """A plan's dependencies, and how much of the answer is finished."""
 
-    # "complete" means every reference in the plan was named statically: no
-    # entry in `unresolved` and nothing in `limits`. It is not a claim that
-    # every named reference resolves to something that exists. `ref(var('x'))`
-    # is unresolved (dex could not read the name at all) and lowers this to
-    # "partial"; `ref('no_such_model')` is named successfully and stays a
-    # `GroundedDependency` with `relation=None`, which does not move this
-    # field. A caller that wants "this plan's build has something to run"
-    # reads `dependencies[].relation` (or `relations`) per entry, not this
-    # field alone.
+    # "complete" means dex finished reading: every reference in the plan was
+    # named statically (nothing in `unresolved`) and every name was looked up
+    # and followed as far as dex goes (nothing in `limits`). It is not a claim
+    # that every named reference exists. `ref(var('x'))` is unresolved and
+    # lowers this to "partial"; `ref('no_such_model')` is named, looked up, and
+    # found nowhere, which is reported in `missing` and does not move this field,
+    # exactly as a name with two definitions is reported in `ambiguous`. A
+    # missing metric or measure is reported the same way. So a host admitting a
+    # change reads `completeness == "complete"` and `missing == []` together.
+    # `missing` is never a guess: where part of the project went unread (a
+    # declared package not installed, a YAML file that did not parse), a name
+    # with no definition is left out of it and a limit says why, which is what
+    # makes the answer "partial".
     completeness: str = "unresolved"
     dependencies: list[GroundedDependency] = Field(default_factory=list)
     relations: list[str] = Field(default_factory=list)
     unresolved: list[UnresolvedReference] = Field(default_factory=list)
     ambiguous: list[AmbiguousReference] = Field(default_factory=list)
+    missing: list[MissingReference] = Field(default_factory=list)
     limits: list[str] = Field(default_factory=list)
     freshness: dict[str, Any] = Field(default_factory=dict)
     binding: GroundingBinding = Field(default_factory=GroundingBinding)
@@ -166,6 +225,7 @@ class Grounding(BaseModel):
             "limits": self.limits,
             "unresolved": [u.model_dump(mode="json") for u in self.unresolved],
             "ambiguous": [a.model_dump(mode="json") for a in self.ambiguous],
+            "missing": [m.model_dump(mode="json") for m in self.missing],
             "freshness": self.freshness,
             "binding": self.binding.model_dump(mode="json"),
             "relations": self.relations,
@@ -294,7 +354,7 @@ def _manifest_relations(manifest: dict[str, Any] | None) -> dict[tuple[str, str]
 
 def _semantic_dependencies(
     catalog: Any, names: dict[str, set[str]]
-) -> tuple[list[GroundedDependency], list[str]]:
+) -> tuple[list[GroundedDependency], set[tuple[str, str]]]:
     """Resolve semantic names to the models and relations behind them.
 
     A metric names its input measures, a measure names its semantic model, and a
@@ -302,10 +362,14 @@ def _semantic_dependencies(
     that model builds. Following that chain is what answers "which table is behind
     this metric", and it is a name join through the compiled artifacts rather than
     a second resolver.
+
+    Returns what the catalog resolved and the ``(kind, name)`` pairs it does not
+    carry. Whether an absent name is a stale catalog or a name nothing defines is
+    the caller's call, because only the caller knows what the project declares.
     """
 
     dependencies: list[GroundedDependency] = []
-    unknown: list[str] = []
+    absent: set[tuple[str, str]] = set()
     models = {m.name: m for m in getattr(catalog, "semantic_models", [])}
     measures = {m.name: m for m in getattr(catalog, "measures", [])}
     metrics = {m.name: m for m in getattr(catalog, "metrics", [])}
@@ -313,7 +377,7 @@ def _semantic_dependencies(
     def add_model(model_name: str, via: str) -> None:
         info = models.get(model_name)
         if info is None:
-            unknown.append(f"semantic model '{model_name}' is not in the catalog")
+            absent.add(("semantic_model", model_name))
             return
         dependencies.append(
             GroundedDependency(
@@ -329,7 +393,7 @@ def _semantic_dependencies(
     for name in sorted(names.get("metric", set())):
         metric = metrics.get(name)
         if metric is None:
-            unknown.append(f"metric '{name}' is not in the semantic catalog")
+            absent.add(("metric", name))
             continue
         dependencies.append(
             GroundedDependency(
@@ -344,7 +408,7 @@ def _semantic_dependencies(
     for name in sorted(names.get("measure", set())):
         measure = measures.get(name)
         if measure is None:
-            unknown.append(f"measure '{name}' is not in the semantic catalog")
+            absent.add(("measure", name))
             continue
         dependencies.append(
             GroundedDependency(
@@ -356,7 +420,43 @@ def _semantic_dependencies(
         )
         if measure.semantic_model:
             add_model(measure.semantic_model, f"measure:{name}")
-    return dependencies, unknown
+    return dependencies, absent
+
+
+def _unread_definitions(index: Any, project: Path, written: set[str]) -> list[str]:
+    """What dex could not read that might define a name, as reasons.
+
+    Empty means a name with no definition really has none. Each reason is a place
+    dbt would look that dex did not: a declared package that is not installed, one
+    whose install directory the declaration does not name (a git or tarball
+    package), one that failed to load, a YAML file that does not parse, or a
+    package set this plan changes, which nothing has installed yet.
+    """
+
+    from .build import missing_packages, unverifiable_packages
+
+    reasons: list[str] = []
+    changed = sorted(written & {"packages.yml", "dependencies.yml"})
+    if changed:
+        reasons.append(
+            f"this plan changes {', '.join(changed)}, and the packages it declares "
+            "are not installed until `transform deps` runs"
+        )
+    absent = missing_packages(project)
+    if absent:
+        reasons.append(
+            "these declared packages are not installed: "
+            + ", ".join(p.describe() for p in absent)
+        )
+    unknown = unverifiable_packages(project)
+    if unknown:
+        reasons.append(
+            "dex cannot check whether these declared packages are installed: "
+            + ", ".join(p.describe() for p in unknown)
+        )
+    if index.unread:
+        reasons.append("these could not be read: " + ", ".join(index.unread))
+    return reasons
 
 
 def ground_plan(
@@ -375,6 +475,13 @@ def ground_plan(
     memory first, exactly as the delete guard does, because a plan's dependencies
     are the dependencies of the project *after* it lands. Nothing is written and
     no connection is opened.
+
+    Each name is looked up where dbt would look for it: the project after the
+    plan, then its installed packages. The overlaid project is the authority on
+    whether a name exists, because it is what dbt will parse. The compiled
+    artifacts are older than the plan, so they supply where a name is built and
+    what a metric reaches, and count as evidence that a name exists, but never as
+    evidence that one does not.
     """
 
     from ..dbt_project import SourceFile, manifest_freshness
@@ -383,6 +490,7 @@ def ground_plan(
 
     edited = {edit.path for edit in edits}
     deleted = {edit.path for edit in edits if edit.op is EditOp.DELETE}
+    written = edited - deleted
     surviving = {
         path: source.content
         for path, source in view.files.items()
@@ -404,43 +512,133 @@ def ground_plan(
 
     index = ReferenceIndex(after)
     limits = list(index.limits)
-    resolved, indeterminate = index.references_from(edited - deleted)
+    resolved, indeterminate = index.references_from(written)
+
+    settled: dict[tuple[str, str], tuple[str | None, str, str | None]] = {}
+
+    def settle(kind: str, name: str) -> tuple[str | None, str, str | None]:
+        """``(defined, kind, package)`` for one name, in dbt's order of preference."""
+
+        if (kind, name) not in settled:
+            kinds = (
+                _REF_KINDS
+                if kind in _REF_KINDS
+                else (kind,)
+                if kind in _LOOKUP_KINDS
+                else ()
+            )
+            found = index.declarations_of(name, kinds) if kinds else []
+            local = [d for d in found if d.package is None]
+            chosen = (
+                next((d for d in local if d.path in written), None)
+                or next(iter(local), None)
+                or next(iter(found), None)
+            )
+            if chosen is None:
+                settled[(kind, name)] = (None, kind, None)
+            elif chosen.package is not None:
+                settled[(kind, name)] = ("package", chosen.kind, chosen.package)
+            else:
+                where = "plan" if chosen.path in written else "project"
+                settled[(kind, name)] = (where, chosen.kind, None)
+        return settled[(kind, name)]
 
     relations = _manifest_relations(after.manifest)
     seen: dict[tuple[str, str], GroundedDependency] = {}
-    semantic_names: dict[str, set[str]] = {}
+    # A name reached only through `ref('other', 'm')` is never called missing:
+    # dbt looks for it in another project when `other` is one, and dex reads one.
+    unqualified: set[tuple[str, str]] = set()
     for reference in resolved:
         if reference.name is None:
             continue
-        if reference.kind in {"metric", "measure", "entity", "dimension"}:
-            semantic_names.setdefault(reference.kind, set()).add(reference.name)
-        key = (reference.kind, reference.name)
+        defined, kind, package = settle(reference.kind, reference.name)
+        key = (kind, reference.name)
+        if reference.qualifier is None:
+            unqualified.add(key)
         existing = seen.get(key)
         if existing is None:
             relation = relations.get(key)
             seen[key] = GroundedDependency(
-                kind=reference.kind,
+                kind=kind,
                 name=reference.name,
+                defined=defined,
                 relation=relation,
                 origin="manifest" if relation else "source_scan",
-                package=reference.package,
+                package=package,
                 used_in=[reference.path],
             )
         elif reference.path not in existing.used_in:
             existing.used_in.append(reference.path)
 
-    dependencies = [seen[key] for key in sorted(seen)]
-
-    if catalog is not None:
-        semantic, unknown = _semantic_dependencies(catalog, semantic_names)
-        dependencies.extend(semantic)
-        limits.extend(unknown)
-    elif semantic_names:
+    # The plan's own metrics and measures need no catalog: what they reach is in
+    # the plan. Everything else is followed through it, including names nothing
+    # in the project defines, because the catalog knowing one is evidence the
+    # name exists somewhere dex does not read.
+    semantic = {
+        key
+        for key, dependency in seen.items()
+        if key[0] in ("metric", "measure") and dependency.defined != "plan"
+    }
+    in_catalog: set[tuple[str, str]] = set()
+    if catalog is not None and semantic:
+        names: dict[str, set[str]] = {}
+        for kind, name in semantic:
+            names.setdefault(kind, set()).add(name)
+        followed, absent = _semantic_dependencies(catalog, names)
+        in_catalog = semantic - absent
+        for dependency in followed:
+            key = (dependency.kind, dependency.name)
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = dependency
+                continue
+            existing.resolved_to = existing.resolved_to or dependency.resolved_to
+            existing.relation = existing.relation or dependency.relation
+            existing.origin = dependency.origin
+            existing.used_in.extend(
+                via for via in dependency.used_in if via not in existing.used_in
+            )
+        for kind, name in sorted(absent):
+            if kind == "semantic_model":
+                limits.append(f"semantic model '{name}' is not in the catalog")
+            elif seen[(kind, name)].defined is not None:
+                limits.append(
+                    f"{kind} '{name}' is defined in the source but not in the "
+                    "compiled semantic catalog, so the models behind it were not "
+                    "resolved; recompiling the project refreshes the catalog"
+                )
+    elif any(seen[key].defined is not None for key in semantic):
         limits.append(
             catalog_error
             or "the semantic catalog could not be read, so semantic references "
             "in this plan were not resolved to the models behind them"
         )
+
+    candidates = sorted(
+        key
+        for key, dependency in seen.items()
+        if dependency.defined is None
+        and key[0] in _CONCLUSIVE_KINDS
+        and key in unqualified
+        and key not in in_catalog
+    )
+    unread = _unread_definitions(index, project, written) if candidates else []
+    if unread:
+        named = ", ".join(f"{kind} '{name}'" for kind, name in candidates)
+        limits.append(
+            f"nothing dex read defines {named}, but {'; '.join(unread)}, so dex "
+            "does not report " + ("it" if len(candidates) == 1 else "them") + " missing"
+        )
+    else:
+        for key in candidates:
+            seen[key].defined = "missing"
+    missing = [
+        MissingReference(kind=kind, name=name, used_in=list(seen[(kind, name)].used_in))
+        for kind, name in candidates
+        if seen[(kind, name)].defined == "missing"
+    ]
+
+    dependencies = [seen[key] for key in sorted(seen)]
 
     ambiguous: list[AmbiguousReference] = []
     for dependency in dependencies:
@@ -482,6 +680,7 @@ def ground_plan(
         relations=sorted({d.relation for d in dependencies if d.relation}),
         unresolved=unresolved,
         ambiguous=ambiguous,
+        missing=missing,
         limits=limits,
         freshness=manifest_freshness(after),
         binding=GroundingBinding(

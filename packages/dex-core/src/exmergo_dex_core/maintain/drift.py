@@ -25,7 +25,7 @@ from typing import NamedTuple
 
 from pydantic import BaseModel, Field
 
-from ..adapters.base import Adapter, ColumnMeta, distinct_combination_sql
+from ..adapters.base import Adapter, ColumnMeta, TableProbe, distinct_combination_sql
 from ..cache import Dataset, Relationship, match_identifier
 from ..dbt_project import ProjectDefinitions
 from ..explore import relationships as rel_mod
@@ -587,16 +587,16 @@ class GrainPlan(NamedTuple):
     probes. Built once so the cost estimate and the confirmed run price and
     execute exactly the same statements."""
 
-    key_checks: list[tuple[Dataset, list[str], int]]
+    key_checks: list[tuple[Dataset, list[str], int | None]]
     fanout_pairs: list[tuple[Relationship, Relationship]]
     # Proven multi-column keys re-verified as combinations: their members are
     # not individually unique, so they never enter key_checks.
-    composite_checks: list[tuple[Dataset, list[list[str]], int]]
+    composite_checks: list[tuple[Dataset, list[list[str]], int | None]]
     # Grains the *project* declares (model-level unique_combination_of_columns)
     # that measurement never proved. Kept apart from `composite_checks` because
     # a failure here is a different fact with a different finding code: nothing
     # lapsed, the declaration was never true. Priced identically.
-    declared_composite_checks: list[tuple[Dataset, list[list[str]], int]]
+    declared_composite_checks: list[tuple[Dataset, list[list[str]], int | None]]
     # What the plan could not survey, so an unchecked declaration never reads as
     # a clean bill.
     notes: list[str]
@@ -604,7 +604,47 @@ class GrainPlan(NamedTuple):
     # baseline measurement: a column that is wholly NULL in a non-empty result
     # is a defect in its present shape, not a before-and-after drift claim.
     # Last/defaulted to retain compatibility with focused detector test plans.
-    null_checks: list[tuple[Dataset, list[ColumnMeta], int]] | None = None
+    # The count is ``None`` where the connector has no free row count (Trino,
+    # Databricks before a sized scan): unknown, which is not the same as empty.
+    null_checks: list[tuple[Dataset, list[ColumnMeta], int | None]] | None = None
+    # Joins the semantic layer declares an arity for, each side that arity says
+    # is a key re-measured as one. Defaulted for the same reason as above.
+    join_cardinality_checks: list[JoinCardinalityCheck] | None = None
+
+    def scans(self) -> bool:
+        """Whether the plan holds any statement that scans, and so is priced.
+
+        The null survey is left out deliberately: it rides along with whatever
+        else the plan scans and never on its own decides that a handshake is
+        owed, which is how the axis has always priced it.
+        """
+
+        return bool(
+            self.key_checks
+            or self.fanout_pairs
+            or self.composite_checks
+            or self.declared_composite_checks
+            or self.join_cardinality_checks
+        )
+
+
+class JoinCardinalityCheck(NamedTuple):
+    """One side of a declared join whose declared arity makes it a key.
+
+    ``many_to_one`` says the parent's join columns are unique, ``one_to_one``
+    says both sides' are. When they are not, every row on the other side can
+    match several here, and whatever is aggregated across the join is counted
+    more than once: the fanout the declaration rules out.
+    """
+
+    relationship: str
+    cardinality: str
+    model: str
+    to_model: str
+    side_model: str
+    identifier: str
+    columns: list[str]
+    row_count: int
 
 
 def grain_plan(
@@ -612,6 +652,7 @@ def grain_plan(
     snap: Snapshot,
     scope: set[str] | None = None,
     definitions: ProjectDefinitions | None = None,
+    semantic: SemanticLayer | None = None,
 ) -> GrainPlan:
     """Survey the grain scans from free metadata, measured and declared.
 
@@ -625,6 +666,13 @@ def grain_plan(
     Reading the declaration here, at plan time, closes that without putting a
     claim into the measurement store: the declared combinations are surveyed and
     priced with the measured ones, and the cache is untouched.
+
+    ``semantic`` is the current semantic-layer fingerprint, read for what a
+    layer that sits straight on warehouse relations declares about them: every
+    key a semantic model declares, single-column ones included (nothing else
+    re-verifies those for a layer that is not the transformation project), and
+    every join whose declared arity makes one side a key. A layer that captured
+    neither (dbt's, whose keys arrive through ``definitions``) adds nothing.
     """
 
     described: dict[str, tuple[set[str], int | None]] = {}
@@ -639,9 +687,12 @@ def grain_plan(
     declared_by_identifier, notes = _declared_composites(
         definitions, sorted(current), scope
     )
-    key_checks: list[tuple[Dataset, list[str], int]] = []
-    composite_checks: list[tuple[Dataset, list[list[str]], int]] = []
-    declared_checks: list[tuple[Dataset, list[list[str]], int]] = []
+    _fold_semantic_keys(declared_by_identifier, notes, semantic, sorted(current), scope)
+    # A count of None is unknown (no free row count on this connector), not
+    # zero: the check is planned, and the scan that runs it supplies the count.
+    key_checks: list[tuple[Dataset, list[str], int | None]] = []
+    composite_checks: list[tuple[Dataset, list[list[str]], int | None]] = []
+    declared_checks: list[tuple[Dataset, list[list[str]], int | None]] = []
     for dataset in snap.warehouse.datasets:
         if scope is not None and dataset.identifier not in scope:
             continue
@@ -671,9 +722,9 @@ def grain_plan(
         # A combination with a vanished member is the schema axis's story,
         # same as a vanished single key.
         live_composites = [c for c in composites if set(c) <= columns]
-        if live_keys and row_count:
+        if live_keys and row_count != 0:
             key_checks.append((dataset, live_keys, row_count))
-        if live_composites and row_count:
+        if live_composites and row_count != 0:
             composite_checks.append((dataset, live_composites, row_count))
 
     # Declared grains are surveyed against the *current* warehouse rather than
@@ -685,8 +736,15 @@ def grain_plan(
     # go quiet on a model built since the last snapshot, which is exactly when a
     # freshly declared grain is most likely to be wrong.
     measured_composites = {
-        dataset.identifier: combos for dataset, combos, _rows in composite_checks
+        dataset.identifier: list(combos) for dataset, combos, _rows in composite_checks
     }
+    # A declared single-column key measurement already proved is checked once
+    # too, for the same reason: a semantic layer's primary key is usually the
+    # very column explore found unique.
+    for dataset, keys, _rows in key_checks:
+        measured_composites.setdefault(dataset.identifier, []).extend(
+            [key] for key in keys
+        )
     baselined = {dataset.identifier: dataset for dataset in snap.warehouse.datasets}
     for identifier, declared in sorted(declared_by_identifier.items()):
         columns, row_count = describe(identifier)
@@ -712,10 +770,10 @@ def grain_plan(
             )
         if not live_declared:
             continue
-        if not row_count:
+        if row_count == 0:
             notes.append(
-                f"{identifier} has no row count to compare against, so its "
-                "declared grain was not verified"
+                f"{identifier} has no rows to compare against, so its declared "
+                "grain was not verified"
             )
             continue
         # A `Dataset` carrying only the identifier where the baseline has none:
@@ -756,7 +814,7 @@ def grain_plan(
             "grains on " + ", ".join(sorted(set(unsurveyed))) + " were not verified",
         ]
         declared_checks = []
-    null_checks: list[tuple[Dataset, list[ColumnMeta], int]] = []
+    null_checks: list[tuple[Dataset, list[ColumnMeta], int | None]] = []
     if callable(getattr(adapter, "column_aggregates", None)):
         for dataset in snap.warehouse.datasets:
             if scope is not None and dataset.identifier not in scope:
@@ -764,7 +822,22 @@ def grain_plan(
             if dataset.identifier not in current:
                 continue
             meta, columns = adapter.table_metadata(dataset.identifier)
-            null_checks.append((dataset, columns, meta.row_count or 0))
+            null_checks.append((dataset, columns, meta.row_count))
+
+    cardinality_checks = _join_cardinality_checks(
+        semantic, sorted(current), scope, describe, notes
+    )
+    if (
+        cardinality_checks
+        and getattr(adapter, "distinct_combination_counts", None) is None
+    ):
+        notes.append(
+            "this connector cannot probe column combinations, so the declared "
+            "cardinality of "
+            + ", ".join(sorted({check.relationship for check in cardinality_checks}))
+            + " was not verified"
+        )
+        cardinality_checks = []
 
     return GrainPlan(
         key_checks,
@@ -773,7 +846,130 @@ def grain_plan(
         declared_checks,
         notes,
         null_checks,
+        cardinality_checks,
     )
+
+
+def _fold_semantic_keys(
+    by_identifier: dict[str, list[list[str]]],
+    notes: list[str],
+    semantic: SemanticLayer | None,
+    known: list[str],
+    scope: set[str] | None,
+) -> None:
+    """Add the keys a semantic layer declares to the declared-grain survey.
+
+    Every arity, because the survey measures a combination and a one-column
+    combination is a key. A declaration already in the survey (a composite the
+    declarations channel carried too) is not added twice. Only for a layer that
+    captured its keys: one that did not leaves ``keys`` empty because it has
+    nowhere to declare them, not because it declares none.
+    """
+
+    if semantic is None or not semantic.relationships_and_keys_captured:
+        return
+    for sm in semantic.semantic_models:
+        if not sm.keys:
+            continue
+        matches = _matched_identifier(sm, known)
+        if len(matches) != 1:
+            notes.append(
+                f"the keys declared on semantic model '{sm.name}' "
+                + (
+                    "match several warehouse objects"
+                    if matches
+                    else "match no warehouse object"
+                )
+                + ", so they were not verified"
+            )
+            continue
+        identifier = matches[0]
+        if scope is not None and identifier not in scope:
+            continue
+        bucket = by_identifier.setdefault(identifier, [])
+        for combo in sm.keys:
+            if not any(_same_combo(combo, seen) for seen in bucket):
+                bucket.append(list(combo))
+
+
+def _join_cardinality_checks(
+    semantic: SemanticLayer | None,
+    known: list[str],
+    scope: set[str] | None,
+    describe,
+    notes: list[str],
+) -> list[JoinCardinalityCheck]:
+    """The key each declared join's arity implies, as checks to run.
+
+    A join the layer could have given an arity and did not is named as
+    unchecked, because the silence a holding join produces is the same silence
+    an unchecked one would. ``many_to_many`` declares no bound, so it has
+    nothing to exceed and is not mentioned.
+    """
+
+    if semantic is None or not semantic.relationship_cardinality_captured:
+        return []
+    models = {sm.name: sm for sm in semantic.semantic_models}
+    checks: list[JoinCardinalityCheck] = []
+    unchecked: list[str] = []
+    for rel in semantic.relationships:
+        if rel.cardinality is None:
+            unchecked.append(rel.name)
+            continue
+        sides: list[tuple[str, list[str]]] = []
+        if rel.cardinality in ("many_to_one", "one_to_one"):
+            sides.append((rel.to_model, [to for _frm, to in rel.column_pairs]))
+        if rel.cardinality == "one_to_one":
+            sides.append((rel.model, [frm for frm, _to in rel.column_pairs]))
+        for side_model, columns in sides:
+            sm = models.get(side_model)
+            matches = _matched_identifier(sm, known) if sm is not None else []
+            if len(matches) != 1:
+                notes.append(
+                    f"join '{rel.name}' is declared {rel.cardinality}, and "
+                    f"'{side_model}' "
+                    + (
+                        "matches several warehouse objects"
+                        if matches
+                        else "matches no warehouse object"
+                    )
+                    + ", so its fanout was not verified"
+                )
+                continue
+            identifier = matches[0]
+            if scope is not None and identifier not in scope:
+                continue
+            live_columns, row_count = describe(identifier)
+            missing = [c for c in columns if c not in live_columns]
+            if missing:
+                # A vanished join column is the schema and semantic axes' story.
+                notes.append(
+                    f"join '{rel.name}' keys on {', '.join(missing)}, which "
+                    f"{identifier} no longer has, so its fanout was not verified"
+                )
+                continue
+            if not row_count:
+                continue
+            checks.append(
+                JoinCardinalityCheck(
+                    relationship=rel.name,
+                    cardinality=rel.cardinality,
+                    model=rel.model,
+                    to_model=rel.to_model,
+                    side_model=side_model,
+                    identifier=identifier,
+                    columns=columns,
+                    row_count=row_count,
+                )
+            )
+    if unchecked:
+        notes.append(
+            "no cardinality is declared on join(s) "
+            + ", ".join(sorted(unchecked))
+            + ", so their fanout was not checked; declare one (many_to_one, "
+            "one_to_one, one_to_many or many_to_many) to have it verified"
+        )
+    return checks
 
 
 def _same_combo(left: list[str], right: list[str]) -> bool:
@@ -827,29 +1023,168 @@ def _declared_composites(
     return by_identifier, notes
 
 
-def grain_estimate(adapter: Adapter, plan: GrainPlan) -> tuple[float, dict[str, float]]:
+class ProbeNeeds(NamedTuple):
+    """The probes one table owes a drift run, gathered into one statement."""
+
+    distinct: list[str]
+    combinations: list[list[str]]
+    null_columns: list[ColumnMeta]
+
+
+def batched_probes(
+    adapter: Adapter,
+    plan: GrainPlan,
+    cardinality_checks: list[CardinalityCheck] | None = None,
+) -> dict[str, ProbeNeeds]:
+    """The tables whose drift probes run as one statement each (#275).
+
+    A table can owe the run several separate statements: a distinct count over
+    its proven keys, a combination probe per composite list and per declared
+    join arity, a null survey, and, under ``maintain check``, a distinct count
+    for the dimensions the semantic layer reads from it. A warehouse with a
+    per-statement billing minimum (BigQuery's 10 MB, charged per statement and
+    per table referenced) bills each of those its own minimum, so the cost of a
+    sweep tracked how many probes it asked rather than what they read.
+
+    Only an adapter offering ``table_probe_sql``/``table_probe`` is batched, and
+    only a table that would otherwise issue two or more statements, so a table
+    with one probe runs exactly what it ran before. A table the adapter cannot
+    probe in one statement keeps its separate probes; one whose null survey
+    cannot ride along (a block-sampled table) is batched without it. The
+    estimate and the run both read this map, so they price and execute the
+    same statements.
+    """
+
+    probe_sql = getattr(adapter, "table_probe_sql", None)
+    if not callable(probe_sql) or not callable(getattr(adapter, "table_probe", None)):
+        return {}
+    distinct: dict[str, list[str]] = {}
+    combinations: dict[str, list[list[str]]] = {}
+    null_columns: dict[str, list[ColumnMeta]] = {}
+    statements: dict[str, int] = {}
+
+    def add_distinct(identifier: str, columns: list[str]) -> None:
+        target = distinct.setdefault(identifier, [])
+        target.extend(column for column in columns if column not in target)
+        statements[identifier] = statements.get(identifier, 0) + 1
+
+    def add_combinations(identifier: str, combos: list[list[str]]) -> None:
+        target = combinations.setdefault(identifier, [])
+        target.extend(list(combo) for combo in combos if list(combo) not in target)
+        statements[identifier] = statements.get(identifier, 0) + 1
+
+    # Mirrors what `grain_drift` and `cardinality_drift` would each issue, list
+    # by list, including the statements they never issue.
+    for dataset, keys, _rows in plan.key_checks:
+        if keys:
+            add_distinct(dataset.identifier, keys)
+    if getattr(adapter, "distinct_combination_counts", None) is not None:
+        for dataset, combos, _rows in (
+            plan.composite_checks + plan.declared_composite_checks
+        ):
+            if combos:
+                add_combinations(dataset.identifier, combos)
+        for check in plan.join_cardinality_checks or []:
+            add_combinations(check.identifier, [check.columns])
+    if callable(getattr(adapter, "column_aggregates", None)):
+        for dataset, columns, row_count in plan.null_checks or []:
+            if row_count == 0 or not columns:
+                continue  # reported as no_rows without a scan
+            null_columns[dataset.identifier] = list(columns)
+            statements[dataset.identifier] = statements.get(dataset.identifier, 0) + 1
+    for identifier, columns in _live_cardinality_columns(
+        adapter, cardinality_checks or []
+    ).items():
+        if columns:
+            add_distinct(identifier, columns)
+
+    batched: dict[str, ProbeNeeds] = {}
+    for identifier, count in statements.items():
+        if count < 2:
+            continue
+        needs = ProbeNeeds(
+            distinct.get(identifier, []),
+            combinations.get(identifier, []),
+            null_columns.get(identifier, []),
+        )
+        if probe_sql(identifier, **needs._asdict()) is None:
+            if not needs.null_columns or count - 1 < 2:
+                continue
+            needs = needs._replace(null_columns=[])
+            if probe_sql(identifier, **needs._asdict()) is None:
+                continue
+        batched[identifier] = needs
+    return batched
+
+
+def run_batched_probes(
+    adapter: Adapter, batched: dict[str, ProbeNeeds]
+) -> dict[str, TableProbe]:
+    """Run each batched table's one statement. A table the adapter declined at
+    run time (a statement it would not plan, a budget that could not cover it)
+    is absent, so its probes run separately and degrade on their own terms."""
+
+    results: dict[str, TableProbe] = {}
+    for identifier, needs in batched.items():
+        probe = adapter.table_probe(identifier, **needs._asdict())
+        if probe is not None:
+            results[identifier] = probe
+    return results
+
+
+def grain_estimate(
+    adapter: Adapter,
+    plan: GrainPlan,
+    batched: dict[str, ProbeNeeds] | None = None,
+) -> tuple[float, dict[str, float]]:
     """Free dry-run pricing of the plan's scans; zero on free adapters.
 
     Every list on the plan is priced, declared combinations included: the plan is
     the single survey both this and ``grain_drift`` read, so a scan that reaches
     execution without appearing here would be spend the operator never saw.
+
+    ``batched`` is :func:`batched_probes` for the same plan (computed here when
+    omitted): a batched table is priced as its one statement, and its separate
+    probes are not priced again. It may carry cardinality columns as well, and
+    :func:`cardinality_estimate` is handed the same map so neither prices them
+    twice.
     """
 
     query_estimate = getattr(adapter, "query_estimate", None)
     if query_estimate is None:
         return 0.0, {}
+    if batched is None:
+        batched = batched_probes(adapter, plan)
     per_table: dict[str, float] = {}
+    for identifier, needs in batched.items():
+        per_table[identifier] = query_estimate(
+            adapter.table_probe_sql(identifier, **needs._asdict())
+        )
     for dataset, keys, _row_count in plan.key_checks:
+        if dataset.identifier in batched:
+            continue
         per_table[dataset.identifier] = query_estimate(
             _distinct_count_sql(dataset.identifier, keys, adapter.dialect)
         )
     for dataset, combos, _row_count in (
         plan.composite_checks + plan.declared_composite_checks
     ):
+        if dataset.identifier in batched:
+            continue
         per_table[dataset.identifier] = per_table.get(
             dataset.identifier, 0.0
         ) + query_estimate(
             _distinct_combination_stand_in(dataset.identifier, combos, adapter.dialect)
+        )
+    for check in plan.join_cardinality_checks or []:
+        if check.identifier in batched:
+            continue
+        per_table[check.identifier] = per_table.get(
+            check.identifier, 0.0
+        ) + query_estimate(
+            _distinct_combination_stand_in(
+                check.identifier, [check.columns], adapter.dialect
+            )
         )
     probes = rel_mod.probe_statements(
         [live for _baseline, live in plan.fanout_pairs], adapter.dialect
@@ -857,16 +1192,22 @@ def grain_estimate(adapter: Adapter, plan: GrainPlan) -> tuple[float, dict[str, 
     if probes:
         per_table["(join overlap probes)"] = sum(query_estimate(sql) for sql in probes)
     profile_estimate = getattr(adapter, "profile_estimate", None)
-    if profile_estimate is not None and plan.null_checks:
-        identifiers = [
-            dataset.identifier for dataset, _columns, _rows in plan.null_checks
-        ]
+    # A survey riding a batched statement is priced with it above.
+    null_checks = [
+        (dataset, columns, rows)
+        for dataset, columns, rows in plan.null_checks or []
+        if not (
+            dataset.identifier in batched and batched[dataset.identifier].null_columns
+        )
+    ]
+    if profile_estimate is not None and null_checks:
+        identifiers = [dataset.identifier for dataset, _columns, _rows in null_checks]
         # A NULL fraction is meaningful for binary columns too, unlike an
         # explore value profile; opt blobs back into the survey so the estimate
         # and the aggregate execution cover exactly the same columns.
         include_blobs = {
             f"{dataset.identifier}.{column.name}"
-            for dataset, columns, _rows in plan.null_checks
+            for dataset, columns, _rows in null_checks
             for column in columns
         }
         _total, null_per_table = profile_estimate(
@@ -875,6 +1216,25 @@ def grain_estimate(adapter: Adapter, plan: GrainPlan) -> tuple[float, dict[str, 
         for identifier, estimate in null_per_table.items():
             per_table[identifier] = per_table.get(identifier, 0.0) + estimate
     return sum(per_table.values()), per_table
+
+
+def _combination_counts(
+    probes: dict[str, TableProbe],
+    combo_counts,
+    identifier: str,
+    combos: list[list[str]],
+) -> dict[tuple[str, ...], int]:
+    """``combos``' distinct counts from the table's batched statement when it
+    ran, else from the adapter's own combination probe."""
+
+    probe = probes.get(identifier)
+    if probe is None:
+        return combo_counts(identifier, combos)
+    return {
+        tuple(combo): probe.combinations[tuple(combo)]
+        for combo in combos
+        if tuple(combo) in probe.combinations
+    }
 
 
 def _grain_severity(row_count: int, min_rows: int) -> tuple[str, dict, str]:
@@ -903,6 +1263,7 @@ def grain_drift(
     *,
     timeout_seconds: float = 30.0,
     min_rows: int = 100,
+    probes: dict[str, TableProbe] | None = None,
 ) -> list[DriftFinding]:
     """Cardinality and identity drift, from aggregates only: exact distinct
     counts against the baseline's proven keys, the grains the project declares
@@ -921,11 +1282,23 @@ def grain_drift(
     count (see :func:`_grain_severity`); it does not apply to
     ``join_orphans_increased``, which already grades its own severity from the
     measured orphan fraction rather than asserting ``high`` unconditionally.
+
+    ``probes`` holds what :func:`run_batched_probes` already measured, one
+    statement per table; run here from the plan when omitted. A table it covers
+    is read from it and every other table is probed separately, so the findings
+    are the same either way and only the statement count differs.
     """
 
+    if probes is None:
+        probes = run_batched_probes(adapter, batched_probes(adapter, plan))
     findings: list[DriftFinding] = []
     for dataset, keys, row_count in plan.key_checks:
-        distinct = adapter.exact_distinct_counts(dataset.identifier, keys)
+        probe = probes.get(dataset.identifier)
+        distinct = (
+            probe.distinct
+            if probe is not None
+            else adapter.exact_distinct_counts(dataset.identifier, keys)
+        )
         # Re-read the metadata after the distinct scan: adapters whose
         # inventory row counts are planner estimates (Postgres reltuples)
         # upgrade to the exact COUNT(*) that scan carried, so an over-estimate
@@ -934,6 +1307,8 @@ def grain_drift(
         live_meta, _ = adapter.table_metadata(dataset.identifier)
         if live_meta.row_count is not None:
             row_count = live_meta.row_count
+        if row_count is None:
+            continue  # nothing counted the table, so uniqueness cannot be judged
         for key in keys:
             count = distinct.get(key)
             if count is None or count >= row_count:
@@ -966,10 +1341,12 @@ def grain_drift(
     for dataset, combos, row_count in plan.composite_checks:
         if combo_counts is None:
             break  # an adapter without combination probes cannot re-verify
-        counts = combo_counts(dataset.identifier, combos)
+        counts = _combination_counts(probes, combo_counts, dataset.identifier, combos)
         live_meta, _ = adapter.table_metadata(dataset.identifier)
         if live_meta.row_count is not None:
             row_count = live_meta.row_count
+        if row_count is None:
+            continue  # nothing counted the table, so uniqueness cannot be judged
         for combo in combos:
             count = counts.get(tuple(combo))
             if count is None or count >= row_count:
@@ -1009,10 +1386,12 @@ def grain_drift(
     for dataset, combos, row_count in plan.declared_composite_checks:
         if combo_counts is None:
             break
-        counts = combo_counts(dataset.identifier, combos)
+        counts = _combination_counts(probes, combo_counts, dataset.identifier, combos)
         live_meta, _ = adapter.table_metadata(dataset.identifier)
         if live_meta.row_count is not None:
             row_count = live_meta.row_count
+        if row_count is None:
+            continue  # nothing counted the table, so uniqueness cannot be judged
         for combo in combos:
             count = counts.get(tuple(combo))
             if count is None or count >= row_count:
@@ -1045,6 +1424,51 @@ def grain_drift(
                 )
             )
 
+    for check in plan.join_cardinality_checks or []:
+        if combo_counts is None:
+            break
+        count = _combination_counts(
+            probes, combo_counts, check.identifier, [check.columns]
+        ).get(tuple(check.columns))
+        row_count = check.row_count
+        live_meta, _ = adapter.table_metadata(check.identifier)
+        if live_meta.row_count is not None:
+            row_count = live_meta.row_count
+        if count is None or count >= row_count:
+            continue
+        members = ", ".join(check.columns)
+        other = check.model if check.side_model == check.to_model else check.to_model
+        severity, floor_data, floor_note = _grain_severity(row_count, min_rows)
+        findings.append(
+            DriftFinding(
+                axis="grain",
+                code="join_cardinality_exceeded",
+                identifier=check.identifier,
+                column=members,
+                severity=severity,
+                detail=(
+                    f"join '{check.relationship}' is declared {check.cardinality}, "
+                    f"and ({members}) on {check.identifier} is not unique: "
+                    f"{count} distinct over {row_count} rows "
+                    f"(~{row_count - count} duplicate rows). Each '{other}' row can "
+                    f"match several '{check.side_model}' rows, so anything "
+                    f"aggregated across this join is counted more than once"
+                    f"{floor_note}"
+                ),
+                data={
+                    "relationship": check.relationship,
+                    "declared_cardinality": check.cardinality,
+                    "model": check.model,
+                    "to_model": check.to_model,
+                    "side_model": check.side_model,
+                    "columns": list(check.columns),
+                    "distinct_count": count,
+                    "row_count": row_count,
+                    **floor_data,
+                },
+            )
+        )
+
     live = [copy for _baseline, copy in plan.fanout_pairs]
     rel_mod.verify_relationships(adapter, live, timeout_seconds=timeout_seconds)
     for baseline_rel, current_rel in plan.fanout_pairs:
@@ -1072,24 +1496,38 @@ def grain_drift(
             )
         )
     aggregate_columns = getattr(adapter, "column_aggregates", None)
+
+    def no_rows(dataset: Dataset) -> DriftFinding:
+        return DriftFinding(
+            axis="grain",
+            code="no_rows",
+            identifier=dataset.identifier,
+            severity="low",
+            detail=(
+                f"{dataset.identifier} has no rows; null fractions were not reported"
+            ),
+            data={"row_count": 0},
+        )
+
     for dataset, columns, row_count in plan.null_checks or []:
         if not callable(aggregate_columns):
             continue
         if row_count == 0:
-            findings.append(
-                DriftFinding(
-                    axis="grain",
-                    code="no_rows",
-                    identifier=dataset.identifier,
-                    severity="low",
-                    detail=(
-                        f"{dataset.identifier} has no rows; null fractions were not "
-                        "reported"
-                    ),
-                    data={"row_count": 0},
-                )
-            )
+            findings.append(no_rows(dataset))
             continue
+        probe = probes.get(dataset.identifier)
+        aggregates = list(
+            probe.aggregates
+            if probe is not None and probe.aggregates is not None
+            else aggregate_columns(dataset.identifier, columns)
+        )
+        if row_count is None:
+            # No free count before the scan; the scan's own COUNT(*) is the
+            # count, and adapters keep it for the rest of the command.
+            row_count = adapter.table_metadata(dataset.identifier)[0].row_count
+            if row_count == 0:
+                findings.append(no_rows(dataset))
+                continue
         joins = [
             {
                 "from_dataset": relation.from_dataset,
@@ -1100,7 +1538,7 @@ def grain_drift(
             for _baseline, relation in plan.fanout_pairs
             if relation.from_dataset == dataset.identifier
         ]
-        for aggregate in aggregate_columns(dataset.identifier, columns):
+        for aggregate in aggregates:
             fraction = aggregate.null_fraction
             if fraction is None or fraction < 0.95:
                 continue
@@ -1158,10 +1596,24 @@ def semantic_free_drift(
     baseline = snap.semantic_layer or SemanticLayer()
     current = current_semantic or SemanticLayer()
 
+    # Which reader produced each side comes first, because it decides whether
+    # the two sides can be compared definition by definition at all.
+    provenance = _provenance_change(baseline, current)
+    if provenance is not None:
+        findings.append(provenance)
+    vendor_changed = provenance is not None and provenance.code == (
+        "semantic_vendor_changed"
+    )
+    hashes_comparable = provenance is None
+
     base_defs = {("semantic_model", d.name): d for d in baseline.semantic_models}
     base_defs.update({("metric", m.name): m for m in baseline.metrics})
     cur_defs = {("semantic_model", d.name): d for d in current.semantic_models}
     cur_defs.update({("metric", m.name): m for m in current.metrics})
+    if vendor_changed:
+        # Another vendor's names are another vocabulary: every definition on
+        # both sides would read as removed and added, and none of it is drift.
+        base_defs, cur_defs = {}, {}
     # Relationships join the same generic added/removed/changed diff below,
     # but only when both sides actually captured them (#409): a baseline
     # pinned before this field existed has none, and comparing that against a
@@ -1196,6 +1648,8 @@ def semantic_free_drift(
             )
         )
     for key in sorted(base_defs.keys() & cur_defs.keys()):
+        if not hashes_comparable:
+            break
         if base_defs[key].content_sha256 != cur_defs[key].content_sha256:
             kind, name = key
             path = cur_defs[key].path
@@ -1389,6 +1843,72 @@ def semantic_free_drift(
     return findings
 
 
+def _provenance_change(
+    baseline: SemanticLayer, current: SemanticLayer
+) -> DriftFinding | None:
+    """A change in the reader behind the fingerprint, reported as itself.
+
+    A content hash is a hash of what one reader produced from a file, so a
+    different vendor, a different vendor release, or a different model format
+    version changes hashes nobody's edit changed. Reported once, ahead of the
+    definition diff, so an upgrade reads as an upgrade rather than as every
+    model in the layer redefined. Only fields both sides recorded are compared:
+    a baseline pinned before they existed records none, and an unrecorded side
+    is not a change.
+    """
+
+    def differs(field: str) -> tuple[str, str] | None:
+        before, after = getattr(baseline, field), getattr(current, field)
+        if before is None or after is None or before == after:
+            return None
+        return before, after
+
+    vendor = differs("vendor")
+    if vendor is not None:
+        return DriftFinding(
+            axis="semantic",
+            code="semantic_vendor_changed",
+            severity="medium",
+            detail=(
+                f"the baseline's semantic layer was read as {vendor[0]} and the "
+                f"current one as {vendor[1]}, so no definition was compared: "
+                "the two name their definitions in different vocabularies. "
+                "Re-run `maintain snapshot` once the move is the state you vouch "
+                "for"
+            ),
+            data={"vendor_before": vendor[0], "vendor_after": vendor[1]},
+        )
+    changes = {
+        field: change
+        for field in ("vendor_release", "format_version")
+        if (change := differs(field)) is not None
+    }
+    if not changes:
+        return None
+    described = "; ".join(
+        f"{field.replace('_', ' ')} {before} -> {after}"
+        for field, (before, after) in changes.items()
+    )
+    data: dict = {"vendor": current.vendor}
+    for field, (before, after) in changes.items():
+        data[f"{field}_before"] = before
+        data[f"{field}_after"] = after
+    return DriftFinding(
+        axis="semantic",
+        code="semantic_format_changed",
+        severity="medium",
+        detail=(
+            f"the {current.vendor or 'semantic'} layer was fingerprinted under a "
+            f"different release or model format than the baseline ({described}), "
+            "so definitions were not compared by content: an upgrade changes "
+            "every hash without changing a definition. Added and removed "
+            "definitions are still reported. Re-run `maintain snapshot` to "
+            "baseline the upgraded format"
+        ),
+        data=data,
+    )
+
+
 class CardinalityCheck(NamedTuple):
     identifier: str
     column: str
@@ -1463,13 +1983,21 @@ def _cardinality_in_scope(
 
 
 def cardinality_estimate(
-    adapter: Adapter, checks: list[CardinalityCheck]
+    adapter: Adapter,
+    checks: list[CardinalityCheck],
+    batched: dict[str, ProbeNeeds] | None = None,
 ) -> tuple[float, dict[str, float]]:
+    """Free dry-run pricing of the dimension-cardinality scan. A table in
+    ``batched`` (see :func:`batched_probes`) is priced by
+    :func:`grain_estimate` as part of its one statement, so it is left out."""
+
     query_estimate = getattr(adapter, "query_estimate", None)
     if query_estimate is None or not checks:
         return 0.0, {}
     per_table: dict[str, float] = {}
     for identifier, columns in _checks_by_table(checks).items():
+        if batched and identifier in batched:
+            continue
         per_table[identifier] = query_estimate(
             _distinct_count_sql(identifier, columns, adapter.dialect)
         )
@@ -1480,31 +2008,34 @@ def cardinality_drift(
     adapter: Adapter,
     checks: list[CardinalityCheck],
     current_semantic: SemanticLayer | None,
+    probes: dict[str, TableProbe] | None = None,
 ) -> list[DriftFinding]:
     """The billed half of the semantic axis: exact distinct counts on the
     categorical dimension columns versus the baseline. A moved count means the
     dimension widened or narrowed underneath its metrics; naming the new value
-    is deliberately left to a firewalled `explore query` if the user asks."""
+    is deliberately left to a firewalled `explore query` if the user asks.
+
+    ``probes`` is what ``maintain check`` already measured in each table's one
+    batched statement (see :func:`batched_probes`), read in place of a
+    separate distinct count where present."""
 
     findings: list[DriftFinding] = []
     if not checks:
         return findings
-    current = {meta.identifier for meta in adapter.list_objects()}
     semantic = current_semantic or SemanticLayer()
     models_by_name = {sm.name: sm for sm in semantic.semantic_models}
 
-    for identifier in _checks_by_table(checks):
-        if identifier not in current:
-            continue
-        _meta, live_columns = adapter.table_metadata(identifier)
-        live_names = {c.name for c in live_columns}
+    for identifier, columns in _live_cardinality_columns(adapter, checks).items():
         live = [
             check
             for check in checks
-            if check.identifier == identifier and check.column in live_names
+            if check.identifier == identifier and check.column in columns
         ]
-        counts = adapter.exact_distinct_counts(
-            identifier, sorted({check.column for check in live})
+        probe = (probes or {}).get(identifier)
+        counts = (
+            probe.distinct
+            if probe is not None
+            else adapter.exact_distinct_counts(identifier, columns)
         )
         for check in live:
             after = counts.get(check.column)
@@ -1614,6 +2145,32 @@ def rank_findings(findings: list[DriftFinding]) -> list[DriftFinding]:
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+def _live_cardinality_columns(
+    adapter: Adapter, checks: list[CardinalityCheck]
+) -> dict[str, list[str]]:
+    """Per table that still exists, the checked columns it still has, sorted:
+    exactly what :func:`cardinality_drift` counts. A vanished table or column
+    is the schema axis's story."""
+
+    if not checks:
+        return {}
+    current = {meta.identifier for meta in adapter.list_objects()}
+    live: dict[str, list[str]] = {}
+    for identifier in _checks_by_table(checks):
+        if identifier not in current:
+            continue
+        _meta, live_columns = adapter.table_metadata(identifier)
+        live_names = {c.name for c in live_columns}
+        live[identifier] = sorted(
+            {
+                check.column
+                for check in checks
+                if check.identifier == identifier and check.column in live_names
+            }
+        )
+    return live
 
 
 def _checks_by_table(checks: list[CardinalityCheck]) -> dict[str, list[str]]:

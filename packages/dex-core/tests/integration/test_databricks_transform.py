@@ -133,7 +133,7 @@ def test_init_plan_apply_build_into_the_scratch_catalog(
         ],
         capsys,
     )
-    assert rc == 0, built
+    assert_ok(rc, built)
     assert built["status"] == "ok"
     statuses = {n["name"]: n["status"] for n in built["data"]["nodes"]}
     assert statuses.get(MODEL_NAME) == "success"
@@ -264,5 +264,5 @@ def test_unpivot_json_object_macro_builds_live(
         ],
         capsys,
     )
-    assert rc == 0, built
+    assert_ok(rc, built)
     assert_unpivot_build(built)

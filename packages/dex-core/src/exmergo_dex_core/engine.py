@@ -36,6 +36,7 @@ its filesystem at all can supply the connection instead; see ``connection=`` and
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -54,6 +55,13 @@ from .envelope import Connection, Paradigm
 from .errors import RepoRootRequiredError, StoreRequiredError
 from .results import ConnectResult
 from .storage import ExploreStore, MemoryStore, Store, StoreContext, build_store
+from .values_free import (
+    ResultMode,
+    ValuesFreeCode,
+    ValuesFreeError,
+    call_withholding,
+    parse_result_mode,
+)
 
 if TYPE_CHECKING:
     from .adapters.base import Adapter
@@ -163,6 +171,13 @@ class DexEngine:
     to a call, for the same reason the cache does: it is part of what this
     principal may see, and changing it is a different visibility posture, so it
     deserves a different engine.
+
+    ``result_mode="values_free"`` is the same kind of posture, for a host whose
+    model may see no value read from a table (#591; see :mod:`.values_free`). It
+    pins the engine: every call runs in the mode, a call that asks for
+    ``result_mode="full"`` is refused, and a method that was not reviewed for the
+    mode refuses before it opens anything. A full engine lets one call opt in
+    with ``result_mode="values_free"``. It is never read from ``config``.
     """
 
     def __init__(
@@ -183,6 +198,7 @@ class DexEngine:
         connection: ConnectionSource | None = None,
         semantic_source: SemanticSource | None = None,
         project_format: ExploreProject | None = None,
+        result_mode: ResultMode | str = ResultMode.FULL,
     ) -> None:
         # Two config attributes, deliberately. `config` is what commands read and
         # is always a real object; `_declared` records whether one was actually
@@ -214,6 +230,11 @@ class DexEngine:
         # read authenticates with, and a deployment may well use one and not the
         # other. Read once per semantic command, never held.
         self.semantic_source = semantic_source
+        # The values-free mode (#591), held by the engine because the host that
+        # built it is the only party that may choose it: an engine built in the
+        # mode is pinned to it, and nothing a call or the repository says can
+        # take it back out. Never read from `config`, which an agent may write.
+        self.result_mode: ResultMode = parse_result_mode(result_mode) or ResultMode.FULL
         # Session defaults for the confirm handshake. Per-call arguments override
         # them; a confirmed engine confirms every call it makes, which is the
         # reason to prefer confirming the call.
@@ -304,6 +325,26 @@ class DexEngine:
             )
         return engine
 
+    # --- the values-free mode -------------------------------------------------
+
+    def resolve_result_mode(
+        self, requested: ResultMode | str | None = None
+    ) -> ResultMode:
+        """The mode one call runs in: what it asked for, within what the engine allows.
+
+        An engine built in values-free mode is pinned, so a call asking for full
+        results is refused rather than quietly granted or quietly downgraded: a
+        host that pinned the mode and sees a full result has a bug it needs to
+        hear about. A full engine lets a call opt in.
+        """
+
+        call = parse_result_mode(requested)
+        if self.result_mode is ResultMode.VALUES_FREE:
+            if call is ResultMode.FULL:
+                raise ValuesFreeError(ValuesFreeCode.RESULT_MODE_PINNED)
+            return ResultMode.VALUES_FREE
+        return call or ResultMode.FULL
+
     # --- the single adapter funnel ------------------------------------------
 
     def _adapter(
@@ -336,7 +377,9 @@ class DexEngine:
         A rebuild settles the outgoing gate first. It has normally settled
         itself already, on its own way out; this covers the command that raised
         past that point, so the headroom it booked is released by the next
-        command rather than held until the UTC rollover.
+        command rather than held until the UTC rollover, and what the warehouse
+        billed it beyond its statements (Snowflake's resume minimum and idle
+        tail) is booked before the next command's gate starts afresh.
 
         ``reads_dev_target`` is per call for the same reason the gate is. A
         verified build judges the relations dbt writes into the dev namespace,
@@ -576,6 +619,7 @@ class DexEngine:
                 t and (t.workgroup or t.cluster_identifier or t.host or t.dbname)
             ),
             "clickhouse": lambda t: bool(t and (t.host or t.database)),
+            "trino": lambda t: bool(t and t.host),
         }
         target = getattr(self.config, connector, None)
         if configured.get(connector, lambda _t: False)(target):
@@ -672,6 +716,14 @@ class DexEngine:
                 database=getattr(adapter, "_database", None)
                 or getattr(configured, "database", None),
                 databases=shown(self.scopes or getattr(configured, "databases", None)),
+            )
+        if connector == "trino":
+            # The adapter's host is the bare hostname discovery resolved, never
+            # the URL it may have come from, which can carry a password.
+            return compact(
+                host=getattr(adapter, "host", None)
+                or getattr(configured, "host", None),
+                catalogs=shown(self.scopes or getattr(configured, "catalogs", None)),
             )
         return {}
 
@@ -935,7 +987,9 @@ class DexEngine:
 
     # --- connect --------------------------------------------------------------
 
-    def connect_test(self) -> ConnectResult:
+    def connect_test(
+        self, *, result_mode: ResultMode | str | None = None
+    ) -> ConnectResult:
         """Open the connection and report what this connector can do.
 
         Free on every connector, and the first thing worth running against a new
@@ -943,11 +997,17 @@ class DexEngine:
         that will govern everything after it.
         """
 
-        adapter = self._adapter("connect test")
-        return ConnectResult(
-            capabilities=adapter.capabilities(),
-            cost=command_args.preflight_cost(adapter),
-        )
+        mode = self.resolve_result_mode(result_mode)
+
+        def run() -> ConnectResult:
+            adapter = self._adapter("connect test")
+            return ConnectResult(
+                capabilities=adapter.capabilities(),
+                cost=command_args.preflight_cost(adapter),
+                result_mode=mode,
+            )
+
+        return call_withholding(mode, run)
 
     # --- explore --------------------------------------------------------------
     #
@@ -956,11 +1016,25 @@ class DexEngine:
     # bottom, and the CLI and a library call run identical code.
 
     def inventory(
-        self, *, rank: bool = False, limit: int | None = None, show_all: bool = False
+        self,
+        *,
+        rank: bool = False,
+        limit: int | None = None,
+        show_all: bool = False,
+        result_mode: ResultMode | str | None = None,
     ) -> InventoryResult:
         from .explore import commands as explore
 
-        return explore.inventory(self, rank=rank, limit=limit, show_all=show_all)
+        mode = self.resolve_result_mode(result_mode)
+        return call_withholding(
+            mode,
+            explore.inventory,
+            self,
+            rank=rank,
+            limit=limit,
+            show_all=show_all,
+            result_mode=mode,
+        )
 
     def profile(
         self,
@@ -969,16 +1043,21 @@ class DexEngine:
         use_project: bool = False,
         check_cumulative: bool = False,
         show_all_columns: bool = False,
+        result_mode: ResultMode | str | None = None,
     ) -> ProfileResult:
         from .explore import commands as explore
 
-        return explore.profile(
+        mode = self.resolve_result_mode(result_mode)
+        return call_withholding(
+            mode,
+            explore.profile,
             self,
             list(objects),
             refresh=refresh,
             show_all_columns=show_all_columns,
             use_project=use_project,
             check_cumulative=check_cumulative,
+            result_mode=mode,
         )
 
     def relationships(
@@ -989,16 +1068,21 @@ class DexEngine:
         refresh: bool = False,
         use_project: bool = False,
         use_hosted_semantic_layer: bool = False,
+        result_mode: ResultMode | str | None = None,
     ) -> RelationshipsResult:
         from .explore import commands as explore
 
-        return explore.relationships(
+        mode = self.resolve_result_mode(result_mode)
+        return call_withholding(
+            mode,
+            explore.relationships,
             self,
             verify=verify,
             infer_by_overlap=infer_by_overlap,
             refresh=refresh,
             use_project=use_project,
             use_hosted_semantic_layer=use_hosted_semantic_layer,
+            result_mode=mode,
         )
 
     def map(
@@ -1011,10 +1095,14 @@ class DexEngine:
         refresh: bool = False,
         use_project: bool = False,
         use_hosted_semantic_layer: bool = False,
+        result_mode: ResultMode | str | None = None,
     ) -> MapResult:
         from .explore import commands as explore
 
-        return explore.map(
+        mode = self.resolve_result_mode(result_mode)
+        return call_withholding(
+            mode,
+            explore.map,
             self,
             full=full,
             infer_by_overlap=infer_by_overlap,
@@ -1023,15 +1111,35 @@ class DexEngine:
             refresh=refresh,
             use_project=use_project,
             use_hosted_semantic_layer=use_hosted_semantic_layer,
+            result_mode=mode,
         )
 
-    def query(self, sql: str, *, auto_profile: bool | None = None) -> QueryResult:
+    def query(
+        self,
+        sql: str,
+        *,
+        auto_profile: bool | None = None,
+        result_mode: ResultMode | str | None = None,
+    ) -> QueryResult:
+        """One SELECT through the query firewall.
+
+        In values-free mode only an aggregate-only statement runs (see
+        :mod:`.guards.values_free_shape`); any other shape is refused with a
+        :class:`~.values_free.ValuesFreeError` naming the rule, and no cell.
+        """
+
         from .explore import commands as explore
 
-        return explore.query(self, sql, auto_profile=auto_profile)
+        mode = self.resolve_result_mode(result_mode)
+        return call_withholding(
+            mode, explore.query, self, sql, auto_profile=auto_profile, result_mode=mode
+        )
 
     def query_batch(
-        self, *sql: str, auto_profile: bool | None = None
+        self,
+        *sql: str,
+        auto_profile: bool | None = None,
+        result_mode: ResultMode | str | None = None,
     ) -> QueryBatchResult:
         """Several statements in one call, each with its own verdict.
 
@@ -1043,7 +1151,41 @@ class DexEngine:
 
         from .explore import commands as explore
 
-        return explore.query_batch(self, list(sql), auto_profile=auto_profile)
+        mode = self.resolve_result_mode(result_mode)
+        return call_withholding(
+            mode,
+            explore.query_batch,
+            self,
+            list(sql),
+            auto_profile=auto_profile,
+            result_mode=mode,
+        )
+
+    def query_across(
+        self,
+        *sql: str,
+        targets: list[str],
+        auto_profile: bool | None = None,
+        result_mode: ResultMode | str | None = None,
+    ) -> QueryBatchResult:
+        """Each statement once per target dataset, in one call (#545).
+
+        Each statement names its dataset as ``{ds}``; every result carries the
+        ``target`` it ran against. See :func:`.explore.commands.query_across`.
+        """
+
+        from .explore import commands as explore
+
+        mode = self.resolve_result_mode(result_mode)
+        return call_withholding(
+            mode,
+            explore.query_across,
+            self,
+            list(sql),
+            targets,
+            auto_profile=auto_profile,
+            result_mode=mode,
+        )
 
     def cluster(
         self,
@@ -1059,7 +1201,9 @@ class DexEngine:
             self, obj, features=features, k=k, auto_profile=auto_profile
         )
 
-    def diagram(self, *, full: bool = False) -> DiagramResult:
+    def diagram(
+        self, *, full: bool = False, result_mode: ResultMode | str | None = None
+    ) -> DiagramResult:
         """The cached map as a Mermaid ER diagram. Reads the store, nothing else.
 
         Free on every connector and the one explore method that opens no
@@ -1070,7 +1214,10 @@ class DexEngine:
 
         from .explore import commands as explore
 
-        return explore.diagram(self, full=full)
+        mode = self.resolve_result_mode(result_mode)
+        return call_withholding(
+            mode, explore.diagram, self, full=full, result_mode=mode
+        )
 
     # The two semantic methods import from `explore.semantic.commands`, not from
     # `explore.commands`: on the hosted backend dbt Cloud renders and executes the
@@ -1087,10 +1234,14 @@ class DexEngine:
         full: bool = False,
         api: bool = False,
         local: bool = False,
+        result_mode: ResultMode | str | None = None,
     ) -> SemanticListResult:
         from .explore.semantic import commands as semantic_cmds
 
-        return semantic_cmds.semantic_list(
+        mode = self.resolve_result_mode(result_mode)
+        result = call_withholding(
+            mode,
+            semantic_cmds.semantic_list,
             self,
             metrics=metrics,
             for_dimensions=for_dimensions,
@@ -1099,6 +1250,8 @@ class DexEngine:
             api=api,
             local=local,
         )
+        result.result_mode = mode
+        return result
 
     def semantic_values(
         self,
@@ -1475,14 +1628,32 @@ class DexEngine:
             self, intent, edits, definitions=definitions, no_parse=no_parse
         )
 
-    def semantic_ossie(
-        self, mode: str, intent: str, edits: list[PlanEdit]
+    def semantic_native(
+        self, vendor: str, mode: str, intent: str, edits: list[PlanEdit]
     ) -> PlanResult:
-        """Plan native semantic-document edits on the semantic-layer axis."""
+        """Plan native semantic-document edits on the semantic-layer axis.
+
+        ``vendor`` must be the configured ``semantic.vendor``, and its layer
+        validates the edits in its own format.
+        """
 
         from .transform import native_semantic
 
-        return native_semantic.semantic_ossie(self, intent, edits, mode=mode)
+        return native_semantic.semantic_native(self, vendor, intent, edits, mode=mode)
+
+    def semantic_ossie(
+        self, mode: str, intent: str, edits: list[PlanEdit]
+    ) -> PlanResult:
+        """`semantic ossie`: :meth:`semantic_native` for a native Ossie layer."""
+
+        return self.semantic_native("ossie", mode, intent, edits)
+
+    def semantic_slayer(
+        self, mode: str, intent: str, edits: list[PlanEdit]
+    ) -> PlanResult:
+        """`semantic slayer`: :meth:`semantic_native` for SLayer model files."""
+
+        return self.semantic_native("slayer", mode, intent, edits)
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -1492,9 +1663,11 @@ class DexEngine:
         Idempotent. The CLI closes from a ``finally``, so this is the funnel that
         catches a command interrupted partway: without it, a gate that had been
         admitted but never settled would hold its estimate against the day's
-        cumulative ceiling until the UTC rollover. Releasing must not be able to
-        stop the connection closing, so a store that cannot be reached at this
-        point loses the release rather than leaking the connection.
+        cumulative ceiling until the UTC rollover, and the warehouse time it
+        settles beyond the statements would never reach the ledger. Releasing
+        must not be able to stop the connection closing, so a store that cannot
+        be reached at this point loses the release rather than leaking the
+        connection.
         """
 
         adapter = self._adapter_instance
@@ -1513,3 +1686,63 @@ class DexEngine:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+# Every public method of the engine not named here refuses in values-free mode
+# (#591). An allowlist rather than a denylist, so a command added later refuses
+# until someone has reviewed what it returns. The allowlisted commands take a
+# per-call `result_mode` and hold their own errors to it; the rest are the helpers
+# those commands call on the engine, which return no warehouse data of their own.
+_VALUES_FREE_METHODS = frozenset(
+    {
+        # The reviewed commands (see `values_free.ALLOWED_COMMANDS`).
+        "connect_test",
+        "inventory",
+        "profile",
+        "relationships",
+        "map",
+        "diagram",
+        "query",
+        "query_batch",
+        "query_across",
+        "semantic_list",
+        # The engine's own plumbing.
+        "resolve_result_mode",
+        "connection_provenance",
+        "settled_spend",
+        "project_dir",
+        "project_format",
+        "semantic_catalog_source",
+        "semantic_catalog_format",
+        "maintain_project",
+        "project_tier_note",
+        "editable_project",
+        "require_repo_root",
+        "require_full_store",
+        "close",
+    }
+)
+
+
+def _refused_in_values_free(name: str, method: Any) -> Any:
+    @functools.wraps(method)
+    def guarded(self: DexEngine, *args: Any, **kwargs: Any) -> Any:
+        if self.result_mode is ResultMode.VALUES_FREE:
+            raise ValuesFreeError(
+                ValuesFreeCode.COMMAND_NOT_VALUES_FREE, command=f"DexEngine.{name}"
+            )
+        return method(self, *args, **kwargs)
+
+    return guarded
+
+
+for _name, _member in list(vars(DexEngine).items()):
+    if (
+        _name.startswith("_")
+        or _name in _VALUES_FREE_METHODS
+        or not callable(_member)
+        or isinstance(_member, (classmethod, staticmethod))
+    ):
+        continue
+    setattr(DexEngine, _name, _refused_in_values_free(_name, _member))
+del _name, _member

@@ -117,7 +117,12 @@ and in an `elided_*` field. `--detail` widens the selection to every column and
 to objects that were inventoried but never profiled, and lifts no cap.
 
 Past 50 objects, `map` profiles only the top 25 by rank and says so in `notes`
-(with `skipped_count`); `--full` profiles everything. On a re-map, objects
+(with `skipped_count`); `--full` profiles everything. `data.skipped` names the
+skipped objects in rank order (`objects`, highest first) and groups them by
+namespace (`by_namespace`), each list capped at 25 with the rest counted in
+`elided` and `elided_namespaces`. When the next step needs a skipped object, run
+`explore profile` on the ones you need rather than probing each in turn. On a
+re-map, objects
 skipped this run keep their prior profiles (`carried_forward_count`), each
 stamped with its own `profiled_at`, so staleness is visible. Fresh cached
 profiles are reused the same way `profile` reuses them (`cache_hit_count`,
@@ -148,6 +153,45 @@ first and the statement then runs. The envelope names it under
 `data.profiled_on_demand`, and on a metered connector that profile is priced
 into the same confirmation as the statements. `--no-auto-profile` restores the
 strict prerequisite.
+
+`--across dev_raw,qa_raw,prod_raw` asks one question of mirrored environments
+(the "is this a dev fixture artefact or real in prod?" check): write the dataset
+as `{ds}` in each statement, and each runs once per target in one call and one
+handshake. Every entry in `data.results` carries its `target` and `template`, and
+a refusal names the target that failed while the others still answer. Targets
+are plain dataset names; statements times targets counts against
+`query.max_statements`.
+
+### Values-free mode
+
+A host can pin values-free mode (`DEX_RESULT_MODE=values_free`, or a
+`--values-free` flag on the command), and every envelope then carries
+`data.result_mode: "values_free"`. No value read from a table reaches you in it,
+so a statement runs only if every output column is an aggregate over the rows it
+reads and the result is one row:
+
+- Allowed aggregates: `COUNT` (with `DISTINCT` inside it), `COUNT_IF`/`COUNTIF`,
+  the approximate distinct counts, `SUM`, `AVG`, `STDDEV`/`VARIANCE` and their
+  variants, `CORR`, `COVAR_*`, `BOOL_AND`, `BOOL_OR`, `ENTROPY`, `KURTOSIS`,
+  `SKEWNESS`, and `FILTER (WHERE ...)` on any of them. Around them: numbers,
+  arithmetic, comparisons, `CASE`, a numeric cast, `ROUND`, `COALESCE`, `NULLIF`.
+- Refused, each with its `data.code`: a bare column (`bare_column`), a column in
+  `GROUP BY` (`group_by_column`), `DISTINCT` (`distinct_projection`), `LIMIT` or
+  `OFFSET` (`limit_offset`), `ORDER BY` (`order_by`), a window
+  (`window_function`), `MIN`, `MAX`, `ANY_VALUE`, `MODE`, a median, a quantile,
+  `ARRAY_AGG` or `STRING_AGG` (`aggregate_not_allowed`), a text literal in the
+  select list (`literal_projection`), a set operation (`set_operation`).
+- `WHERE`, `HAVING`, joins and subqueries in `FROM` are unrestricted. To compare
+  groups, ask one filtered count per group (`count(*) filter (where status =
+  'paid')`), not a `GROUP BY`.
+- A warehouse error arrives as `code: warehouse_refused` with its words withheld;
+  rewrite the statement rather than asking for the message.
+
+`explore profile` in the mode lists `withheld_fields` (`min_value`, `max_value`,
+`value_domain`) on each dataset; everything else is unchanged. Commands not
+reviewed for the mode (`cluster`, `semantic values`/`query`, every `transform`
+and `maintain` command) refuse with `code: command_not_values_free`. Tell the
+user rather than looking for a way around it.
 
 ## `explore cluster <object> [--features a,b,c] [-k N]`
 
@@ -251,6 +295,32 @@ it as `execution` (`dex` or `vendor`).
   carries its `semantic_model`, that model carries its `relation`, and
   `explore profile` then `explore query` reach the values. `--api` is refused
   too, since Ossie has no hosted deployment.
+- `semantic.vendor: slayer` reads the SLayer model files named in
+  `semantic.slayer.models` (needs the `[slayer]` extra). `list` and
+  `--for-dimension` answer: a metric is a saved measure named `model.measure`,
+  and a dimension token is `model.column`. `values` and `query` run locally
+  with `execution: dex`: SLayer renders the SQL as a dry run, never opening a
+  datasource or reading a credential, and dex runs it through the same guards
+  as `--local` (PII gate, SELECT-only, relation pre-check, cost handshake,
+  columnar cap). The `[semantic]` extra is not needed. What a query can say:
+  - every metric in one query sits on one model, and an ad-hoc formula is
+    refused;
+  - `--group-by` takes that model's own columns (`orders.status`); a column
+    reached through a join is not groupable;
+  - `--grain` buckets the model's `default_time_dimension` at a built-in SLayer
+    grain (`day`, `week`, `month`, ...), and a model with none refuses it;
+  - `--where` is SLayer's filter syntax, not Jinja: `status = 'paid'`, read
+    relative to the query's model, or a dotted column through a declared join.
+    A clause dex cannot read, or one carrying `{variable}` syntax, is refused;
+  - `--order-by` names one of the query's own metrics or grouped columns;
+    write a descending one as `--order-by=-orders.revenue`, since with a space
+    the leading `-` is read as a flag and refused.
+
+  `values` is rooted at the dimension's own model (`scoped_to` empty, the
+  model's own filters applied), or at the `--metric` model when one is named,
+  in which case the dimension must be groupable for it. Connectors: DuckDB,
+  BigQuery, Snowflake, Postgres, and Redshift; Databricks, ClickHouse and Trino
+  refuse with the reason. `--api` is refused, since dex reads no hosted SLayer.
 
 `dimension_scope` says whether a dimension row is one declaration or one
 groupable path, which is why two backends can report different dimension counts

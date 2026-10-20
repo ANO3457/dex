@@ -264,6 +264,14 @@ def test_screen_blocks_pii_name_allows_clean():
     assert "user__pricing_tier" not in blocked
 
 
+def test_screen_reads_a_dotted_token_as_separated_words():
+    # SLayer names a dimension `model.column`. Read as one word, `orders.email`
+    # matched no pattern and passed the heuristic it should have failed.
+    blocked = dict(screen_dimension_refs(["orders.email", "orders.status"]))
+    assert "orders.email" in blocked
+    assert "orders.status" not in blocked
+
+
 def test_screen_meta_lookup_is_authoritative():
     blocked = dict(
         screen_dimension_refs(

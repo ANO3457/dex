@@ -1,6 +1,7 @@
 ---
 name: transform
-description: 'Use this to author and change a dbt project or a semantic layer: bootstrap a project in a repo that has none (`transform init`), write or refactor model SQL from staging to marts, add tests and docs in schema.yml, manage dependencies, and define or update the semantic layer, whether that is dbt semantic models (MetricFlow: entities, dimensions, measures, metrics) or native Apache Ossie documents in a repo with no dbt project at all. Reach for this rather than editing model files by hand whenever the change spans more than one file or has to stay consistent with the rest of the project: it validates the edit against the real schema before writing, returns the change as a reviewable diff with a plan id, and catches the class of error that only surfaces at `dbt run`, such as wrong column names, broken refs, or a materialization that fights the project config. On a large project that check is worth more than the round trip costs. It applies to bug-fix tickets too: "this model returns wrong numbers, fix it" is a transform task. Trigger it for requests like "set up a dbt project in this repo", "build a staging model for this table", "refactor this model", "add tests to this model", "create a mart for X", "define a revenue metric", "add a dimension to this entity", "add a metric to my Ossie semantic model", or "update semantics/commerce.ossie.yaml". Any warehouse build is dev-target only, gated, and cost-surfaced first. If you do not yet know the source tables'' columns or grain, use explore first, then come back. To reconcile a project that has drifted out of sync with the warehouse, use maintain.'
+description: 'Use this to author and change a dbt project or a semantic layer: bootstrap a project (`transform init`), write or refactor models from staging to marts, add tests and docs, and define semantic models, entities, dimensions, and metrics in MetricFlow, Apache Ossie or SLayer YAML. Reach for it instead of editing model files by hand whenever a change spans more than one file or must stay consistent with the project: it validates the edit against the real schema, returns a reviewable diff with a plan id, and catches what otherwise fails at `dbt run`, such as wrong columns or broken refs. Bug-fix tickets count: "this model returns wrong numbers, fix it" is a transform task. Also for "build a staging model for this table", "define a revenue metric", "add a dimension to this entity". Warehouse builds are dev-target only, gated, and cost-surfaced first. If you have not verified the source tables'' columns or grain, use explore first. For a project that drifted from the warehouse, use maintain.'
+compatibility: 'Needs a local shell and uv. On first use, uv downloads the exmergo-dex-core engine from PyPI at the version scripts/run.py pins. Runs in Claude Code or another agent that loads Agent Skills and has a shell, not in claude.ai chat.'
 ---
 
 # Transform
@@ -46,9 +47,23 @@ or `.dex/plans/` by hand in place of the command that guards them.
 
 ## Running the engine
 
+Run commands from the user's project directory, so dex finds that project's
+configuration and writes its cache there. The wrapper path is absolute:
+
+- In Claude Code, `${CLAUDE_SKILL_DIR}` is supplied by the host.
+- In Codex or another Agent Skills host, resolve the directory containing this
+  installed `SKILL.md` from the path the host provides. Substitute that absolute
+  directory for `${CLAUDE_SKILL_DIR}` in every command and reference below,
+  including paths in the bundled reference files. Do not assume that environment
+  variable exists, and do not change into the installed skill directory.
+
 ```bash
 uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [flags]
 ```
+
+Installed as a plugin or skill, `run.py` runs the `exmergo-dex-core` engine from
+PyPI at the exact version its `DEX_CORE_VERSION` line pins, built from
+https://github.com/exmergo/dex/tree/main/packages/dex-core.
 
 - `uv` is a prerequisite that Claude Code does not install. If the shell reports
   `uv: command not found`, stop and tell the user to install it
@@ -80,8 +95,10 @@ uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [
    `${CLAUDE_SKILL_DIR}/references/edit-kinds.md`. For a rename or a removal,
    use `transform rename` / `transform remove` instead of assembling edits. For a
    derived column several models need, ask `transform place` where it belongs.
-   For the semantic layer, use `semantic define|update|plan` (dbt) or
-   `semantic ossie define|update|plan` (native Ossie); read
+   For the semantic layer, use the command for the vendor `semantic.vendor`
+   names (`dex config get semantic` reads it): `semantic define|update|plan`
+   (dbt), `semantic ossie define|update|plan` (native Ossie), or
+   `semantic slayer define|update|plan` (SLayer model files). Read
    `${CLAUDE_SKILL_DIR}/references/semantic-layer.md` first.
 4. **Read the plan** (rules below), then `transform apply <plan-id>`.
 5. **Build and verify:** `transform build --target dev --verify`.
@@ -164,6 +181,20 @@ a field, flag, or macro you need is not described here.
 - For native Ossie, edit only documents whose paths are listed in
   `semantic.ossie.files`, as whole documents. `maintain reconcile` never authors
   into Ossie; this command does.
+- For SLayer, edit only the model files listed in `semantic.slayer.models`, as
+  whole files in the pinned format `version`. dex owns those files: never
+  generate them with `slayer import-dbt`, and never run SLayer tooling that
+  rewrites them (`slayer serve`, `slayer ingest`,
+  `validate-models --persist-cardinality`). The wrapper installs the `[slayer]`
+  extra for `semantic slayer`; a `reason: prerequisite` refusal names the
+  install to relay.
+- SLayer declares no entities, no aggregation on a saved measure (the formula
+  carries it, as in `amount:sum`), and no per-measure time dimension (only the
+  model's `default_time_dimension`). Never write those into a SLayer model.
+  SLayer itself ignores a key it does not know, so dex refuses any key the
+  pinned release does not declare (`[unknown_key]`, naming the file, the element
+  and the release, and what SLayer uses instead where there is an equivalent):
+  remove it rather than looking for a spelling that passes.
 
 ### Seeds and PII
 
@@ -203,8 +234,9 @@ a field, flag, or macro you need is not described here.
   re-run to make it go away: relay the finding, its two counts, and the join it
   names. Relay a suppression too: it separates "checked and clean" from "not
   checked".
-- On ClickHouse, keep the `custom_settings` block in `profiles.yml`; it is how the
-  confirmed budget becomes a server-side cap.
+- On ClickHouse, keep the `custom_settings` block in `profiles.yml`, and on Trino
+  the `session_properties` block; each is how the confirmed budget becomes a
+  server-side cap.
 
 ### Test mutation
 
@@ -231,6 +263,6 @@ a field, flag, or macro you need is not described here.
 - `${CLAUDE_SKILL_DIR}/references/init-and-dev-target.md`: per-connector init and
   how to prepare a dev target.
 - `${CLAUDE_SKILL_DIR}/references/semantic-layer.md`: authoring dbt semantic
-  models and native Ossie documents.
+  models, native Ossie documents, and SLayer model files.
 - `${CLAUDE_SKILL_DIR}/references/macros.md`: the shipped macros and the
   `unpivot_json_object` contract.

@@ -47,7 +47,10 @@ COST_DOC = "references/cost-controls.md"
 
 # Append-only history. Every past wording of every policy is in here on purpose,
 # and rewriting history to satisfy a lint is worse than the drift it would catch.
-EXEMPT = frozenset({"CHANGELOG.md"})
+# A fragment in changelog.d/ is the same history before a release collects it
+# into CHANGELOG.md, so a fragment recording a threshold change is exempt too.
+# The directory's README is a guide rather than history, and stays checked.
+EXEMPT = re.compile(r"CHANGELOG\.md|changelog\.d/(?!README\.md$)[^/]+")
 
 # Where the PII blocking threshold may be stated, and why. Everything else links
 # to references/pii-policy.md.
@@ -76,6 +79,9 @@ def versioned_markdown() -> dict[str, str]:
     `git ls-files` rather than a glob, for the same reason the em-dash CI job uses
     it: `unversioned-docs/` is present in a working tree and absent in CI, and a
     check that sees different files on the two machines is worse than no check.
+    MDX counts as markdown: the documentation site's hand-written pages under
+    `docs/` are public prose, and a restated threshold there drifts like
+    anywhere else.
     """
 
     # Tracked files, plus files that are new but not ignored. Without the second
@@ -86,7 +92,7 @@ def versioned_markdown() -> dict[str, str]:
     paths: list[str] = []
     for extra in ([], ["--others", "--exclude-standard"]):
         listed = subprocess.run(  # noqa: S603  (a fixed argv, no shell)
-            [GIT, "ls-files", "-z", *extra, "*.md", "*.mdc"],
+            [GIT, "ls-files", "-z", *extra, "*.md", "*.mdc", "*.mdx"],
             cwd=ROOT,
             capture_output=True,
             text=True,
@@ -96,7 +102,7 @@ def versioned_markdown() -> dict[str, str]:
     return {
         path: (ROOT / path).read_text(encoding="utf-8")
         for path in sorted(set(paths))
-        if path not in EXEMPT and (ROOT / path).is_file()
+        if not EXEMPT.fullmatch(path) and (ROOT / path).is_file()
     }
 
 
@@ -275,6 +281,11 @@ def test_relative_links_between_documents_resolve():
 
     broken = []
     for path, text in versioned_markdown().items():
+        # Site pages link by route (`/dex/guardrails/cost-controls`), not by file,
+        # and `scripts/build_docs_site.py` resolves every one of them against the
+        # assembled site.
+        if path.startswith("docs/") and path.endswith(".mdx"):
+            continue
         base = (ROOT / path).parent
         for line_no, line in enumerate(text.splitlines(), start=1):
             for target in LINK.findall(line):

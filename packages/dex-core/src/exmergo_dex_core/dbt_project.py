@@ -378,10 +378,10 @@ def target_identifiers(
 
     Where ``resolve_target`` answers "which adapter", this answers "which
     database, schema, warehouse". It exists so the engine can compare the
-    rendered profile against ``.dex/config.yml`` and refuse a build whose config
-    has silently drifted out of the profile that actually governs it. Missing
-    profile or target yields ``{}``: the caller degrades to no check rather than
-    erroring on a project it cannot read.
+    profile's target identifiers against ``.dex/config.yml`` and refuse a build
+    whose config has silently drifted out of the profile that actually governs
+    it. Missing profile or target yields ``{}``: the caller degrades to no check
+    rather than erroring on a project it cannot read.
     """
 
     project = Path(project_dir)
@@ -495,6 +495,15 @@ def duckdb_target_path(
     raw_path = output.get("path")
     if not raw_path or str(raw_path) == ":memory:":
         return None
+    if "{{" in str(raw_path):
+        import os
+
+        from .connect import _profile_scalar
+
+        resolved = _profile_scalar(raw_path, os.environ)
+        if not resolved:
+            return None
+        raw_path = resolved
     path = Path(str(raw_path))
     return path if path.is_absolute() else project / path
 
@@ -757,16 +766,19 @@ _JINJA_COMMENT = re.compile(r"\{#.*?#\}", re.DOTALL)
 _JINJA_REGION = re.compile(r"\{\{(.*?)\}\}|\{%(.*?)%\}", re.DOTALL)
 _CALL_START = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.]*)\s*\(")
 _QUOTED_ARG = re.compile(r"^(['\"])([^'\"]*)\1$")
+# `==` is a comparison, not a keyword argument.
+_KEYWORD_ARG = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=(?!=)")
 
 
 class JinjaCall(BaseModel):
     """One call written inside a jinja region, with its arguments as read.
 
     An ``args`` entry is the literal string dex read, or ``None`` where the
-    argument was anything else: a variable, a concatenation, a nested call, a
-    keyword form. ``None`` means *dex did not resolve this*, never *there is
-    nothing here*, and every consumer has to keep that distinction: collapsing
-    the two is how a reference silently goes missing.
+    argument was anything else: a variable, a concatenation, or a nested call.
+    A keyword form is dropped from ``args`` rather than recorded as ``None``.
+    ``None`` means *dex did not resolve this*, never *there is nothing here*,
+    and every consumer has to keep that distinction: collapsing the two is how
+    a reference silently goes missing.
 
     Nested calls are reported in their own right, so ``{{ ref(var('x')) }}``
     yields both the resolved ``var('x')`` and the unresolved ``ref``. Reporting
@@ -927,26 +939,38 @@ def _split_args(inner: str, masked_inner: str, base: int) -> tuple[_Argument, ..
     args: list[_Argument] = []
     depth = 0
     start = 0
+
+    def append(end: int) -> None:
+        parsed = _literal(inner[start:end], base + start)
+        if parsed is not None:
+            args.append(parsed)
+
     for index, char in enumerate(masked_inner):
         if char in "([{":
             depth += 1
         elif char in ")]}":
             depth -= 1
         elif char == "," and depth == 0:
-            args.append(_literal(inner[start:index], base + start))
+            append(index)
             start = index + 1
-    args.append(_literal(inner[start:], base + start))
+    append(len(inner))
     return tuple(args)
 
 
-def _literal(text: str, base: int) -> _Argument:
+def _literal(text: str, base: int) -> _Argument | None:
     """One argument's literal value and the span of its contents, or two ``None``.
 
-    The span covers what is *between* the quotes, so a rewriter replaces the
-    name and leaves the quoting style the author chose alone.
+    Returns ``None`` for a keyword argument (``identifier=...``, optional
+    whitespace around ``=``), which is dropped from ``args`` rather than
+    recorded as an unread value. The span covers what is *between* the quotes,
+    so a rewriter replaces the name and leaves the quoting style the author
+    chose alone.
     """
 
-    quoted = _QUOTED_ARG.match(text.strip())
+    stripped = text.strip()
+    if _KEYWORD_ARG.match(stripped):
+        return None
+    quoted = _QUOTED_ARG.match(stripped)
     if quoted is None:
         return None, None
     offset = base + len(text) - len(text.lstrip())
@@ -1456,6 +1480,38 @@ def _declared_from_manifest(manifest: dict[str, Any], defs: ProjectDefinitions) 
     defs.relationship_source = "manifest"
 
 
+def _named_tests(test: dict[str, Any]) -> list[tuple[str, Any]]:
+    """``(test name, its mapping)`` for one dict entry of a ``tests:`` list.
+
+    dbt documents two spellings and ``TestBuilder.extract_test_args`` reads
+    both: the name as the entry's key with the test's mapping as its value
+    (``{unique: {...}}``), and the name under ``test_name:`` beside the rest
+    of the mapping (``{name: ..., test_name: unique, arguments: {...}}``).
+    """
+
+    name = test.get("test_name")
+    if isinstance(name, str):
+        return [(name, test)]
+    return list(test.items())
+
+
+def _test_arguments(config: Any) -> dict[str, Any]:
+    """A generic test's inputs as dbt reads them from its YAML mapping.
+
+    Since dbt Core 1.10.8 (``require_generic_test_arguments_property``, on by
+    default) inputs are written under ``arguments:``, and dbt merges that
+    mapping over the keys beside it, ``arguments`` winning, before the test
+    sees them. The manifest path never needs this, because the manifest's
+    ``test_metadata.kwargs`` is the merged result; the YAML path does, or it
+    reads no input from a test written the way dbt now asks.
+    """
+
+    if not isinstance(config, dict):
+        return {}
+    arguments = config.get("arguments")
+    return {**config, **arguments} if isinstance(arguments, dict) else config
+
+
 def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
     """Column-level tests straight from schema YAML: model-level names only,
     no physical resolution. Model-level relationships tests (declared under the
@@ -1465,6 +1521,11 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
     (it names no single column), so it is read from the model's own ``tests:``/
     ``data_tests:`` block -- sibling to ``columns:``, never reached by the
     column loop below.
+
+    Each test is read the way dbt reads it (``_named_tests``,
+    ``_test_arguments``), so the inputs are found whether they are written
+    beside the test's name or under ``arguments:``, and the compiled and
+    uncompiled reads of one project agree.
     """
 
     keys: dict[tuple[str, str], DeclaredKey] = {}
@@ -1480,7 +1541,7 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
                 combo_cfg = next(
                     (
                         cfg
-                        for name, cfg in test.items()
+                        for name, cfg in _named_tests(test)
                         if name == "unique_combination_of_columns"
                         or name.endswith(".unique_combination_of_columns")
                     ),
@@ -1488,8 +1549,7 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
                 )
                 if combo_cfg is None:
                     continue
-                combo_cfg = combo_cfg if isinstance(combo_cfg, dict) else {}
-                combo = combo_cfg.get("combination_of_columns")
+                combo = _test_arguments(combo_cfg).get("combination_of_columns")
                 if (
                     isinstance(combo, list)
                     and len(combo) >= 2
@@ -1512,9 +1572,9 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
                 for test in tests:
                     kind = test if isinstance(test, str) else None
                     if isinstance(test, dict):
-                        if "relationships" in test:
-                            cfg = test.get("relationships")
-                            cfg = cfg if isinstance(cfg, dict) else {}
+                        named = dict(_named_tests(test))
+                        if "relationships" in named:
+                            cfg = _test_arguments(named["relationships"])
                             to_model = _parse_relation_ref(cfg.get("to"))
                             field = cfg.get("field")
                             if to_model and isinstance(field, str) and field:
@@ -1529,7 +1589,7 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
                                 )
                             continue
                         kind = next(
-                            (k for k in ("unique", "not_null") if k in test), None
+                            (k for k in ("unique", "not_null") if k in named), None
                         )
                     if kind in ("unique", "not_null"):
                         key = keys.setdefault(
@@ -1628,6 +1688,11 @@ def semantic_catalog(
     # gets. Without it the PII gate would fall back to the name heuristic on every
     # token the join resolution added, which is the weaker screening.
     columns_by_definition: dict[tuple[str, str], tuple[str, str]] = {}
+    # The same, for a declaration defined as an expression: (relation, expression),
+    # which the gate parses for the columns it reads rather than screening the
+    # element's name alone.
+    computed: dict[str, tuple[str, str]] = {}
+    expressions_by_definition: dict[tuple[str, str], tuple[str, str]] = {}
     # (semantic model, bare dimension name) -> what the project says about it and
     # which column it sits on, so a path that reaches a declaration carries the
     # same words and the same physical column the declaration does. The hosted API
@@ -1753,10 +1818,19 @@ def semantic_catalog(
             for element in [*(entry.get("dimensions") or []), *declared_entities]:
                 column = physical_column(element)
                 name = element.get("name") if isinstance(element, dict) else None
-                if not column or not isinstance(name, str):
+                if not isinstance(name, str):
+                    continue
+                tokens = {name, qualified_dimension(primary, name)}
+                if not column:
+                    expression = element.get("expr")
+                    if isinstance(expression, str) and expression.strip():
+                        target = (relation, expression)
+                        expressions_by_definition[(model_name, name)] = target
+                        for token in tokens:
+                            computed.setdefault(token, target)
                     continue
                 columns_by_definition[(model_name, name)] = (relation, column)
-                for token in {name, qualified_dimension(primary, name)}:
+                for token in tokens:
                     physical.setdefault(token, (relation, column))
 
         models.append(
@@ -1801,6 +1875,9 @@ def semantic_catalog(
             column = columns_by_definition.get(declaration)
             if column is not None:
                 physical.setdefault(path.token, column)
+            expression = expressions_by_definition.get(declaration)
+            if expression is not None:
+                computed.setdefault(path.token, expression)
 
     index = _LayerIndex(
         measure_owner=measure_owner,
@@ -1847,6 +1924,11 @@ def semantic_catalog(
         ),
         notes=_catalog_notes(metrics),
         physical_columns=physical,
+        # A token both maps resolve belongs to the column, which is the stronger
+        # evidence: a bare name two models share can be a column on one of them.
+        computed_columns={
+            token: target for token, target in computed.items() if token not in physical
+        },
     )
 
 

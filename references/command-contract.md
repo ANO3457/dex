@@ -20,8 +20,10 @@ logic.
   warehouse client, and both are resolved the same way, from the command being run
   rather than installed always: `explore cluster` adds `[cluster]`, and
   `explore semantic` adds `[semantic-api]` plus, where a statement might be
-  rendered locally (any mode but `list`, without `--api`), `[semantic]`. A repo
-  that runs neither resolves neither scikit-learn nor MetricFlow.
+  rendered locally (any mode but `list`, without `--api`), `[semantic]`, and
+  `[slayer]` where `semantic.vendor` is `slayer`, in place of `[semantic]`, since
+  SLayer renders its own `query` and `values`. A repo that runs neither resolves
+  neither scikit-learn nor MetricFlow.
 - That environment is uv's own, and `--no-project` is what keeps it so. Without it
   uv discovers whatever Python project the caller is standing in, builds it, leaves
   a `.venv/` and a `uv.lock` in their repo, and puts their dependencies on the
@@ -148,7 +150,9 @@ dex explore diagram               -> the cached map as a Mermaid erDiagram, in `
                                      elision is counted in notes; dex writes no file
 dex explore query "<SELECT ...>"  -> firewall-approved SELECTs, capped and row-major
   [more...] | --sql-file <path>      (variadic: one call answers several questions; a file takes
-                                     one statement per line or semicolon-separated statements)
+  [--across <ds,ds>]                 one statement per line or semicolon-separated statements;
+                                     --across runs each statement once per mirrored dataset,
+                                     named as {ds} in the SQL, under one handshake)
 dex explore cluster <object>      -> k-means over a bounded sample of numeric non-PII non-key columns
                                      (a key is a unique column, a column that joins out, or one named like one);
                                      returns cluster sizes + centroids (means) + silhouette, no rows
@@ -277,10 +281,14 @@ dex transform apply               -> applies a plan document in this checkout, w
 dex transform ground [plan-id]    -> what the plan depends on and how finished the answer is:
                                      dependencies, the relations behind them, what could not be
                                      resolved (with file and line), what more than one thing defines,
-                                     how fresh the compiled artifacts are, and a fingerprint of the
-                                     plan, the source tree, the config, the packages and the engine.
-                                     completeness is computed from limits, never asserted, so "depends
-                                     on nothing" and "resolution did not finish" are different answers.
+                                     what nothing defines once the plan lands (missing; each
+                                     dependency's defined says plan, project or package), how fresh
+                                     the compiled artifacts are, and a fingerprint of the plan, the
+                                     source tree, the config, the packages and the engine.
+                                     completeness is computed from limits and unresolved, never
+                                     asserted, so "depends on nothing" and "resolution did not
+                                     finish" are different answers. A missing name does not lower
+                                     it: admit on complete and an empty missing together.
                                      Repo-only and free on every connector
 dex transform classify [plan-id]  -> what each edit's content contains, from the content and the
     [--edits-file <f>]               operation and never from the declared kind or the filename:
@@ -316,6 +324,11 @@ dex semantic ossie define|update|plan
                                   -> native Ossie whole-document edits as diffs; limited to the exact
                                      files in semantic.ossie.files, validated as one prospective
                                      layer, and applied atomically with transform apply
+dex semantic slayer define|update|plan
+                                  -> SLayer model files as whole-file diffs; limited to the exact
+                                     files in semantic.slayer.models, validated as one prospective
+                                     set with SLayer's own model, and applied atomically with
+                                     transform apply
 dex maintain snapshot [--project-only]
                                   -> capture/refresh the known-good baseline in .dex/snapshot.json;
                                      --project-only re-fingerprints only project layers and carries the
@@ -325,15 +338,19 @@ dex maintain check                -> sweep every drift axis vs the snapshot; ran
                                      two-phase on billed connectors: free axes now, one estimate for scans)
 dex maintain schema [<objects>]   -> structural drift: columns/tables added, dropped, retyped, renamed;
                                      nullability; dangling sources; a model added, removed, or
-                                     content-changed since the baseline (metadata, free everywhere)
+                                     content-changed since the baseline (metadata, free everywhere);
+                                     under semantic.vendor: slayer, the models held to the warehouse
+                                     by SLayer's own validate-models rules on dex's metadata
 dex maintain volume [<objects>]   -> freshness drift: row counts that collapsed, emptied, or spiked (free)
 dex maintain grain [<objects>]    -> cardinality/identity drift: lost key uniqueness, changed grain, join
-                                     fanout, and the grains the project declares re-verified
+                                     fanout, the grains the project declares re-verified, and declared
+                                     join arity measured (join_cardinality_exceeded)
                                      (aggregates; gated by --confirm --budget on billed connectors)
 dex maintain semantic [<objects>] -> definition drift and dangling refs (free) + categorical dimension
                                      cardinality change (a scan; gated on billed connectors)
 dex maintain reconcile [<class>]  -> propose the edits that reconcile detected drift, as a stored plan
-                                     of diffs tagged mechanical/advisory (applied with transform apply)
+                                     of diffs tagged mechanical/advisory (applied with transform apply);
+                                     a SLayer layer's own removals as a second plan, semantic_plan_id
 dex maintain verify [<selector>]  -> is the project correct right now, no .dex/snapshot.json baseline
                                      required (unlike every subcommand above). Build status:
                                      failed/skipped build nodes (naming the failed cause, walking back
@@ -922,6 +939,18 @@ replace) inlines a literal credential, so no secret ever reaches the diff.
   before storing anything. It writes the accepted content byte-for-byte, with
   no YAML/JSON reformatting, and never changes a configured document absent from
   the payload. File removal is not part of this command.
+- `semantic slayer define|update|plan` is the same route for SLayer model files.
+  Each edit is one whole model file keyed as `semantic.slayer.models` names it,
+  relative to `semantic.slayer.base_dir`, and nothing else under the storage root
+  is writable. The prospective set is validated with the pinned release's own
+  `SlayerModel` (current format `version`, unique names, path agreeing with name
+  and data source, joins resolving within the set onto columns both sides have)
+  and, for an edited model, a `default_time_dimension` that names a column, no
+  key the pinned release does not declare at its level (SLayer ignores one, so it
+  would be written and do nothing), and saved-measure formulas that parse. Every
+  refusal names the file, the element, and for an unknown key the pinned
+  release. Apply writes the authored bytes, all files or none, and a file
+  SLayer's own storage rewrote after planning is a conflict that says so.
 
 
 Skill-to-subcommand mapping: `explore` fronts `connect`/`explore`; `transform`
@@ -984,6 +1013,32 @@ without the `[ossie]` extra refuses and names it. dex pins the Ossie schema by
 content hash rather than by the version string the document carries. See
 `references/semantic-layer.md`, and `references/ossie-compatibility.md` for what
 dex accepts, checks, links, and declines to claim under that pin.
+
+**`vendor: slayer` reads SLayer model files from the repository**, the ones named
+in `semantic.slayer.models` under `semantic.slayer.base_dir`, each validated by
+SLayer's own `SlayerModel` from the release the `[slayer]` extra pins. A file in
+any format version but that release's current one is refused before SLayer can
+migrate it, and every refusal names the file and the element. `list` answers:
+each model is a semantic model, each column a dimension keyed `model.column`, and
+each saved measure a `formula` metric groupable by its own model's columns, so
+`--for-dimension` answers too. Measures and entities are declared `unavailable`,
+because a saved measure declares no aggregation and SLayer has no entities; its
+keys and joins reach `explore` through the declaration channel instead. `query`
+and `values` run locally with `execution: dex`: SLayer renders the SQL as a dry
+run and dex executes it through the same PII gate, relation pre-check, cost
+handshake and columnar cap as the local MetricFlow backend, so SLayer never opens
+a datasource, never reads a credential, and never touches the warehouse. A query's
+metrics are saved measures on one model, grouped by that model's own columns, with
+`--where` in SLayer's own filter syntax; an ad-hoc formula is refused. DuckDB,
+BigQuery, Snowflake, Postgres and Redshift are supported, and Databricks,
+ClickHouse and Trino are refused with the reason. Values SLayer caches in a model file
+(`sampled_values`) are never read. See `references/semantic-layer.md`.
+`maintain` reads the same models on every axis without opening a SLayer
+datasource or SLayer storage: the baseline records the SLayer release and model
+format version, declared keys and join `cardinality` are measured on the grain
+axis, and the schema axis runs SLayer's own `validate-models` comparison on the
+metadata dex captured, whose removals `maintain reconcile` plans through the
+`semantic slayer update` route.
 
 `list` costs no warehouse query on either backend, and neither does the reverse
 lookup, which inverts the dimension list each metric already carries rather than
@@ -1104,7 +1159,13 @@ everywhere.
 
 `explore map` never caps silently: past 50 objects it profiles the top
 `profile_top_n` (default 25) by rank and announces the cutoff in `notes`
-alongside `skipped_count` (`--full` profiles everything). Objects skipped on a
+alongside `skipped_count` (`--full` profiles everything). `data.skipped` names
+what it skipped: `count`, `by_namespace` (records of `namespace` and `count`,
+largest first, each namespace being everything before an identifier's last dot),
+and `objects` in rank order, highest first, each list capped at 25 with the rest
+counted in `elided_namespaces` and `elided`. It is always present, so `count: 0`
+on a `--full` run is the positive statement that nothing was skipped, and it
+changes neither which objects are profiled nor the estimate. Objects skipped on a
 re-map carry their prior profiles forward (`carried_forward_count`), each
 stamped with its own `profiled_at`. A selected object whose cached profile is
 still fresh (same connector, schema unchanged, profiled within
@@ -1119,7 +1180,18 @@ all three accept `--refresh`.
 
 Global flags (shared resolution path): `--connector`, `--path` (DuckDB),
 `--scope`, `--project` and `--dataset` (BigQuery only), `--repo-root`,
-`--confirm`, `--budget`, `--session-ceiling` and `--no-session-ceiling`.
+`--confirm`, `--budget`, `--session-ceiling`, `--no-session-ceiling`, and
+`--values-free`.
+
+`--values-free` runs the command in values-free mode, where no value read from a
+table appears in any result, refusal, error, note or warning: `explore profile`
+withholds `min_value`, `max_value` and `value_domain`, `explore query` accepts only
+aggregate-only statements, an error carries a code instead of a warehouse's words,
+and a command not reviewed for the mode refuses. A host pins it for every command
+with `DEX_RESULT_MODE=values_free` in the environment, and no flag turns it off;
+`.dex/config.yml` never selects it. Every envelope the mode produces carries
+`data.result_mode: "values_free"`. The rules, the command allowlist and the
+residual risks are in [`values-free-mode.md`](values-free-mode.md).
 
 `--session-ceiling <value>` and `--no-session-ceiling` are the two answers to the
 one-time cumulative-ceiling ask below. Either one writes the answer into
@@ -1233,6 +1305,12 @@ The gate, in order:
    is the one that follows the call rather than the statement, because it is the
    one protecting agent context: a call answering ten statements must not emit
    ten times what one statement is allowed.
+
+   In values-free mode a statement is first held to the aggregate-only shape (one
+   row of allowlisted aggregates, no column-keyed GROUP BY, no DISTINCT, LIMIT,
+   ORDER BY or window), before anything is opened or profiled, and its result is
+   held to one untruncated row of numbers afterwards: the mode refuses rather than
+   cuts. See [`values-free-mode.md`](values-free-mode.md).
 5. **Record.** Every decision, allowed, refused, or failed, is appended to
    `.dex/queries.jsonl` (SQL text and counts, never result values). An allowed
    query that projected sub-threshold flagged columns records those warnings
@@ -1242,7 +1320,8 @@ The gate, in order:
    the ledger as a spend. One entry per statement whatever the call carried; a
    call carrying several adds `batch_index` and `batch_size` to each and gives
    them all one timestamp, so an auditor can see that six statements were one
-   authorization event rather than six.
+   authorization event rather than six. In values-free mode a refused or failed
+   entry's `reason` is the error's code, never its words.
 
 Results are row-major (`columns`, `cells` as a list of lists, `row_count`,
 `truncated`, `notes`), which is cheaper in tokens than records and keeps the
@@ -1258,6 +1337,23 @@ that failed makes the envelope's own status `error` while every answer stays in
 `data`, the same way `transform build` reports a run that failed partway: an `ok`
 envelope carrying a guard refusal would be the weaker claim, and dropping the
 answers to report the refusal would discard work already paid for.
+
+`--across <ds,ds,...>` (comma-separated, repeatable) asks one question of mirrored
+environments: dev, qa and prod copies of the same datasets. Every statement names
+its dataset as `{ds}` and runs once per target, so this is two statements in one
+call:
+`dex explore query "select status, count(*) from {ds}.orders group by 1" --across dev_raw,prod_raw`.
+They are ordinary statements to everything downstream: each is adjudicated by the
+firewall against its own relation's profile and PII flags, and the whole call is
+priced in one handshake and profiled once. Each entry in `data.results` adds
+`target` and `template` (which of the caller's statements it came from), the
+entries run template by template so the variants of one probe sit together, and
+`data.across` lists the targets in the order given. A refusal names its target
+(`statement 2 (target qa_raw) refused: ...`). A target must be a plain dataset
+name (letters, digits, `_`, `-`, dot-separated for a qualified one), since it is
+substituted into the SQL; a statement with no `{ds}`, a repeated target, and a
+call whose statements times targets exceeds `query.max_statements` are refused
+before anything runs. A call without `--across` reports neither key.
 
 The caps follow the call rather than the statement where the difference matters.
 `query.max_rows` and `query.max_cell_chars` bound each statement;
@@ -1285,6 +1381,11 @@ Every command prints one object of this shape (`exmergo_dex_core.envelope`):
   "errors": []
 }
 ```
+
+In values-free mode `data.result_mode` is `"values_free"` on every envelope, and
+an error envelope adds `data.code`, a stable code that quotes no value (see
+[`values-free-mode.md`](values-free-mode.md)). Outside the mode neither key is
+present.
 
 Rules the envelope enforces, all of them Tier-2 eval targets:
 
@@ -1334,6 +1435,11 @@ Rules the envelope enforces, all of them Tier-2 eval targets:
   binding ceiling and ledger unit, and adds approximate compute-unit-hours from
   live per-replica memory plus optional USD from the configured price. Missing
   or partial capacity refuses before billed work.
+- **Trino is guarded as `db_load` in cluster-seconds.** `trino.deployment:
+  galaxy` is accepted by config validation, so the committed shape is final,
+  but refused by `connect`, the dev-target preflight and `transform init`,
+  with `compute_time` named as the paradigm it would need; a `self_hosted`
+  declaration reaching a `*.galaxy.starburst.io` host is refused too.
 - **Spend, the ledger, and the daily ceiling are governed by
   [`cost-controls.md`](cost-controls.md).** That file owns the
   `.dex/spend.jsonl` row shape, how reservations and settlements net, the

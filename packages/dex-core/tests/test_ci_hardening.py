@@ -317,6 +317,93 @@ def test_no_job_carries_a_secret_in_its_job_level_env(jobs):
     assert offenders == {}
 
 
+@pytest.mark.parametrize("consumer", ["engine", "dbt"])
+def test_databricks_ci_refreshes_auth_instead_of_reusing_the_bootstrap_token(
+    jobs, monkeypatch, tmp_path, consumer
+):
+    """Both clients must renew OIDC auth after the exported token expires.
+
+    Keep the real SDK credential selection and dbt credential manager; only
+    the identity provider and token exchange are fake. In particular, dbt's
+    token branch must still honor the workflow's explicit SDK auth type.
+    """
+
+    sdk = pytest.importorskip("databricks.sdk.core")
+    providers = pytest.importorskip("databricks.sdk.credentials_provider")
+    from types import SimpleNamespace
+
+    from exmergo_dex_core.config import DatabricksTarget
+    from exmergo_dex_core.connect import resolve_databricks_connection
+
+    host = "https://test.cloud.databricks.com"
+    variables = {
+        "${{ vars.DEX_TEST_DATABRICKS_HOST }}": host,
+        "${{ vars.DEX_TEST_DATABRICKS_CLIENT_ID }}": "ci-principal",
+    }
+    for name in list(os.environ):
+        if name.startswith("DATABRICKS_"):
+            monkeypatch.delenv(name)
+    for name, value in jobs["databricks"]["env"].items():
+        if name.startswith("DATABRICKS_"):
+            monkeypatch.setenv(name, variables.get(value, value))
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", str(tmp_path / "no-profile"))
+    monkeypatch.setenv("DATABRICKS_TOKEN", "expired-bootstrap")
+
+    # Discovery is metadata only. No real workspace, token or SQL connection.
+    monkeypatch.setattr(sdk.Config, "_resolve_host_metadata", lambda self: None)
+    monkeypatch.setattr(
+        sdk.Config,
+        "databricks_oidc_endpoints",
+        property(lambda self: SimpleNamespace(token_endpoint=f"{host}/oidc/v1/token")),
+    )
+    generation = [1]
+
+    def github_token(self, audience):
+        assert audience == host  # matches the provisioned federation policy
+        return f"github-jwt-{generation[0]}"
+
+    def exchange(**kwargs):
+        assert kwargs["client_id"] == "ci-principal"
+        assert kwargs["endpoint_params"]["subject_token"] == (
+            f"github-jwt-{generation[0]}"
+        )
+        token = SimpleNamespace(
+            token_type="Bearer",  # noqa: S106 (OAuth scheme, not a credential)
+            access_token=f"fresh-{generation[0]}",
+        )
+        return SimpleNamespace(token=lambda: token)
+
+    monkeypatch.setattr(
+        providers.oidc_token_supplier.GitHubOIDCTokenSupplier,
+        "get_oidc_token",
+        github_token,
+    )
+    monkeypatch.setattr(providers.oauth, "ClientCredentials", exchange)
+
+    if consumer == "engine":
+        config, method = resolve_databricks_connection(
+            DatabricksTarget(), os.environ, tmp_path
+        )
+        authenticate = config.authenticate
+        assert method == "environment:workload_identity"
+    else:
+        credentials = pytest.importorskip("dbt.adapters.databricks.credentials")
+        manager = credentials.DatabricksCredentialManager.create_from(
+            credentials.DatabricksCredentials(
+                host=host.removeprefix("https://"),
+                http_path="/sql/1.0/warehouses/test",
+                database="scratch",
+                schema="dbt_dev",
+                token=os.environ["DATABRICKS_TOKEN"],
+            )
+        )
+        authenticate = manager.credentials_provider()
+
+    assert authenticate() == {"Authorization": "Bearer fresh-1"}
+    generation[0] = 2  # same client, a later request after the old token expired
+    assert authenticate() == {"Authorization": "Bearer fresh-2"}
+
+
 def test_the_cloud_api_key_reaches_exactly_one_step(jobs):
     holders = [
         step.get("name")
@@ -366,3 +453,33 @@ def test_the_ci_postgres_service_runs_the_dogfood_script_s_image(jobs):
         if line.startswith("DIGEST=")
     )
     assert jobs["postgres"]["services"]["postgres"]["image"] == f"postgres@{digest}"
+
+
+def test_the_trino_catalog_sidecar_runs_the_postgres_dogfood_image():
+    """The Iceberg catalog's Postgres is the image the Postgres connector is
+    tested against, so one digest bump moves both; a sidecar left on an old
+    digest would be a second, unreviewed server image in CI."""
+
+    def assignment(script: str, name: str) -> str:
+        text = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+        return next(
+            line.split("=", 1)[1]
+            for line in text.splitlines()
+            if line.startswith(f"{name}=")
+        )
+
+    assert assignment("setup_trino_dev.sh", "CATALOG_DIGEST") == assignment(
+        "setup_postgres_dev.sh", "DIGEST"
+    )
+
+
+def test_the_trino_job_needs_no_secret_and_seeds_through_the_dogfood_script(jobs):
+    """Keyless and fork-runnable by construction: no environment, no secret,
+    and the one seeding path the dogfood uses."""
+
+    job = jobs["trino"]
+    assert "environment" not in job
+    assert "if" not in job
+    steps = " ".join(str(step.get("run", "")) for step in job["steps"])
+    assert "scripts/setup_trino_dev.sh" in steps
+    assert "secrets." not in str(job)

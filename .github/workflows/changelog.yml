@@ -1,0 +1,49 @@
+name: Changelog
+
+# Each pull request describes its change in a fragment under changelog.d/, and
+# release preparation collects the fragments into CHANGELOG.md (CONTRIBUTING.md,
+# "Changelog fragments"). This holds that contract: a pull request adds a fragment
+# and leaves CHANGELOG.md alone unless it carries the `no-changelog` label, every
+# fragment has a name towncrier collects, and the notes render.
+#
+# Separate from ci.yml because applying or removing a label has to re-run this
+# check, and ci.yml re-running its whole test matrix on every label change would
+# be waste. Read-only and secret-free, so it runs the same for pull requests from
+# forks.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  fragments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A pull request checks out its merge commit, whose first parent is the
+          # base branch tip, so two commits are enough to diff the pull request.
+          fetch-depth: 2
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - name: A pull request adds a fragment and leaves CHANGELOG.md alone
+        if: github.event_name == 'pull_request'
+        env:
+          # Through the environment rather than inline in the script, so a label's
+          # text is never parsed as shell.
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          git diff --name-status --no-renames HEAD^1 HEAD \
+            | python3 scripts/check_changelog_fragments.py \
+                --changes - --labels "$PR_LABELS"
+      - name: Every fragment is named for towncrier
+        if: github.event_name == 'push'
+        run: python3 scripts/check_changelog_fragments.py
+      # towncrier builds strictly (towncrier.toml sets `ignore`), so this also
+      # fails on any file it would not collect. The rendered notes are in the log.
+      - name: Preview the release notes
+        run: uvx towncrier@26.9.0 build --draft --version preview

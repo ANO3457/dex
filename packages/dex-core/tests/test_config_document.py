@@ -579,10 +579,14 @@ def test_read_and_write_keep_line_endings_and_permissions(tmp_path: Path):
     path = tmp_path / "config.yml"
     path.write_bytes(b"connector: duckdb\r\nquery:\r\n  max_rows: 1\r\n")
     path.chmod(0o640)
+    # Compared with the mode the file actually had, not with 0o640: Windows keeps
+    # only a read-only bit, so the chmod above lands as 0o666 there. What the
+    # write owes the file is its existing mode, on every platform.
+    before = path.stat().st_mode & 0o777
     document = ConfigDocument.read(path).with_value("query.max_rows", 2)
     document.write(path)
     assert path.read_bytes() == b"connector: duckdb\r\nquery:\r\n  max_rows: 2\r\n"
-    assert path.stat().st_mode & 0o777 == 0o640
+    assert path.stat().st_mode & 0o777 == before
     assert [p.name for p in tmp_path.iterdir()] == ["config.yml"]
 
 
@@ -612,7 +616,11 @@ def test_a_value_is_read_the_way_its_field_reads_it(key, text, expected):
 @pytest.mark.parametrize(
     ("key", "match"),
     [
-        ("budget", "set its keys one at a time: budget.paradigm, budget.ceiling"),
+        (
+            "budget",
+            "set its keys one at a time: budget.ceiling, budget.session_ceiling, "
+            "budget.session_ceiling_declined",
+        ),
         ("budget.celing", "did you mean budget.ceiling"),
         ("session_ceiling", "did you mean budget.session_ceiling"),
         ("pii_overrides[0].column", "a list is set as a whole"),
@@ -726,6 +734,39 @@ def test_a_credential_like_key_is_flagged_and_its_value_never_repeated():
     assert "hunter2" not in problem.describe()
 
 
+def _pinned(root: Path, text: str) -> list[tuple]:
+    (root / ".dex").mkdir()
+    (root / ".dex" / "config.yml").write_text(text, encoding="utf-8")
+    document = ConfigDocument.read(root / ".dex" / "config.yml")
+    return [(p.kind, p.key, p.line, p.fatal, p.describe()) for p in document.problems()]
+
+
+def test_a_pin_to_a_missing_directory_is_reported_on_its_line(tmp_path: Path):
+    assert _pinned(tmp_path, "connector: duckdb\ndbt_project_dir: no_such_dir\n") == [
+        (
+            "project_not_found",
+            "dbt_project_dir",
+            2,
+            False,
+            "line 2: dbt_project_dir names no_such_dir, which holds no dbt_project.yml",
+        )
+    ]
+
+
+def test_a_pin_to_a_directory_without_dbt_project_yml_is_reported(tmp_path: Path):
+    (tmp_path / "transform").mkdir()
+    (problem,) = _pinned(tmp_path, "dbt_project_dir: transform\n")
+    assert problem[:4] == ("project_not_found", "dbt_project_dir", 1, False)
+
+
+def test_a_pin_to_a_real_project_or_no_pin_is_not_a_problem(tmp_path: Path):
+    (tmp_path / "transform").mkdir()
+    (tmp_path / "transform" / "dbt_project.yml").write_text("name: things\n")
+    assert _pinned(tmp_path, "dbt_project_dir: transform\n") == []
+    (tmp_path / ".dex" / "config.yml").write_text("connector: duckdb\n")
+    assert ConfigDocument.read(tmp_path / ".dex" / "config.yml").problems() == []
+
+
 def test_config_refuses_a_fatal_problem_by_setting_and_line():
     document = ConfigDocument("connector: duckdb\nquery:\n  max_rows: lots\n")
     with pytest.raises(InvalidConfigError) as raised:
@@ -805,7 +846,6 @@ def test_every_setting_says_where_its_value_came_from():
 
 def test_a_key_narrows_the_rows_to_its_own():
     assert set(_rows(_SOURCED, "budget")) == {
-        "budget.paradigm",
         "budget.ceiling",
         "budget.session_ceiling",
         "budget.session_ceiling_declined",

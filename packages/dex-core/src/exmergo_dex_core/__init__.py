@@ -108,6 +108,7 @@ _EXPORTS = {
     "ScaffoldError": "transform.scaffold",
     "ScaffoldPrerequisiteError": "transform.scaffold",
     "ScopeError": "connect",
+    "SlayerDependencyError": "slayer.dependency",
     "SemanticBackendError": "explore.semantic",
     "SemanticLayerError": "explore.semantic",
     "SemanticQueryRefusedError": "explore.semantic",
@@ -123,6 +124,9 @@ _EXPORTS = {
     "StoreContext": "storage",
     "StoreFactory": "storage",
     "StoreRequiredError": "errors",
+    "ResultMode": "values_free",
+    "ValuesFreeCode": "values_free",
+    "ValuesFreeError": "values_free",
     "WarehouseQueryError": "errors",
     "generate_demo_warehouse": "demo",
     "render_er_mermaid": "explore.diagram",
@@ -190,6 +194,7 @@ if TYPE_CHECKING:  # what a type checker and an IDE see; never run
         Result,
         to_envelope,
     )
+    from .slayer.dependency import SlayerDependencyError
     from .storage import (
         CacheUnreadableError,
         Document,
@@ -211,6 +216,7 @@ if TYPE_CHECKING:  # what a type checker and an IDE see; never run
         ScaffoldPrerequisiteError,
         SourcesFileError,
     )
+    from .values_free import ResultMode, ValuesFreeCode, ValuesFreeError
 
 try:
     __version__ = version("exmergo-dex-core")
@@ -275,6 +281,7 @@ __all__ = [
     "RepoRootRequiredError",
     "RequestError",
     "Result",
+    "ResultMode",
     "ScaffoldError",
     "ScaffoldPrerequisiteError",
     "ScopeError",
@@ -283,6 +290,7 @@ __all__ = [
     "SemanticQueryRefusedError",
     "SemanticSource",
     "SessionCeilingDecisionRequiredError",
+    "SlayerDependencyError",
     "Snapshot",
     "SourcesFileError",
     "SpendHistory",
@@ -293,6 +301,8 @@ __all__ = [
     "StoreContext",
     "StoreFactory",
     "StoreRequiredError",
+    "ValuesFreeCode",
+    "ValuesFreeError",
     "WarehouseQueryError",
     "__version__",
     "generate_demo_warehouse",
