@@ -222,6 +222,86 @@ class TestRefusals:
         with pytest.raises(PropagationRefusedError, match="already its name"):
             _propagate(project, "column", "stg_orders.order_id", "order_id")
 
+    def test_an_unparseable_python_model_blocks_relation_rename_and_remove(
+        self, project: Path
+    ):
+        """Regression for #658: a malformed Python model may hide a relation read.
+
+        Rename and remove for relation kinds (model, source, seed, snapshot)
+        must consume the reference-query limits and refuse, while unrelated
+        kinds like `var` retain their existing behavior.
+        """
+
+        _write(project / "seeds/codes.csv", "code,label\nUS,United States\n")
+        _write(
+            project / "snapshots/snap_orders.sql",
+            "{% snapshot snap_orders %}\n"
+            "select * from {{ source('raw', 'orders') }}\n"
+            "{% endsnapshot %}\n",
+        )
+        _write(
+            project / "models/marts/py_broken.py",
+            'def model(dbt, session)\n    return dbt.ref("stg_orders")\n',
+        )
+
+        for kind, old, new in [
+            ("model", "stg_orders", "renamed_orders"),
+            ("source", "raw.orders", "raw.order_events"),
+            ("seed", "codes", "country_codes"),
+            ("snapshot", "snap_orders", "orders_snapshot"),
+        ]:
+            with pytest.raises(PropagationRefusedError) as exc:
+                _propagate(project, kind, old, new)
+            assert "models/marts/py_broken.py" in str(exc.value)
+            assert "could not be parsed" in str(exc.value)
+
+            with pytest.raises(PropagationRefusedError) as exc:
+                _propagate(project, kind, old)
+            assert "models/marts/py_broken.py" in str(exc.value)
+            assert "could not be parsed" in str(exc.value)
+
+        var_rename = _propagate(project, "var", "using_department", "dept_enabled")
+        assert [edit.path for edit in var_rename.edits] == ["dbt_project.yml"]
+
+    def test_an_unreadable_python_model_blocks_relation_rename_and_remove(
+        self, project: Path, capsys
+    ):
+        """Regression for #658: a Python model that cannot be read as UTF-8
+        refuses relation rename/remove and leaves var operations intact."""
+
+        broken_py = project / "models/marts/py_unreadable.py"
+        broken_py.parent.mkdir(parents=True, exist_ok=True)
+        broken_py.write_bytes(b"\xff\xfe\x00\x00invalid utf-8")
+
+        with pytest.raises(PropagationRefusedError) as exc:
+            _propagate(project, "model", "stg_orders", "renamed_orders")
+        assert "models/marts/py_unreadable.py" in str(exc.value)
+        assert "could not be read" in str(exc.value)
+
+        with pytest.raises(PropagationRefusedError) as exc:
+            _propagate(project, "source", "raw.orders")
+        assert "models/marts/py_unreadable.py" in str(exc.value)
+        assert "could not be read" in str(exc.value)
+
+        rc = main(
+            [
+                "--repo-root",
+                str(project.parent),
+                "transform",
+                "rename",
+                "model",
+                "stg_orders",
+                "renamed_orders",
+            ]
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert rc != 0
+        assert payload["status"] == "error"
+        assert "models/marts/py_unreadable.py" in json.dumps(payload["errors"])
+
+        var_remove = _propagate(project, "var", "using_department")
+        assert [edit.path for edit in var_remove.edits] == ["dbt_project.yml"]
+
 
 class TestNodeRename:
     def test_a_model_rename_is_a_move_plus_every_referrer(self, project: Path):

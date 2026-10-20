@@ -248,10 +248,14 @@ def _refuse_incomplete(index: ReferenceIndex, kind: str, name: str) -> None:
             "Resolve that first, because a partial rewrite can still compile"
         )
 
-    if index.limits:
+    _, query_limits = index.references_to(
+        name.rpartition(".")[2] if kind == "column" else name, kind
+    )
+    limits = list(dict.fromkeys([*index.limits, *query_limits]))
+    if limits:
         raise PropagationRefusedError(
             "dex cannot promise it found every use of "
-            f"'{name}': {'; '.join(index.limits)}. Resolve that first, because a "
+            f"'{name}': {'; '.join(limits)}. Resolve that first, because a "
             "rename applied to most of a project still compiles"
         )
 
