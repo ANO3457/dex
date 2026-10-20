@@ -1,12 +1,17 @@
 name: Release
 
-# A semver tag drives the whole chain: a test gate, a coupling check, build, then
-# PyPI publish via Trusted Publishing (OIDC, no stored tokens) and the anti-squat
+# A semver tag drives the whole chain: a coupling check, build, then PyPI
+# publish via Trusted Publishing (OIDC, no stored tokens) and the anti-squat
 # name stubs, then the documentation site. The wrapper pins and the changelog
 # are written before tagging (scripts/prepare_release.sh), so this workflow never
 # writes back to this repository; it verifies the tagged commit is
 # self-consistent before it publishes. Its one write outside PyPI is the Dex
 # section of the documentation site, committed to exmergo/docs after publish.
+#
+# There is no test gate here. A tag points at a commit on main, every commit on
+# main arrived through a pull request, and ci.yml's `tests` and `safety` jobs
+# gate that pull request; re-running the same suite on the same commit at tag
+# time would pay twice for an answer that cannot differ.
 on:
   push:
     tags: ["v*.*.*"]
@@ -15,24 +20,6 @@ permissions:
   contents: read
 
 jobs:
-  gate:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/dex-core
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      # The cloud extras stay in the gate: their safety families importorskip
-      # on the client libraries, and a release gate that silently skips
-      # safety-critical assertions is a hole, not a speedup.
-      - name: Sync (duckdb + bigquery + snowflake + databricks + postgres + redshift + clickhouse + trino + dev extras)
-        run: uv sync --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra trino --extra dev
-      - name: Tier-1 + safety-critical gate
-        run: uv run pytest -q
-      # A safety-assertion regression blocks the release regardless of pass-rate;
-      # representative Tier-2 agent evals run here once they are wired into CI.
-
   # Read-only guard, run before publishing: the wrapper pins are bumped before
   # the tag (scripts/prepare_release.sh), so the tagged commit must already pin
   # the version this tag will publish and carry its CHANGELOG.md section, which
@@ -67,7 +54,7 @@ jobs:
           echo "All wrapper pins match ${VERSION}, and CHANGELOG.md has its section."
 
   publish:
-    needs: [gate, verify-coupling]
+    needs: [verify-coupling]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

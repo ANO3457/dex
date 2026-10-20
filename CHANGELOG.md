@@ -14,6 +14,36 @@ pending fragments into a new section below. See
 
 <!-- towncrier release notes start -->
 
+## [1.15.1] - 2026-10-20
+
+### Changed
+
+- **Dex points people at its documentation.** The README opens with a link and a
+  Docs badge to https://docs.exmergo.com/dex, the PyPI page lists it as the
+  project's Documentation link (for `exmergo-dex-core` and both name stubs), and
+  the Claude Code, Codex and Agent Skills plugin manifests use it as their
+  homepage. The marketing page stays the PyPI Homepage and the Codex website.
+- **Shared links to Dex documentation pages name the product.** Every page of the
+  Dex section now carries an `og:title` and `twitter:title` ending in
+  "· Exmergo Dex", which Mintlify also uses as the browser title, so a link
+  pasted into Slack, LinkedIn or X reads "BigQuery connector · Exmergo Dex"
+  instead of naming only the site, Exmergo. The section's introduction is
+  titled "Dex" (still "Introduction" in the sidebar) and shares as "Exmergo Dex".
+  A hand-written page that sets its own preview title keeps it.
+
+### Fixed
+
+- **`transform references` preserves seed and snapshot kinds when indexing relation reads.** A YAML snapshot with `relation: ref('codes')` now records a seed read when `codes` is a seed, and a Python model or SQL model reading a YAML-declared snapshot now records a snapshot read regardless of declaration or file traversal order. ([#659](https://github.com/exmergo/dex/pull/659))
+- **`transform rename` and `transform remove` refuse when a Python model cannot be read or parsed.** An unreadable or unparseable Python model in `model-paths` may contain `dbt.ref(...)` or `dbt.source(...)` calls that dex could not inspect. `transform rename` and `transform remove` now consume the per-kind reference-query limits and refuse operations on models, sources, seeds, and snapshots with the offending file path and reason, while unrelated operations such as `var` renames continue as before. ([#703](https://github.com/exmergo/dex/pull/703))
+- **`explore inventory --rank` no longer claims a size order when nothing reported a row count.** On Trino, whose `information_schema` carries no counts, and on views elsewhere, the note said the list was "ranked by size (row count)" while every object tied on that signal and the order was the catalog's. It now says size contributed nothing, names how many objects reported no count when only some did, and keeps today's note whenever at least one object has a count. ([#723](https://github.com/exmergo/dex/pull/723))
+- **Links whose text is code keep their text on the documentation site.** A link
+  written as ``[`semantic-layer.md`](semantic-layer.md)`` was published with an
+  invisible placeholder where its text should be, on 66 links across the
+  reference pages, because the code span inside the link text was never put back.
+  The build now restores nested spans, and refuses any page that contains a
+  control character, so text lost this way cannot ship silently again.
+
+
 ## [1.15.0] - 2026-10-19
 
 ### Added
