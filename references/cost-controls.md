@@ -62,6 +62,7 @@ bills nothing; `null` means no connector was resolved.
 | Redshift | `compute_time` | compute-seconds | [`redshift.md`](redshift.md) |
 | Postgres | `db_load` | database-seconds | [`postgres.md`](postgres.md) |
 | ClickHouse | `db_load`, or `compute_time` on Cloud | database-seconds | [`clickhouse.md`](clickhouse.md) |
+| Trino | `db_load` (self-hosted; Galaxy is refused) | cluster-seconds | [`trino.md`](trino.md) |
 | DuckDB | `free_local` | nothing to confirm | [`duckdb.md`](duckdb.md) |
 | dbt Cloud Semantic Layer | `hosted` | no ceiling possible | see below |
 
@@ -107,11 +108,11 @@ parses to a stable schema and no reader has to interpret an absent key.
 | `connector` | the connector that billed. Several can share one file, so filter on it before summing |
 | `command` | the command that wrote the row |
 | `entry` | the kind: `reservation`, `settlement` or `release`, and nothing else |
-| `reservation_id` | ties one command's rows together. `null` on a `transform build` settlement, which settles outside any gate because dbt runs the statements |
+| `reservation_id` | ties one command's rows together. `null` on a `transform build` settlement that settled with no gate (pricing degraded before a connection opened) |
 | `billed_bytes` or `billed_seconds` | the magnitude, in the connector's unit. Signed |
 | `estimate` | the whole-command preflight figure the settlement was admitted on. `null` on the other two kinds, and on a settlement whose pricing degraded to no estimate at all |
 | `job_id` | the warehouse's identifier for the job, where it has one |
-| `statement_sha256` | a hash of the statement. Never its text, never a value |
+| `statement_sha256` | a hash of the statement. Never its text, never a value. `null` on a settlement for spend no single statement produced, such as a build's dbt run or Snowflake's warehouse uptime |
 
 **Settled spend is the `entry == "settlement"` filter**, summed over one
 connector's unit. That is not the same number as `session_spent_today` whenever
@@ -168,7 +169,13 @@ project with no recorded decision returns `needs_confirmation` naming a
 connector's unit, as a starting point) and a `session_ceiling_hint` spelling out
 both answers. Answer with `--session-ceiling <value>` to set one or
 `--no-session-ceiling` to record that the project runs unbounded. Either answer
-is written to `.dex/config.yml` and nothing asks again in that project.
+is written to `.dex/config.yml` and nothing asks again in that project. The
+answer is an in-place edit of the budget lines, so the file's comments and key
+order survive it, and it is reported as an `update` diff. To set or change the
+ceiling outside the ask, `dex config set budget.session_ceiling <value>` proposes
+the same edit as a diff and writes it on `--confirm`.
+`dex config unset budget.session_ceiling` removes it the same way, and the next
+billed command asks again.
 
 The ask is the last check before spend, so an unanswered one has run nothing,
 booked no headroom, and never reached the ledger. The unconfirmed cost ask that

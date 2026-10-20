@@ -110,7 +110,9 @@ class PortablePlan(BaseModel):
     not the repository root, and a checkout that puts the project somewhere else
     is a different checkout of a different source state. It is a declaration the
     applying side checks against its own layout rather than an instruction to
-    write there.
+    write there. It uses forward slashes, like every edit path, so one plan has
+    one digest whichever platform exported it; a backslash in a document written
+    before that is read as a separator when the document is applied.
     """
 
     schema_version: int = PLAN_DOCUMENT_SCHEMA_VERSION
@@ -157,9 +159,32 @@ def _canonical(plan: PortablePlan) -> str:
     )
 
 
-def plan_digest(plan: PortablePlan) -> str:
-    """``sha256:<hex>`` over the plan's canonical form."""
+def _read_document(
+    document: PortablePlan | dict[str, Any] | str | bytes,
+) -> PortablePlan:
+    """The document as a fresh :class:`PortablePlan`, its shape the only check."""
 
+    if isinstance(document, PortablePlan):
+        return document.model_copy(deep=True)
+    try:
+        return (
+            PortablePlan.model_validate_json(document)
+            if isinstance(document, (str, bytes))
+            else PortablePlan.model_validate(document)
+        )
+    except Exception as exc:
+        raise PlanDocumentError(f"not a readable plan document: {exc}") from exc
+
+
+def plan_digest(plan: PortablePlan | dict[str, Any] | str | bytes) -> str:
+    """``sha256:<hex>`` over the plan's canonical form.
+
+    Takes the same four forms as :func:`verify_plan_document` and runs none of its
+    checks, so a caller can digest a document it has not verified yet.
+    """
+
+    if not isinstance(plan, PortablePlan):
+        plan = _read_document(plan)
     return "sha256:" + hashlib.sha256(_canonical(plan).encode("utf-8")).hexdigest()
 
 
@@ -231,17 +256,7 @@ def verify_plan_document(
     Pydantic is the only parser reached here. No YAML, no jinja, no SQL, no dbt.
     """
 
-    if isinstance(document, PortablePlan):
-        plan = document.model_copy(deep=True)
-    else:
-        try:
-            plan = (
-                PortablePlan.model_validate_json(document)
-                if isinstance(document, (str, bytes))
-                else PortablePlan.model_validate(document)
-            )
-        except Exception as exc:
-            raise PlanDocumentError(f"not a readable plan document: {exc}") from exc
+    plan = _read_document(document)
 
     if plan.schema_version != PLAN_DOCUMENT_SCHEMA_VERSION:
         raise PlanDocumentError(
@@ -320,7 +335,11 @@ def apply_document(
     from .plans import assert_kind_placement
 
     plan = verify_plan_document(document, expect_digest=expect_digest)
-    project = Path(repo_root) / (project_dir or plan.project_dir)
+    # A document exported on Windows before `project_dir` was recorded with
+    # forward slashes carries `wh\dbt`, which POSIX reads as one directory name.
+    # Its digest covers that spelling, so the backslash is normalized only here,
+    # where the path is joined, the same rule `contained_key` applies to edits.
+    project = Path(repo_root) / (project_dir or plan.project_dir).replace("\\", "/")
     edits: list[Edit] = [edit.as_edit() for edit in plan.edits]
 
     if plan.edit_target == "semantic":

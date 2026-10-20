@@ -92,7 +92,9 @@ class TransformPlan(BaseModel):
     plan_id: str
     created_at: str
     intent: str
-    # Relative to the repo root, so a plan stays valid when the repo moves.
+    # Relative to the repo root, so a plan stays valid when the repo moves, and
+    # spelled with forward slashes on every platform: an exported plan digests
+    # this string and another checkout joins it, possibly on another OS.
     project_dir: str
     # Which independent repository axis owns the edits. Old stored plans omit
     # this and remain transformation-project plans by default.
@@ -578,9 +580,11 @@ def plan(
 
     created_at = datetime.now(UTC).isoformat()
     try:
-        rel_project = str(project.resolve().relative_to(Path(repo_root).resolve()))
+        rel_project = (
+            project.resolve().relative_to(Path(repo_root).resolve()).as_posix()
+        )
     except ValueError:
-        rel_project = str(project)
+        rel_project = project.as_posix()
     new_plan = TransformPlan(
         plan_id=_plan_id(intent, pinned, edit_target=edit_target),
         created_at=created_at,

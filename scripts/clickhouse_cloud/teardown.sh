@@ -28,14 +28,20 @@ done
   echo "teardown requires --confirm after reviewing the exact organization and service" >&2
   exit 2
 }
-for name in CLICKHOUSE_CLOUD_API_KEY CLICKHOUSE_CLOUD_API_SECRET CLICKHOUSE_USER CLICKHOUSE_PASSWORD; do
-  [[ -n "${!name:-}" ]] || { echo "$name is required in the environment" >&2; exit 2; }
-done
+[[ -n "${CLICKHOUSE_USER:-}" ]] || {
+  echo "CLICKHOUSE_USER (the service's admin user) is required in the environment" >&2
+  exit 2
+}
 for tool in clickhousectl clickhouse jq curl; do
   command -v "$tool" >/dev/null || { echo "$tool is required on PATH" >&2; exit 2; }
 done
+# The admin key and password come from DEX_SECRETS_DIR, and each reaches only the
+# command that uses it (see secrets.sh).
+# shellcheck source=scripts/clickhouse_cloud/secrets.sh
+source "$(dirname "${BASH_SOURCE[0]}")/secrets.sh"
+use_cloud_credentials admin
 
-SERVICE_JSON=$(clickhousectl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
+SERVICE_JSON=$(cloudctl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
 [[ "$(jq -er '.id' <<<"$SERVICE_JSON")" == "$SERVICE" ]] || {
   echo "service ID mismatch" >&2; exit 1; }
 jq -e --arg value "$OWNERSHIP_TAG_VALUE" '
@@ -55,23 +61,17 @@ printf '%s;\n' \
   "DROP USER IF EXISTS dex_ci_dbt" \
   "DROP DATABASE IF EXISTS dex_ci_app" \
   "DROP DATABASE IF EXISTS dex_ci_dbt" |
-  clickhouse client --secure --host "$HOST" --port "$PORT" \
+  with_admin_password clickhouse client --secure --host "$HOST" --port "$PORT" \
     --user "$CLICKHOUSE_USER" --multiquery
 
 echo "==> removing dex CI API keys"
-KEYS=$(clickhousectl cloud key list --org-id "$ORGANIZATION" --json)
+KEYS=$(cloudctl cloud key list --org-id "$ORGANIZATION" --json)
 while IFS= read -r key_id; do
   [[ -n "$key_id" ]] || continue
-  clickhousectl cloud key delete "$key_id" --org-id "$ORGANIZATION" --json >/dev/null
+  cloudctl cloud key delete "$key_id" --org-id "$ORGANIZATION" --json >/dev/null
 done < <(jq -r '.[]? | select(.name | startswith("dex-ci-usage-")) | .id' <<<"$KEYS")
 
 API_ROOT="https://api.clickhouse.cloud/v1/organizations/$ORGANIZATION"
-cloud_api_curl_config() {
-  local credentials="$CLICKHOUSE_CLOUD_API_KEY:$CLICKHOUSE_CLOUD_API_SECRET"
-  credentials=${credentials//\\/\\\\}
-  credentials=${credentials//\"/\\\"}
-  printf 'user = "%s"\n' "$credentials"
-}
 ROLES=$(curl --fail-with-body --silent --show-error \
   --config <(cloud_api_curl_config) "$API_ROOT/roles")
 while IFS= read -r role_id; do
@@ -88,7 +88,7 @@ if [[ "$SKIP_GITHUB" != true ]]; then
 fi
 
 echo "==> removing dex attribution tags; service remains intact"
-clickhousectl cloud service update "$SERVICE" --org-id "$ORGANIZATION" \
+cloudctl cloud service update "$SERVICE" --org-id "$ORGANIZATION" \
   --remove-tag "dex-ci-owned=$OWNERSHIP_TAG_VALUE" \
   --remove-tag "dex-ci-environment=$ENVIRONMENT" --json >/dev/null
 

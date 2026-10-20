@@ -188,7 +188,9 @@ def build(
             )
             continue
         patched = _patched_dataset(base, table_findings, pii_overrides or set())
-        table_edits = model_edits(patched)
+        table_edits = model_edits(
+            patched, cache.provenance.connector if cache is not None else None
+        )
         # The scaffold generates both the path and the dbt SQL inside it, so a
         # format that places a staging model somewhere else would receive dbt
         # content written to a path the generator did not agree to. Placement
@@ -329,6 +331,22 @@ def _advisory(finding: DriftFinding) -> Proposal:
         "dangling_reference": (
             "update the semantic definition with `semantic update`, or restore "
             "the model/column it references"
+        ),
+        "join_cardinality_exceeded": (
+            "the semantic layer declares an arity this join does not have, so "
+            "measures aggregated across it are inflated: dedup the side that "
+            "should be unique, or declare the cardinality the data has. dex "
+            "proposes no edit, because which of the two is right is a decision"
+        ),
+        "semantic_vendor_changed": (
+            "the semantic layer moved to another vendor since the baseline; "
+            "once the move is the state you vouch for, re-run `maintain "
+            "snapshot` to baseline it"
+        ),
+        "semantic_format_changed": (
+            "the semantic layer was read under another release or model format "
+            "than the baseline, so its definitions could not be compared; "
+            "re-run `maintain snapshot` to baseline the upgraded format"
         ),
     }
     return Proposal(

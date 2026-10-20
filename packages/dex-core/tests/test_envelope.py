@@ -68,6 +68,23 @@ def test_sanitize_refuses_secret_like_keys(data):
         env.sanitize(env.ok(data))
 
 
+@pytest.mark.parametrize(
+    "key",
+    ["password", "api_token_env", "Client_Secret", "region", "connection_name"],
+)
+def test_secret_like_is_the_rule_the_boundary_scan_applies(key):
+    """The config editor withholds and refuses by this predicate, so it has to
+    be exactly the one the scan enforces, not a second list that drifts."""
+
+    try:
+        env.sanitize(env.ok({key: 1}))
+    except env.SanitizationError:
+        tripped = True
+    else:
+        tripped = False
+    assert env.secret_like(key) is tripped
+
+
 def test_sanitize_scans_connection_target_too():
     with pytest.raises(env.SanitizationError):
         env.sanitize(
@@ -218,6 +235,45 @@ def test_reason_is_none_outside_error_status():
     assert env.ok().reason is None
     assert env.needs_confirmation().reason is None
     assert env.not_implemented("x").reason is None
+
+
+# --- data.stage: which door a warehouse refusal came through (#524) ----------
+
+
+def test_error_for_names_the_door_a_warehouse_refusal_came_through():
+    from exmergo_dex_core.errors import StatementStage, WarehouseQueryError
+
+    planned = env.error_for(WarehouseQueryError("x", stage=StatementStage.PLAN))
+    ran = env.error_for(WarehouseQueryError("x", stage=StatementStage.RUN))
+
+    assert planned.reason is ran.reason is env.Reason.EXECUTION_FAILURE
+    assert planned.data == {"stage": "plan"}
+    assert ran.data == {"stage": "run"}
+    assert json.loads(planned.model_dump_json())["data"]["stage"] == "plan"
+
+
+def test_the_stage_joins_the_data_a_call_site_passes_rather_than_replacing_it():
+    """`error_for` is called with `data=` where a refusal has a payload of its
+    own (a partial spend, a failed build's summary), so the stage merges."""
+
+    from exmergo_dex_core.errors import StatementStage, WarehouseQueryError
+
+    envelope = env.error_for(
+        WarehouseQueryError("x", stage=StatementStage.RUN),
+        data={"spend": {"bytes_billed": 10}},
+    )
+    assert envelope.data == {"spend": {"bytes_billed": 10}, "stage": "run"}
+
+
+def test_no_stage_is_claimed_where_none_was_named():
+    """Absent rather than null: a refusal from an adapter that cannot tell its
+    doors apart, and every refusal that is not the warehouse's, say nothing."""
+
+    from exmergo_dex_core.errors import RequestError, WarehouseQueryError
+
+    for exc in (WarehouseQueryError("x"), RequestError("x"), RuntimeError("x")):
+        assert env.stage_for(exc) is None
+        assert "stage" not in env.error_for(exc).data
 
 
 # --- the two shapes of a priced second phase ---------------------------------

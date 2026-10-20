@@ -13,6 +13,8 @@ dbt Cloud deployment, or native Apache Ossie documents in a repository with no
 dbt project at all. Read-only against your data; every change is a reviewable
 diff.
 
+Documentation: https://docs.exmergo.com/dex
+
 ## Install
 
 ```
@@ -37,8 +39,9 @@ exmergo-dex-core[all]          # every optional capability at once
 Some capabilities sit behind their own extras rather than a connector's:
 `[semantic]` and `[semantic-api]` for the local and hosted semantic-layer query
 backends, `[ossie]` for reading native Apache Ossie semantic documents out of the
-repository, and `[cluster]` for `explore cluster`. `[all]` covers all of these
-too.
+repository, `[slayer]` for SLayer semantic models (`semantic.vendor: slayer`,
+pinned to exactly one SLayer release), and `[cluster]` for `explore cluster`.
+`[all]` covers all of these too.
 
 Two of them stand alone, and for different reasons. `[semantic-api]` needs no
 connector, no dbt-core, and no SQL parser, because dbt Cloud owns the warehouse
@@ -245,6 +248,15 @@ never opens, inspects, or replaces a warehouse you already have. The generator l
 on its own path, never through a connector, which is what keeps the read-only rule
 true everywhere else.
 
+`config`: reads, checks, and changes `.dex/config.yml` without running anything
+else. `config validate` names every problem by setting and line, a mistyped key
+with the key it was meant to be; `config get` shows each setting's effective value
+and where it came from; and `config set` and `config unset` edit the file in
+place, keeping its comments and key order, as a diff written only on `--confirm`.
+`unset` takes a key dex does not read, which is how a mistyped one is removed. It
+runs before the engine is built, so it works on an install with no connector
+extra and on a config broken enough that every other command refuses to start.
+
 `explore`: ranks what matters in an unfamiliar warehouse, profiles columns
 selectively, flags PII, surfaces grain and data-quality warnings with the ranked
 keys and the reasoning behind each, infers joins
@@ -316,14 +328,15 @@ builds in a sandbox holding only a dev credential. `transform export` turns a
 stored plan into a document a second process can check and apply, digest and all;
 `transform apply --plan-file` applies one where the plan store has never been,
 with no connector, no dbt, and no network; `transform ground` says what the change
-depends on and how complete that answer is; `transform classify` says whether an
-edit's content actually runs anything, from the content rather than from the kind
-it was filed under; and `transform preflight` says what the warehouse itself will
-enforce on the next build. On the build, `data.outcome` says what the run
-established, which `success` cannot: an empty selection exits zero, and so does a
-build of a model the change never touched. See `references/host-integration.md`,
-and the conformance vectors that ship in the wheel for a consumer to assert its
-own reader against.
+depends on, what it names that nothing defines, and how complete that answer is;
+`transform classify` says whether an edit's content actually runs anything, from
+the content rather than from the kind it was filed under; and
+`transform preflight` says what the warehouse itself will enforce on the next
+build. On the build, `data.outcome` says what the run established, which
+`success` cannot: an empty selection exits zero, and so does a build of a model
+the change never touched. See `references/host-integration.md`, and the
+conformance vectors that ship in the wheel for a consumer to assert its own
+reader against.
 
 `maintain`: detects drift against the `.dex/` snapshot on four axes and proposes
 the fix: schema (structure), volume (freshness), grain (uniqueness and fanout),
@@ -366,10 +379,12 @@ Snowflake: connects through discovered credentials (`connections.toml`,
 password). The cost inversion from BigQuery: metadata is free (SHOW commands,
 no warehouse), while scans bill warehouse time, so budgets are
 **warehouse-seconds** with credits shown alongside. Estimates are an honestly
-labeled heuristic (Snowflake has no dry-run), floored by the 60-second resume
-minimum on a cold warehouse; the budget is hard-enforced anyway by a
-per-statement server-side `STATEMENT_TIMEOUT_IN_SECONDS`, and actual seconds
-land in the same `.dex/spend.jsonl` ledger. Billed work runs only on the
+labeled heuristic (Snowflake has no dry-run); the budget is hard-enforced anyway
+by a per-statement server-side `STATEMENT_TIMEOUT_IN_SECONDS`, and actual
+seconds land in the same `.dex/spend.jsonl` ledger. Snowflake bills warehouse
+uptime rather than statement time, so estimates and settled spend, builds
+included, both carry the 60-second resume minimum on a cold warehouse and the
+idle tail until auto-suspend. Billed work runs only on the
 warehouse the config pins. dbt builds go to a dedicated dev database.schema
 via dbt-snowflake, which the `[snowflake]` extra carries. See
 [`references/snowflake.md`](https://github.com/exmergo/dex/blob/main/references/snowflake.md).

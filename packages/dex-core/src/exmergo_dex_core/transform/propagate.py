@@ -210,7 +210,10 @@ def _refuse_surviving_reads(
     )
     index = ReferenceIndex(after, scan_packages=False)
     forms = _READING_FORMS.get(kind, _NODE_READING_FORMS)
-    hits, _limits = index.references_to(name, kind)
+    kinds = _FILE_NODES if kind in _FILE_NODES else (kind,)
+    hits = [
+        hit for candidate in kinds for hit in index.references_to(name, candidate)[0]
+    ]
     where = sorted(
         f"{hit.path}:{hit.line}"
         for hit in hits
@@ -237,10 +240,22 @@ def _refuse_incomplete(index: ReferenceIndex, kind: str, name: str) -> None:
     than about whichever file dex happened to reach first.
     """
 
-    if index.limits:
+    unread_yaml = [path for path in index.unread if path.endswith((".yml", ".yaml"))]
+    if unread_yaml:
         raise PropagationRefusedError(
             "dex cannot promise it found every use of "
-            f"'{name}': {'; '.join(index.limits)}. Resolve that first, because a "
+            f"'{name}': YAML could not be parsed in {', '.join(unread_yaml)}. "
+            "Resolve that first, because a partial rewrite can still compile"
+        )
+
+    _, query_limits = index.references_to(
+        name.rpartition(".")[2] if kind == "column" else name, kind
+    )
+    limits = list(dict.fromkeys([*index.limits, *query_limits]))
+    if limits:
+        raise PropagationRefusedError(
+            "dex cannot promise it found every use of "
+            f"'{name}': {'; '.join(limits)}. Resolve that first, because a "
             "rename applied to most of a project still compiles"
         )
 
@@ -513,6 +528,8 @@ class _Builder:
     # --- helpers -------------------------------------------------------------
 
     def _matches(self, name: str, kind: str) -> bool:
+        if kind == "model":
+            kind = self.index.node_kind(name) or "model"
         if kind != self.kind:
             return False
         if self.kind == "column":

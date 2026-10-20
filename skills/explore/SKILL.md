@@ -1,6 +1,7 @@
 ---
 name: explore
-description: 'Use this whenever you need to know what is actually in a database, warehouse, or DuckDB file before you trust it: ranked inventory of what exists, column profiles, PII detection, grain and data-quality problems, verified join inference, Mermaid ER diagrams, guarded ad-hoc SQL probes, k-means segmentation, and reading the semantic layer a repo declares (dbt semantic models, a hosted dbt Cloud layer, or native Apache Ossie documents), producing a draft map without dumping the whole schema into context. Trigger it on an unmet precondition, not on any particular phrasing: if you are about to write or fix SQL against tables whose columns, types, grain, or join keys you have not verified in this session, use this FIRST. That includes dbt work: building a staging or mart model, fixing a broken model, or debugging wrong numbers, whenever the ticket names source tables without spelling out their schema. It also applies mid-task: if you are partway through and hit a table you have not inspected, stop and use this rather than guessing column names or firing off one-off SELECTs. Also use it for direct questions like "what''s in my duckdb", "which tables matter", "how do these tables relate", "is this data any good", "any PII in here", "how many orders have no customer", "cluster my customers", or "what metrics does this semantic layer define". Explore is read-only and writes nothing but the .dex/ cache. It does not author the model: pair it with transform, which writes the change once you know what you are writing against. To reconcile a project that has fallen out of sync, use maintain.'
+description: 'Use this whenever you need to know what is actually in a database, warehouse, or DuckDB file before you trust it: inventory, column profiles, PII detection, grain and data-quality problems, verified joins, ER diagrams, ad-hoc SQL probes, segmentation, and the semantic layer a repo declares (dbt, Apache Ossie, or SLayer). Trigger it on an unmet precondition, not on phrasing: if you are about to write or fix SQL against tables whose columns, types, grain, or join keys you have not verified in this session, use this FIRST. That includes dbt work (building a model, fixing one, debugging wrong numbers) whenever the ticket names source tables without spelling out their schema. It applies mid-task too: on reaching a table you have not inspected, stop and use this rather than guess column names. Also for "what''s in my duckdb", "is this data any good", "how do these tables relate". Read-only; writes only the .dex/ cache. It does not author the model: transform does, and maintain reconciles a project that has drifted.'
+compatibility: 'Needs a local shell and uv. On first use, uv downloads the exmergo-dex-core engine from PyPI at the version scripts/run.py pins. Runs in Claude Code or another agent that loads Agent Skills and has a shell, not in claude.ai chat.'
 ---
 
 # Explore
@@ -37,22 +38,37 @@ from that envelope.
    applied with `transform apply`. Take `maintain snapshot` after a known-good
    build.
 
-At every step: a `needs_confirmation` envelope waits on the user's spend
-decision, never on yours; only a human clears a PII flag; and you never edit the
-dbt project, `.dex/cache.json`, or `.dex/plans/` by hand in place of the command
-that guards them.
+At every step: a `needs_confirmation` envelope waits on the user's decision (a
+spend, or a `dex config` diff), never on yours; only a human clears a PII
+flag; and you never edit the dbt project, `.dex/config.yml`, `.dex/cache.json`,
+or `.dex/plans/` by hand in place of the command that guards them.
 <!-- dex:procedure:end -->
 
 ## Running the engine
+
+Run commands from the user's project directory, so dex finds that project's
+configuration and writes its cache there. The wrapper path is absolute:
+
+- In Claude Code, `${CLAUDE_SKILL_DIR}` is supplied by the host.
+- In Codex or another Agent Skills host, resolve the directory containing this
+  installed `SKILL.md` from the path the host provides. Substitute that absolute
+  directory for `${CLAUDE_SKILL_DIR}` in every command and reference below,
+  including paths in the bundled reference files. Do not assume that environment
+  variable exists, and do not change into the installed skill directory.
 
 ```bash
 uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [flags]
 ```
 
+Installed as a plugin or skill, `run.py` runs the `exmergo-dex-core` engine from
+PyPI at the exact version its `DEX_CORE_VERSION` line pins, built from
+https://github.com/exmergo/dex/tree/main/packages/dex-core.
+
 - `uv` is a prerequisite that Claude Code does not install. If the shell reports
   `uv: command not found`, stop and tell the user to install it
-  (`curl -LsSf https://astral.sh/uv/install.sh | sh`, `brew install uv`, or
-  `pipx install uv`), then re-run. Never fall back to raw Python, `pip`, or a
+  (`brew install uv` or `pipx install uv`, or the installer for their platform
+  from the uv docs), then re-run. Tell them the command; never run an installer
+  yourself. Never fall back to raw Python, `pip`, or a
   database CLI: the guardrails live in the engine, so any other path is
   unguarded.
 - The first command in a fresh environment installs the engine and can take tens
@@ -62,6 +78,14 @@ uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [
   and its `.dex/config.yml`, after which every command runs with no flags. Offer
   it rather than assume it: a user who has a warehouse wants that one read. It
   only ever creates, and refuses rather than touch an existing file.
+- `config validate` checks `.dex/config.yml` and `config get [key]` shows what
+  each setting resolves to and where it came from, without running anything
+  else. Change a setting with `config set <key> <value>`, not by hand: it returns
+  the diff as `needs_confirmation`, and the same command with `--confirm` writes
+  it once the user agrees. A warning naming an unknown key is a typo in a setting
+  that is doing nothing; remove it with `config unset <key>` and set the key it
+  meant with `config set`. Fields are in
+  `${CLAUDE_SKILL_DIR}/references/commands.md`.
 
 ## Exploring, step by step
 
@@ -108,11 +132,16 @@ uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [
 9. `explore semantic list|values|query` reads the semantic layer. Read
    `${CLAUDE_SKILL_DIR}/references/semantic-playbook.md` before running a metric
    query, because a metric's `time_axis`, `filter`, and measures decide what the
-   number is. Narrow `list` with `--metric`, `--for-dimension`, or `--search`
-   rather than `--full`. Run `values <dimension>` before writing a `--where`
+   number is. Narrow `list` with `--metric` or `--for-dimension`; use `--search`
+   to find matching metrics and what they reach. To discover a measure, dimension
+   or semantic model that no metric uses yet, list without `--search` rather than
+   assuming an empty search result means the element is absent. Run
+   `values <dimension>` before writing a `--where`
    filter. On a native Ossie layer, `values` and `query` refuse and name the
    physical route instead (`explore profile`, then `explore query` on the
-   relation): take it.
+   relation): take it. On a SLayer layer both run locally: metrics and
+   dimensions are named `model.measure` and `model.column`, `--where` is
+   SLayer's filter syntax rather than Jinja, and `--api` is refused.
 
 Per-command fields, caps, and backend detail are in
 `${CLAUDE_SKILL_DIR}/references/commands.md`. Read it when a field or flag you
@@ -135,10 +164,17 @@ need is not described here.
   the probe playbook.
 - A warning that a flag sits below the blocking threshold is information to pass
   to the user, not an error to fix.
+- When envelopes carry `data.result_mode: "values_free"`, the host has pinned
+  values-free mode: no table value may reach you. Ask counts and other one-row
+  aggregates only (no column in `GROUP BY`, no `MIN`/`MAX`, `DISTINCT` or
+  `LIMIT`), never try to leave the mode, and treat a `data.code` refusal as final
+  for that shape. The rule is in `${CLAUDE_SKILL_DIR}/references/commands.md`.
 - If the user says a refused column is not personal data, recommend a
   `pii_overrides` entry in `.dex/config.yml` (the fully qualified column, with an
-  optional reason). Never hand-edit `.dex/cache.json` to clear a flag, and never
-  suggest weakening detection.
+  optional reason), proposed with `dex config set pii_overrides '<list>'` (the
+  whole list, existing entries included) so the user confirms the diff; never
+  confirm it yourself. Never hand-edit `.dex/cache.json` to clear a flag, and
+  never suggest weakening detection.
 - Never propose a write to source data, and never paste a full schema into
   context.
 

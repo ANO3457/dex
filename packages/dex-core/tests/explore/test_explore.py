@@ -138,6 +138,90 @@ def test_inventory_rank_states_its_basis(duckdb_file: Path, capsys):
     assert "connectivity" in basis
 
 
+def _inventory_from_a_stub(monkeypatch, rows: dict[str, int | None]):
+    """An inventory whose objects carry the row counts the connector reported.
+
+    The DuckDB fixture cannot stand in here: it always knows a row count, and the
+    defect this pins is what `--rank` says when nothing does (Trino's
+    `information_schema` carries none, and neither does any view on the other
+    connectors).
+    """
+
+    from exmergo_dex_core import DexEngine
+    from exmergo_dex_core.adapters.base import ObjectMeta
+    from exmergo_dex_core.envelope import Paradigm
+
+    class StubAdapter:
+        paradigm = Paradigm.FREE_LOCAL
+
+        def list_objects(self, *, include_views: bool = True):
+            return [
+                ObjectMeta(
+                    identifier=f"db.shop.{name}",
+                    object_type="table",
+                    schema="shop",
+                    name=name,
+                    row_count=row_count,
+                    byte_size=0,
+                    column_count=4,
+                )
+                for name, row_count in rows.items()
+            ]
+
+    monkeypatch.setattr(
+        DexEngine, "_adapter", lambda self, cmd=None, **kw: StubAdapter()
+    )
+    return DexEngine().inventory(rank=True)
+
+
+def test_inventory_rank_without_row_counts_does_not_claim_a_size_order(monkeypatch):
+    """No object reported a count, so size ranked nothing (#717).
+
+    The note used to say "ranked by size (row count)" over an inventory where
+    every object tied on that signal and the order was the catalog's, which is
+    exactly the state `explore inventory --rank` reports on Trino.
+    """
+
+    result = _inventory_from_a_stub(
+        monkeypatch, {"orders": None, "customers": None, "stg_orders": None}
+    )
+
+    basis = " ".join(result.notes)
+    assert "ranked by size" not in basis
+    assert "no object reported a count" in basis
+    assert "size (row count) contributed nothing" in basis
+    # The other two signals are still claimed, and they did order the list.
+    assert "naming convention" in basis
+    assert "shape (column count)" in basis
+
+
+def test_inventory_rank_with_row_counts_keeps_the_size_note(monkeypatch):
+    """One object with a count is enough for size to have ranked something."""
+
+    result = _inventory_from_a_stub(
+        monkeypatch, {"orders": 10, "customers": 5, "stg_orders": 2}
+    )
+
+    basis = " ".join(result.notes)
+    assert "ranked by size (row count)" in basis
+    assert "reported no row count" not in basis
+
+
+def test_inventory_rank_names_the_objects_size_could_not_rank(monkeypatch):
+    """A partial inventory says how much of it size could not order, rather than
+    letting the reader believe every object was compared by size."""
+
+    result = _inventory_from_a_stub(
+        monkeypatch, {"orders": 10, "customers": 5, "v_orders": None}
+    )
+
+    notes = result.notes
+    assert "ranked by size (row count)" in " ".join(notes)
+    assert (
+        "1 of 3 object(s) reported no row count, so size ranked only the rest" in notes
+    )
+
+
 def test_inventory_without_rank_reports_empty_notes(duckdb_file: Path, capsys):
     # always_reports_notes: an empty list is itself the "nothing to say" signal,
     # and it must still be present rather than omitted (map/diagram/query convention).
@@ -695,6 +779,33 @@ def test_map_reports_a_profiled_object_that_joins_to_nothing(tmp_path: Path, cap
     )
 
 
+def test_map_data_quality_notes_omit_flag_encodings(tmp_path: Path):
+    import duckdb
+
+    from exmergo_dex_core import DexEngine
+
+    warehouse = tmp_path / "flags.duckdb"
+    conn = duckdb.connect(str(warehouse))
+    conn.execute("CREATE TABLE flags (is_active VARCHAR)")
+    conn.executemany(
+        "INSERT INTO flags VALUES (?)",
+        [("Y",), ("N",), ("yes",)] * 40,
+    )
+    conn.close()
+
+    with DexEngine(connector="duckdb", path=str(warehouse)) as engine:
+        mapped = engine.map()
+
+    notes = [note for obj in mapped.objects for note in obj.data_quality]
+    blob = " ".join(notes)
+    for token in ("Y=", "N=", "yes=", "Y=40", "N=40"):
+        assert token not in blob, notes
+    assert "yes=40" not in blob
+    assert any("is_active looks boolean-shaped by name" in note for note in notes)
+    assert any("3 distinct non-null values" in note for note in notes)
+    assert any("`explore profile`" in note for note in notes)
+
+
 def test_map_payload_carries_no_column_value(duckdb_file: Path, tmp_path: Path, capsys):
     """The cache holds min/max and value domains for the columns that earned them.
     This command deliberately does not read them; `explore profile` is where a
@@ -830,6 +941,35 @@ def test_map_announces_profile_cutoff(many_tables_duckdb: Path, tmp_path: Path, 
     assert "--full" in note
 
 
+def test_map_names_the_objects_its_cutoff_skipped(
+    many_tables_duckdb: Path, tmp_path: Path, capsys
+):
+    """#540: the cutoff says which objects it skipped, not only how many, so one
+    targeted `explore profile` replaces a refused probe per object."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = _run(
+        ["explore", "map", "--path", str(many_tables_duckdb), "--repo-root", str(repo)],
+        capsys,
+    )["data"]
+    skipped = data["skipped"]
+
+    assert skipped["count"] == data["skipped_count"] == 35
+    # Capped like the rest of the payload, with the cut counted.
+    assert len(skipped["objects"]) == summary.MAX_SKIPPED_OBJECTS
+    assert skipped["elided"] == 35 - summary.MAX_SKIPPED_OBJECTS
+    assert sum(g["count"] for g in skipped["by_namespace"]) == 35
+    assert skipped["elided_namespaces"] == 0
+    # The named objects are the ones not profiled, never the ones that were.
+    profiled = {o["identifier"] for o in data["objects"]}
+    assert not profiled & set(skipped["objects"])
+    # The note names a concrete next step, led by the highest-ranked skipped.
+    note = next(n for n in data["notes"] if "profile_top_n" in n)
+    assert f"explore profile {skipped['objects'][0]}" in note
+    assert any("data.skipped.elided" in n for n in data["notes"])
+
+
 def test_map_full_has_no_cutoff(many_tables_duckdb: Path, tmp_path: Path, capsys):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -847,7 +987,47 @@ def test_map_full_has_no_cutoff(many_tables_duckdb: Path, tmp_path: Path, capsys
     )
     assert payload["data"]["profiled_count"] == 60
     assert payload["data"]["skipped_count"] == 0
+    assert payload["data"]["skipped"] == {
+        "count": 0,
+        "by_namespace": [],
+        "objects": [],
+        "elided": 0,
+        "elided_namespaces": 0,
+    }
     assert not any("profile_top_n" in n for n in payload["data"]["notes"])
+
+
+def test_skipped_objects_keep_rank_order_and_group_by_namespace():
+    block = summary.summarize_skipped(
+        [
+            "db.staging.orders",
+            "db.raw.events",
+            "db.staging.customers",
+            "other.staging.orders",
+        ]
+    )
+
+    assert block.count == 4
+    # Rank order is the caller's, unchanged: the head is what only just missed.
+    assert block.objects[0] == "db.staging.orders"
+    # Largest group first; a schema name shared by two databases stays two groups.
+    assert [(g.namespace, g.count) for g in block.by_namespace] == [
+        ("db.staging", 2),
+        ("db.raw", 1),
+        ("other.staging", 1),
+    ]
+    assert block.elided == block.elided_namespaces == 0
+
+
+def test_skipped_objects_count_every_cut():
+    ranked = [f"db.s{i % 3}.t{i}" for i in range(10)]
+
+    block = summary.summarize_skipped(ranked, max_objects=4, max_namespaces=2)
+
+    assert block.objects == ranked[:4]
+    assert block.elided == 6
+    assert len(block.by_namespace) == 2
+    assert block.elided_namespaces == 1
 
 
 def test_map_carries_forward_prior_profiles(

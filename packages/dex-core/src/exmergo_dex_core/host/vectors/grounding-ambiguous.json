@@ -11,7 +11,15 @@
         "op": "upsert",
         "kind": "model_sql"
       }
-    ]
+    ],
+    "project": {
+      "dbt_packages/shared/dbt_project.yml": "name: shared\nversion: \"1.0.0\"\nmodel-paths: [\"models\"]\n",
+      "dbt_packages/shared/models/stg_orders.sql": "select 2 as order_id\n",
+      "dbt_project.yml": "name: dex_test\nversion: \"1.0.0\"\nprofile: dex_test\nmodel-paths: [\"models\"]\n",
+      "models/staging/schema.yml": "version: 2\nmodels:\n  - name: stg_customers\n    columns:\n      - name: id\n        tests: [not_null]\n",
+      "models/staging/stg_customers.sql": "select 1 as id, 'a@example.com' as email\n",
+      "models/staging/stg_orders.sql": "select 1 as order_id, 1 as customer_id\n"
+    }
   },
   "expect": {
     "completeness": "complete",
@@ -30,18 +38,19 @@
           ]
         }
       ],
+      "missing": [],
       "freshness": {
         "manifest_present": false,
         "generated_at": null,
-        "newest_source_at": "2026-09-08T01:04:26.652394+00:00",
+        "newest_source_at": "2026-10-14T22:01:09.767701+00:00",
         "stale": null
       },
       "binding": {
         "plan_digest": null,
-        "source_digest": "sha256:70cc1dd4fb5dc1831906721fa160c8c386f0ac0880fb2cc072910284f7f49c61",
+        "source_digest": "sha256:53d71c2d65ec6ce63b5ae8468651902cfcfd6fd2576f7c6c58adda78a93bd2cb",
         "config_digest": null,
         "packages_digest": "sha256:1fa04cfa6921dc2f3e97dfc7cec74cc90e67d833f44bcb30b9b2781c4e4d4b98",
-        "engine_version": "1.10.1.dev32+gb057fca4a.d20260906"
+        "engine_version": "1.13.2"
       },
       "relations": [],
       "dependencies": [
@@ -80,6 +89,7 @@
         {
           "kind": "model",
           "name": "stg_customers",
+          "defined": "project",
           "origin": "source_scan",
           "used_in": [
             "models/staging/mart.sql"
@@ -88,6 +98,7 @@
         {
           "kind": "model",
           "name": "stg_orders",
+          "defined": "project",
           "origin": "source_scan",
           "used_in": [
             "models/staging/mart.sql"

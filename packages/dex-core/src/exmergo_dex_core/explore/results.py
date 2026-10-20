@@ -19,9 +19,11 @@ from pydantic import BaseModel, Field
 
 from ..adapters.base import VALUE_DOMAIN_CAP
 from ..cache import Dataset, DexCache, Relationship
+from ..errors import StatementStage
 from ..results import Result
+from ..values_free import COLUMN_VALUE_FIELDS
 from .semantic import SemanticCatalog
-from .summary import MapObject
+from .summary import MapObject, SkippedObjects
 
 
 class InventoryEntry(BaseModel):
@@ -99,10 +101,17 @@ def _profile_dataset_payload(
     into the domain's ``elided`` count (``values`` plus ``elided`` stays the
     exact distinct total), so a wide enumeration reads as a summary rather than
     a column dump.
+
+    A dataset profiled or served in values-free mode (#591) carries no column
+    value at all: ``min_value``, ``max_value`` and ``value_domain`` are absent
+    from every column rather than null, named once in ``withheld_fields``, and
+    kept out of ``suppressed_fields``, whose meaning ("null on every column
+    shown") they do not share.
     """
 
+    withheld = list(COLUMN_VALUE_FIELDS) if dataset.values_withheld else []
     kept, elided = dataset.columns_with_findings(everything=show_all_columns)
-    columns = [c.model_dump(mode="json") for c in kept]
+    columns = [c.model_dump(mode="json", exclude=set(withheld)) for c in kept]
     cap = max(0, value_domain_cap)
     for column in columns:
         domain = column.get("value_domain")
@@ -113,7 +122,7 @@ def _profile_dataset_payload(
     for column in columns:
         for name in suppressed:
             del column[name]
-    return {
+    payload: dict[str, Any] = {
         "identifier": dataset.identifier,
         "object_type": dataset.object_type,
         "row_count": dataset.row_count,
@@ -133,9 +142,14 @@ def _profile_dataset_payload(
         "profiled_at": dataset.profiled_at,
         "semantic_models": dataset.semantic_models,
         "suppressed_fields": suppressed,
-        "columns": columns,
-        "elided_column_count": elided,
     }
+    if withheld:
+        # Ahead of `columns`, for the reason `suppressed_fields` is: a truncated
+        # read still says why the fields are not there.
+        payload["withheld_fields"] = withheld
+    payload["columns"] = columns
+    payload["elided_column_count"] = elided
+    return payload
 
 
 def _fields_null_everywhere(columns: list[dict[str, Any]]) -> list[str]:
@@ -289,6 +303,10 @@ class MapResult(Result):
     profiled_count: int = 0
     cache_hit_count: int = 0
     skipped_count: int = 0
+    # Which objects the rank cutoff did not profile, not only how many (#540).
+    # Always reported: `count: 0` is the positive statement that nothing was
+    # skipped, the same way an empty `notes` is.
+    skipped: SkippedObjects = Field(default_factory=SkippedObjects)
     carried_forward_count: int = 0
     out_of_scope_carried_count: int = 0
     dropped_count: int = 0
@@ -318,6 +336,7 @@ class MapResult(Result):
             "profiled_count": self.profiled_count,
             "cache_hit_count": self.cache_hit_count,
             "skipped_count": self.skipped_count,
+            "skipped": self.skipped.model_dump(mode="json"),
             "carried_forward_count": self.carried_forward_count,
             "out_of_scope_carried_count": self.out_of_scope_carried_count,
             "dropped_count": self.dropped_count,
@@ -438,6 +457,12 @@ class QueryStatementResult(BaseModel):
 
     ``line`` is the line the statement started on when it came from a file, and
     None when it came from argv, where the position is the whole address.
+
+    ``stage`` sits beside ``reason`` for the same reason ``reason`` does: a
+    failed statement's verdict is reported here and not through the envelope's
+    own error, so which door the warehouse refused it at has to be here too. It
+    is None on every statement the warehouse did not refuse, and on one refused
+    by an adapter that cannot tell its doors apart.
     """
 
     index: int
@@ -456,6 +481,15 @@ class QueryStatementResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
     reason: str | None = None
+    stage: StatementStage | None = None
+    # The stable code a statement's error carries in values-free mode (#591),
+    # the part of it guaranteed to quote no value. Absent outside the mode.
+    code: str | None = None
+    # Set only on a call run `--across` mirrored datasets (#545): which target
+    # this variant ran against, and which of the caller's templates it was
+    # expanded from (0-based), so variants of one probe line up across targets.
+    target: str | None = None
+    template: int | None = None
 
 
 class QueryBatchResult(Result):
@@ -472,17 +506,25 @@ class QueryBatchResult(Result):
 
     results: list[QueryStatementResult] = Field(default_factory=list)
     profiled_on_demand: list[str] = Field(default_factory=list)
+    # The targets a `--across` call fanned out over, in the order given; absent
+    # on an ordinary batch, whose payload stays exactly what it was.
+    across: list[str] | None = None
 
     def data(self) -> dict[str, Any]:
         results = []
         for result in self.results:
             payload = result.model_dump(mode="json")
-            if payload["column_notes"] is None:
-                payload.pop("column_notes")
-            if payload["query_notes"] is None:
-                payload.pop("query_notes")
+            for optional in (
+                "column_notes",
+                "query_notes",
+                "target",
+                "template",
+                "code",
+            ):
+                if payload[optional] is None:
+                    payload.pop(optional)
             results.append(payload)
-        return {
+        data: dict[str, Any] = {
             "shape": "columnar",
             "results": results,
             "statement_count": len(self.results),
@@ -490,6 +532,9 @@ class QueryBatchResult(Result):
             "failed_count": sum(1 for r in self.results if r.status != "ok"),
             "profiled_on_demand": self.profiled_on_demand,
         }
+        if self.across is not None:
+            data["across"] = self.across
+        return data
 
 
 class ClusterResult(Result):

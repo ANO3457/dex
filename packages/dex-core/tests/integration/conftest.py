@@ -66,11 +66,33 @@ is the same one CI runs, so the local target and the CI target cannot drift:
         DEX_TEST_CH_DEV_PASSWORD=dbt_dev \
         uv run pytest tests/integration -q -m clickhouse
 
+Trino (bills nothing: a local container pair, Trino plus the Postgres database
+its keyless Iceberg catalog keeps table pointers in; db-load gating is exercised
+for real). The URL is the read-only dex_ro identity from scripts/trino/rules.json;
+dbt builds as dbt_dev, which the rendered profile reads from TRINO_USER. One
+script stands the pair up and is the same one CI runs:
+
+    scripts/setup_trino_dev.sh
+    DEX_TEST_TRINO_URL=http://dex_ro@127.0.0.1:8085 \
+        uv run pytest tests/integration -q -m trino
+
+Trino with the Glue and S3 Iceberg catalog (bills a few megabytes of S3 and Glue
+requests). scripts/setup_trino_iceberg_ci.sh provisions the bucket, the Glue
+databases, the OIDC role and the protected environment; locally the same pair
+attaches the catalog with `--aws` from the current AWS CLI session:
+
+    scripts/setup_trino_dev.sh --aws
+    DEX_TEST_TRINO_URL=http://dex_ro@127.0.0.1:8085 \
+        DEX_TEST_TRINO_GLUE_SCHEMA=dex_ci \
+        uv run pytest tests/integration -q -m trino_iceberg
+
 ClickHouse Cloud (bills the dedicated Scale service in AWS us-east-1; the
 repository workflow performs the hard daily-usage preflight before any SQL).
 scripts/setup_clickhouse_cloud_ci.sh provisions the two isolated databases,
 least-privilege users, server-side limits, scoped usage reader, and protected
-GitHub environment used by this suite:
+GitHub environment used by this suite. The scoped API key is read from two
+files in DEX_SECRETS_DIR, never from the environment (see
+scripts/clickhouse_cloud/README.md):
 
     scripts/clickhouse_cloud/run_integration.sh
 """
@@ -78,6 +100,7 @@ GitHub environment used by this suite:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -92,6 +115,24 @@ DBX_MAX_SECONDS = float(os.environ.get("DEX_TEST_DATABRICKS_MAX_SECONDS", "60"))
 RS_MAX_SECONDS = float(os.environ.get("DEX_TEST_REDSHIFT_MAX_SECONDS", "60"))
 
 CH_MAX_SECONDS = float(os.environ.get("DEX_TEST_CH_MAX_SECONDS", "60"))
+
+TRINO_MAX_SECONDS = float(os.environ.get("DEX_TEST_TRINO_MAX_SECONDS", "60"))
+
+
+def cloud_api_key_files() -> tuple[Path, Path]:
+    """The scoped ClickHouse Cloud API key's two files, where
+    scripts/clickhouse_cloud/secrets.sh puts and reads them.
+
+    The key never rides in the test environment: CI writes it to these files in
+    a step of its own, and the one test that needs it hands it to the one
+    clickhousectl call that uses it. The directory default mirrors secrets.sh,
+    including treating an empty variable as unset.
+    """
+
+    # Only read: the files are written by CI or by the operator, never here.
+    base = os.environ.get("RUNNER_TEMP") or os.environ.get("TMPDIR") or "/tmp"  # noqa: S108
+    directory = Path(os.environ.get("DEX_SECRETS_DIR") or Path(base) / "dex-secrets")
+    return directory / "clickhouse_api_key", directory / "clickhouse_api_secret"
 
 
 def integration_budget(ceiling: float | None = None) -> dict[str, float | bool]:
@@ -191,16 +232,42 @@ def _require_cloud_env(request):
             "DEX_TEST_CH_CLOUD_MAX_SECONDS",
             "DEX_TEST_CH_CLOUD_DSN",
             "DEX_TEST_CH_CLOUD_DEV_PASSWORD",
-            "DEX_TEST_CH_CLOUD_API_KEY",
-            "DEX_TEST_CH_CLOUD_API_SECRET",
         )
         missing = [name for name in required if not os.environ.get(name)]
+        missing += [
+            str(path)
+            for path in cloud_api_key_files()
+            if not (path.is_file() and path.stat().st_size)
+        ]
         if missing:
             pytest.skip(
                 "ClickHouse Cloud integration disabled: required values are "
                 f"missing: {', '.join(missing)}"
             )
         pytest.importorskip("clickhouse_connect")
+        return
+    # Both Trino branches sit above the BigQuery fall-through below, which
+    # treats any test without a matched marker as a BigQuery test.
+    if request.node.get_closest_marker("trino_iceberg"):
+        missing = [
+            name
+            for name in ("DEX_TEST_TRINO_URL", "DEX_TEST_TRINO_GLUE_SCHEMA")
+            if not os.environ.get(name)
+        ]
+        if missing:
+            pytest.skip(
+                "Trino Glue Iceberg integration disabled: set "
+                f"{', '.join(missing)} (run scripts/setup_trino_dev.sh --aws)"
+            )
+        pytest.importorskip("trino")
+        return
+    if request.node.get_closest_marker("trino"):
+        if not os.environ.get("DEX_TEST_TRINO_URL"):
+            pytest.skip(
+                "Trino integration disabled: set DEX_TEST_TRINO_URL (run "
+                "scripts/setup_trino_dev.sh for the seeded local pair)"
+            )
+        pytest.importorskip("trino")
         return
     if request.node.get_closest_marker("clickhouse"):
         if not os.environ.get("DEX_TEST_CH_DSN"):
@@ -362,3 +429,31 @@ def ch_dsn() -> str:
 @pytest.fixture
 def ch_dev_password() -> str:
     return os.environ.get("DEX_TEST_CH_DEV_PASSWORD", "dbt_dev")
+
+
+@pytest.fixture
+def trino_url() -> str:
+    return os.environ["DEX_TEST_TRINO_URL"]
+
+
+@pytest.fixture
+def trino_dev_user() -> str:
+    return os.environ.get("DEX_TEST_TRINO_DEV_USER", "dbt_dev")
+
+
+def trino_client(url: str, *, user: str | None = None):
+    """A raw client on the same coordinator, as ``user`` (the URL's own user by
+    default). Used to prove what the server itself allows, which is the half of
+    read-only a dex guard cannot vouch for."""
+
+    from urllib.parse import urlsplit
+
+    import trino
+
+    parts = urlsplit(url)
+    return trino.dbapi.connect(
+        host=parts.hostname,
+        port=parts.port or 8080,
+        user=user or parts.username,
+        http_scheme="https" if parts.scheme == "https" else "http",
+    )

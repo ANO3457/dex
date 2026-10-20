@@ -1,7 +1,11 @@
-<img width="1280" height="563" alt="exmergo-dex-showcase" src="https://github.com/user-attachments/assets/9dd574c2-8598-47bc-ae90-7d5a3a4d2e18" />
+<img width="1920" height="1080" alt="Video 2" src="https://github.com/user-attachments/assets/f9c8c052-32fb-4b2f-8b89-a6f484b55035" />
+
 
 **Built by [Exmergo](https://exmergo.com)** · The AI Stack for Your Data Stack.
 
+**Documentation: [docs.exmergo.com/dex](https://docs.exmergo.com/dex)**
+
+[![Docs](https://img.shields.io/badge/docs-docs.exmergo.com%2Fdex-165dfc?logo=readthedocs&logoColor=white)](https://docs.exmergo.com/dex)
 [![PyPI](https://img.shields.io/pypi/v/exmergo-dex-core?logo=pypi&logoColor=white&color=165dfc)](https://pypi.org/project/exmergo-dex-core/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-165dfc)](LICENSE)
 [![data-eng-bench](https://img.shields.io/badge/data--eng--bench-57%25-33cf56)](benchmarks/data-eng-bench/README.md)
@@ -10,6 +14,7 @@
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-Exmergo-165dfc?logo=linkedin&logoColor=white)](https://www.linkedin.com/company/exmergo/)
 [![X](https://img.shields.io/badge/Follow-%40exmergo-165dfc?logo=x&logoColor=white)](https://x.com/exmergo)
+[![Star the repo!](https://img.shields.io/github/stars/exmergo/dex?style=flat&label=Star%20the%20repo!%20%E2%AD%90&labelColor=555&logo=github&logoColor=white&color=165dfc)](https://github.com/exmergo/dex)
 
 ## Install (Any Agent)
 
@@ -17,6 +22,21 @@ Run this command in your terminal
 ```
 npx skills add exmergo/dex
 ```
+
+## Install (Codex)
+
+Install the three skills into Codex with the same Agent Skills installer:
+
+```bash
+npx skills add exmergo/dex --agent codex
+```
+
+The repository also packages Explore, Transform, and Maintain as one native
+Codex plugin through `.codex-plugin/plugin.json`. Its wrappers and references
+travel with the skills; no MCP server is required. Codex needs a local shell and
+[`uv`](#prerequisite-uv), and the first command downloads the pinned dex engine.
+Run dex from your project directory so it finds your configuration and keeps
+its `.dex/` cache with your project.
 
 ## Install (Claude Code)
 
@@ -109,7 +129,9 @@ dex explore map
 `dex demo` writes two files in the directory you are standing in, and refuses rather
 than overwrite anything: `dex_demo.duckdb` (7 tables, 29,512 rows) and a
 `.dex/config.yml` so everything after it runs with no flags. The data is generated
-from a pinned seed, so what you see is what is written here.
+from a pinned seed, so what you see is what is written here. `dex config get` shows
+what that config resolves to, and `dex config set` and `dex config unset` change it as
+a diff you confirm, keeping its comments.
 
 It is seeded to be **realistically broken**, because a first run that reports a clean
 bill of health teaches you nothing. `explore map` flags 6 columns as personal data,
@@ -150,14 +172,15 @@ to it.
 ## Prerequisite: `uv`
 
 dex installs and runs its engine through [`uv`](https://docs.astral.sh/uv/), so you
-need it on your `PATH` before either install below. Neither Claude Code nor the
+need it on your `PATH` before either install above. Neither Claude Code nor the
 plugin installs it for you.
 ```
-curl -LsSf https://astral.sh/uv/install.sh | sh
+brew install uv
 ```
-`brew install uv` and `pipx install uv` work too. Nothing else is required: `uv`
-supplies the Python and the engine, with the connector extra chosen for you at
-runtime.
+`pipx install uv` works too, and the
+[uv installation docs](https://docs.astral.sh/uv/getting-started/installation/)
+cover every other platform. Nothing else is required: `uv` supplies the Python and
+the engine, with the connector extra chosen for you at runtime.
 
 The first command in a fresh environment pays for that install, which is tens of
 seconds on a cold `uv` cache. `--warm` pays it up front instead: it materializes
@@ -168,6 +191,35 @@ uv run --no-project --script skills/<skill>/scripts/run.py --warm
 Run it as a container build step or a CI setup step, or ask your agent to warm dex
 once after installing. Add `--connector snowflake` (or any other connector) to warm
 a warehouse before there is a project to read the choice from.
+
+## What dex runs and connects to
+
+dex runs on your machine, inside your coding agent. It needs an agent with a local
+shell: Claude Code, or any agent that loads Agent Skills. It does not run in
+claude.ai chat, which has no shell to run `uv` in.
+
+- **Install.** The skills run `uv`, which downloads the `exmergo-dex-core` engine at
+  the exact version the skill pins, with its dependencies, from PyPI (or the package
+  index your `uv` configuration names) on first use of each version. If no Python
+  3.11 or newer is on the machine, `uv` also downloads a managed Python.
+- **Your warehouse.** The engine connects only to the warehouse or database you
+  configure, with credentials it discovers from your existing credential chain, and
+  sends it read-only SQL. Credentials never enter the agent's context.
+- **dbt Cloud, if you turn it on.** The hosted dbt Cloud Semantic Layer backend is
+  off by default. Enabled, it sends semantic queries (metric names, dimension names
+  and filter expressions) and catalog requests to your dbt Cloud host with your
+  service token, and dbt Cloud runs them against your warehouse.
+- **dbt.** The dbt commands dex runs for `transform` and `maintain` are dbt-core's
+  own, so dbt-core sends its anonymous usage statistics to dbt Labs unless you turn
+  them off in your dbt configuration. `transform deps` runs `dbt deps`, which
+  downloads the packages your `packages.yml` declares.
+- **Exmergo.** dex sends nothing to Exmergo: no telemetry, analytics, license check
+  or update ping.
+- **Your repository.** dex keeps its own state in `.dex/`, and every change to your
+  project comes back as a diff you review. dbt writes its usual `target/` and
+  `logs/` when dex runs it.
+
+See the [dex privacy policy](https://www.exmergo.com/privacy/dex).
 
 ## Benchmarks
 
@@ -231,33 +283,37 @@ it is better than the one a point below it.
 | <img src="https://www.exmergo.com/connectors/databricks.png" width="20" height="20" alt=""> **Databricks** | Cloud warehouse | ❌ | `databricks` | Warehouse-seconds, DBUs alongside | The SDK's unified chain: `databricks auth login`, `DATABRICKS_*` env, or a dbt profile |
 | <img src="https://www.exmergo.com/connectors/redshift.png" width="20" height="20" alt=""> **Amazon Redshift** | Cloud warehouse, Serverless-first | ❌ | `redshift` | Compute-seconds, RPU-hours alongside | The AWS credential chain (a pinned Serverless workgroup mints IAM temporary database credentials) or `REDSHIFT_*` env |
 | <img src="https://www.exmergo.com/connectors/clickhouse.png" width="20" height="20" alt=""> **ClickHouse** | Analytical database | ✅ | `clickhouse` | Compute-seconds on Cloud, with live allocated memory translating to approximate compute-unit-hours and optional USD; database-seconds self-hosted | `CLICKHOUSE_URL`, the `CLICKHOUSE_*` env, or a dbt profile |
+| <img src="https://www.exmergo.com/connectors/trino.png" width="20" height="20" alt=""> **Trino** | Federated query engine (Trino, Starburst Enterprise, Trino on EMR) | ✅ | `trino` | Cluster-seconds, no invoice | `TRINO_URL`, the `TRINO_*` env, or a dbt profile |
 | <img src="https://www.exmergo.com/connectors/duckdb.png" width="20" height="20" alt=""> **DuckDB** | Embedded analytical | ✅ | `duckdb` | Free and local, nothing to confirm | None, just a file path |
 | <img src="https://www.exmergo.com/connectors/postgresql.png" width="20" height="20" alt=""> **Postgres** | Operational database | ✅ | `postgres` | Database-seconds, no invoice | `pg_service.conf`, `DATABASE_URL`, the `PG*` env, or a dbt profile |
 
 Credentials are discovered, never asked for. Every scan is estimated and
 confirmed before it spends, and capped server-side: `maximum_bytes_billed` on
 BigQuery, a per-statement statement timeout on Snowflake, Databricks, Redshift,
-and Postgres, and `max_execution_time` plus `max_bytes_to_read` on ClickHouse.
-All settled spend is recorded in a local ledger.
+and Postgres, `max_execution_time` plus `max_bytes_to_read` on ClickHouse, and
+`query_max_run_time` plus `query_max_scan_physical_bytes` on Trino. All settled
+spend is recorded in a local ledger.
 
-Self-hosted Postgres and ClickHouse bill no dollars, and dex still gates them: an
-unbounded scan on a production Postgres primary or a shared ClickHouse cluster
-is a real cost even when nothing appears on an invoice.
+Self-hosted Postgres, ClickHouse, and Trino bill no dollars, and dex still gates
+them: an unbounded scan on a production Postgres primary, a shared ClickHouse
+cluster, or a Trino cluster federating into someone else's database is a real
+cost even when nothing appears on an invoice.
 
 ### Upcoming Connectors
 
-- Cloud warehouse: **Trino**, **Azure Synapse**, **Microsoft Fabric**
+- Cloud warehouse: **Starburst Galaxy**, **Azure Synapse**, **Microsoft Fabric**
 
 ## Semantic layers
 
 The semantic layer is a separate axis from the transformation project, chosen
-once per repository in `.dex/config.yml`. dex reads two vendors across three
+once per repository in `.dex/config.yml`. dex reads three vendors across four
 deployments today:
 
 | Semantic layer | Hosted | Queryable | `vendor` / `deployment` | Read through |
 | --- | :---: | :---: | --- | --- |
 | <img src="https://www.exmergo.com/connectors/dbt.png" width="20" height="20" alt=""> **dbt** | ✅ | ✅ | `dbt` / `local` or `dbt_cloud` | MetricFlow locally, with the rendered SQL run through the dex connector and its cost guard, or the hosted dbt Cloud Semantic Layer over its API |
 | <img src="https://www.exmergo.com/connectors/ossie.png" width="20" height="20" alt=""> **[Apache Ossie](https://github.com/apache/ossie)** (incubating) | ❌ | ❌ | `ossie` / `local` | Native documents read straight out of the repository, with no dbt project and no MetricFlow anywhere in the path |
+| **[SLayer](https://github.com/MotleyAI/slayer)** | ❌ | ✅ | `slayer` / `local` | SLayer model files in the repository, validated by one pinned SLayer release; SLayer renders a metric query and the dex connector runs it under the cost guard |
 
 Ossie is catalog-first, and that is a statement about the format rather than
 about how far we got: Ossie specifies interchange metadata and no portable query
@@ -327,6 +383,22 @@ two share a word rather than a job.
 The host owns authentication; dex still builds the cost gate from your store, so
 the session budget binds either way.
 
+A host whose model may see no value read from a table pins the engine to
+values-free mode:
+
+```python
+with DexEngine(connector="duckdb", path="shop.duckdb", result_mode="values_free") as eng:
+    eng.profile("orders")       # no min/max or value domains
+    eng.query("select count(*), avg(total) from orders")   # aggregates only
+```
+
+Every result then says `result_mode == ResultMode.VALUES_FREE`, a query that would
+return a cell value is refused with a code, and an error carries a code instead of
+the warehouse's words. The CLI spelling is `--values-free`, or
+`DEX_RESULT_MODE=values_free` to pin it for every command; the repository's
+config never selects it. The rules, and the risks it does not close, are in
+[`references/values-free-mode.md`](references/values-free-mode.md).
+
 An application that splits the loop across processes has its own seam,
 `exmergo_dex_core.host`: a stored plan exports as a document a second process can
 verify and apply with no plan store and no network, that plan's dependencies and
@@ -364,8 +436,10 @@ published `exmergo-dex-core` package and these skills.
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup, the Ruff lint and
-format workflow, and the pre-commit hook. Every pull request into `main` must
-pass the Lint workflow and CI before it can merge.
+format workflow, the pre-commit hook, and changelog fragments. Every pull request
+into `main` must pass the Lint workflow and CI before it can merge, and describes
+its change in a fragment under [`changelog.d/`](changelog.d/) unless no user can
+see it.
 
 ## Community
 

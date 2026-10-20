@@ -22,17 +22,24 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
 from typing import Any
 
 from . import command_args
 from . import envelope as env
-from .config import SEMANTIC_SOURCE_FACTORIES
+from .config import SEMANTIC_DOCUMENT_AUTHORING
 from .engine import DexEngine
 from .guards.cost_guard import ConfirmationRequiredError, CostGuardError
 from .guards.dialect import DialectDependencyError
 from .guards.dialect import ensure_available as ensure_dialect_available
 from .results import BudgetExhaustedError
+from .values_free import (
+    ResultMode,
+    call_withholding,
+    parse_result_mode,
+    require_allowed,
+)
 
 # The full command surface. Group -> its subcommands.
 #
@@ -80,9 +87,8 @@ COMMAND_SURFACE: dict[str, list[str]] = {
         "preflight",
     ],
     # `define`/`update`/`plan` author the dbt semantic layer; each vendor whose
-    # semantic layer is its own project format gets a subcommand of its own name
-    # for authoring that layer's native documents.
-    "semantic": ["define", "update", "plan", *SEMANTIC_SOURCE_FACTORIES],
+    # native documents dex authors gets a subcommand of its own name for them.
+    "semantic": ["define", "update", "plan", *SEMANTIC_DOCUMENT_AUTHORING],
     # maintain: keep the dbt project correct as the world drifts. `snapshot`
     # captures the known-good baseline; `check` sweeps every axis against it;
     # `schema`/`volume`/`grain`/`semantic` are the per-axis deep detectors;
@@ -101,6 +107,10 @@ COMMAND_SURFACE: dict[str, list[str]] = {
         "verify",
     ],
     "viz": ["preview"],
+    # config: read, check and change `.dex/config.yml` itself. Routed in `main`
+    # before an engine is built, because every engine is built from that file
+    # and a file that cannot build one is exactly when these are needed.
+    "config": ["get", "validate", "set", "unset"],
     # demo: the on-ramp. No subcommands, because there is exactly one thing to
     # do and it is the first command a new user runs. It is also the only verb
     # that creates a data file, which is why it lives on its own path (see
@@ -160,6 +170,67 @@ def _bare_subcommand_suggestion(token: str) -> str | None:
     return f"subcommand '{token}' is ambiguous; try one of: {listed}"
 
 
+#: The environment variable a host that wraps the CLI pins values-free mode with
+#: (#591). An environment variable rather than config, because the process that
+#: launches dex is the host and `.dex/config.yml` is a file the agent may write.
+RESULT_MODE_ENV = "DEX_RESULT_MODE"
+
+#: Help for the options every command accepts. One table for both places they
+#: are declared (the top-level parser and each subparser's parent), so the two
+#: copies of an option cannot describe it differently.
+_CONNECTION_OPTION_HELP: dict[str, str] = {
+    "--connector": "warehouse to use, overriding connector: in .dex/config.yml",
+    "--path": "DuckDB database file to read",
+    "--scope": "narrow the committed source allowlist to this namespace; repeatable",
+    "--project": "BigQuery project (the older spelling of --scope)",
+    "--dataset": "BigQuery dataset, repeatable (the older spelling of --scope)",
+    "--repo-root": "directory to resolve .dex/config.yml from, walking up (default: .)",
+    "--confirm": "run a billed command after its cost was quoted",
+    "--budget": "spend this command may use, in the connector's cost unit",
+    "--session-ceiling": "answer the one-time ask: commit this daily spend ceiling",
+    "--no-session-ceiling": "answer the one-time ask: record that no ceiling applies",
+    "--values-free": f"return no table value in any result ({RESULT_MODE_ENV} pins it)",
+}
+
+
+def _add_connection_options(parser: argparse.ArgumentParser, *, suppress: bool) -> None:
+    """Declare the shared options on ``parser``, with real or SUPPRESS defaults."""
+
+    def add(flag: str, default: Any = None, **kwargs: Any) -> None:
+        parser.add_argument(
+            flag,
+            default=argparse.SUPPRESS if suppress else default,
+            help=_CONNECTION_OPTION_HELP[flag],
+            **kwargs,
+        )
+
+    add("--connector", metavar="NAME")
+    add("--path", metavar="FILE")
+    # The portable source-scope override, repeatable: each connector reads it in
+    # its own namespace vocabulary. Nothing is written to config, and a scope may
+    # only narrow a committed allowlist, never widen it.
+    add("--scope", action="append", metavar="NAMESPACE")
+    # BigQuery's older spelling of --scope, kept because `connect test --project X
+    # --dataset Y` is how a BigQuery connection is smoke-tested before a
+    # .dex/config.yml bigquery block exists. Both error on other connectors.
+    add("--project", metavar="PROJECT")
+    add("--dataset", action="append", metavar="DATASET")
+    add("--repo-root", default=".", metavar="DIR")
+    add("--confirm", default=False, action="store_true")
+    add("--budget", type=float, metavar="AMOUNT")
+    # The two answers to the one-time cumulative-ceiling ask (issue #283). Both
+    # write `.dex/config.yml` once and then never matter again, which is why
+    # they sit beside `--budget` rather than under a subcommand of their own:
+    # the ask fires from a billed command, and the answer belongs on the re-run
+    # of that same command.
+    add("--session-ceiling", type=float, metavar="AMOUNT")
+    add("--no-session-ceiling", default=False, action="store_true")
+    # Values-free mode (#591). An on switch only: there is no flag that turns it
+    # off, so `DEX_RESULT_MODE=values_free` set by a host cannot be undone by
+    # anything an agent adds to the command line.
+    add("--values-free", default=False, action="store_true")
+
+
 def _sub_connection_options() -> argparse.ArgumentParser:
     """The connection options as a parent for subparsers, with SUPPRESS defaults.
 
@@ -172,29 +243,7 @@ def _sub_connection_options() -> argparse.ArgumentParser:
     """
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--connector", default=argparse.SUPPRESS)
-    common.add_argument("--path", default=argparse.SUPPRESS)
-    # The portable source-scope override, repeatable: each connector reads it in
-    # its own namespace vocabulary. Nothing is written to config, and a scope may
-    # only narrow a committed allowlist, never widen it.
-    common.add_argument("--scope", action="append", default=argparse.SUPPRESS)
-    # BigQuery's older spelling of --scope, kept because `connect test --project X
-    # --dataset Y` is how a BigQuery connection is smoke-tested before a
-    # .dex/config.yml bigquery block exists. Both error on other connectors.
-    common.add_argument("--project", default=argparse.SUPPRESS)
-    common.add_argument("--dataset", action="append", default=argparse.SUPPRESS)
-    common.add_argument("--repo-root", default=argparse.SUPPRESS)
-    common.add_argument("--confirm", action="store_true", default=argparse.SUPPRESS)
-    common.add_argument("--budget", type=float, default=argparse.SUPPRESS)
-    # The two answers to the one-time cumulative-ceiling ask (issue #283). Both
-    # write `.dex/config.yml` once and then never matter again, which is why
-    # they sit beside `--budget` rather than under a subcommand of their own:
-    # the ask fires from a billed command, and the answer belongs on the re-run
-    # of that same command.
-    common.add_argument("--session-ceiling", type=float, default=argparse.SUPPRESS)
-    common.add_argument(
-        "--no-session-ceiling", action="store_true", default=argparse.SUPPRESS
-    )
+    _add_connection_options(common, suppress=True)
     return common
 
 
@@ -208,11 +257,247 @@ _GROUP_HELP: dict[str, str] = {
     "connect": "check a connector's own credentials and capabilities",
     "explore": "make sense of a warehouse: rank objects, profile columns, infer joins",
     "transform": "author and refactor dbt models, tests, and the semantic layer",
-    "semantic": "define dbt or native Ossie semantics as reviewable diffs",
+    "semantic": "define dbt or native semantic layers as reviewable diffs",
     "maintain": "detect drift against the last snapshot and propose the fix",
     "viz": "preview the semantic layer (not yet implemented)",
+    "config": "read, check and change .dex/config.yml, as reviewable diffs",
     "demo": "create a seeded local DuckDB warehouse to try dex against "
     "(no credentials, no network)",
+}
+
+#: (group, subcommand) -> (summary, description). The summary is the one line
+#: `dex <group> --help` lists; the description heads `dex <group> <sub> --help`
+#: and names what the command costs. Descriptive, never procedural: when to run
+#: what is the skills' job, and the full contract is the command reference.
+_SUBCOMMAND_HELP: dict[tuple[str, str], tuple[str, str]] = {
+    ("connect", "test"): (
+        "check the connection, its capabilities and cost unit",
+        "Open the resolved connection read-only and report the dialect, the "
+        "capabilities, and the cost paradigm. Free: it runs no billed query.",
+    ),
+    ("explore", "inventory"): (
+        "list warehouse objects with counts and sizes, no rows",
+        "Summarize the objects in scope from metadata. --rank orders them by "
+        "what matters and caps the list. Free metadata on every connector.",
+    ),
+    ("explore", "profile"): (
+        "profile columns: grain, keys, PII flags, data quality",
+        "Profile the named objects from aggregates, never rows: candidate keys, "
+        "grain, PII flags and data-quality findings. Billed on metered "
+        "connectors, so it quotes the cost first.",
+    ),
+    ("explore", "relationships"): (
+        "infer how tables join, optionally verified",
+        "Infer join edges with confidences. --verify measures each join with an "
+        "overlap probe, which is billed on metered connectors.",
+    ),
+    ("explore", "map"): (
+        "rank, profile and relate a warehouse into .dex/",
+        "Build or refresh the draft map in .dex/: the top-ranked objects with "
+        "grain, keys and PII flags, plus the join edges. Billed on metered "
+        "connectors, so it quotes the cost first.",
+    ),
+    ("explore", "diagram"): (
+        "draw the cached map as a Mermaid ER diagram",
+        "Serialize the .dex/ map as a Mermaid erDiagram. Free and "
+        "connectionless: it reads only the cache.",
+    ),
+    ("explore", "query"): (
+        "run guarded SELECTs through the query firewall",
+        "Run one or more SELECT statements through the query firewall, which "
+        "returns values only from profiled columns cleared of PII. Billed on "
+        "metered connectors.",
+    ),
+    ("explore", "cluster"): (
+        "k-means over a sampled scan of numeric columns",
+        "Cluster one object's numeric columns from a bounded sample and return "
+        "sizes, centroids and silhouette, never rows. Needs the [cluster] "
+        "extra; billed on metered connectors.",
+    ),
+    ("explore", "semantic"): (
+        "list, read or query the semantic layer",
+        "Discover the semantic layer's metrics, dimensions and entities (list), "
+        "read one dimension's values (values), or run a governed metric query "
+        "(query). Listing is free; values and query run SQL.",
+    ),
+    ("transform", "init"): (
+        "bootstrap a dbt project skeleton",
+        "Propose a new dbt project as create diffs, for the connector named by "
+        "--connector or .dex/config.yml. Refuses if a dbt project exists. Free.",
+    ),
+    ("transform", "plan"): (
+        "validate authored dbt edits and store them as a plan",
+        "Validate the edits in --edits-file, diff them against the project, and "
+        "store a plan. Nothing is written until transform apply. Repo-only.",
+    ),
+    ("transform", "apply"): (
+        "write a stored plan or plan document into the project",
+        "Write a plan's diffs into the project. With no id, applies the latest "
+        "unapplied plan. A file edited since planning is a conflict, never an "
+        "overwrite. Repo-only.",
+    ),
+    ("transform", "build"): (
+        "run dbt build against a dev target",
+        "Run dbt build on a dev target only, after a free preflight and a cost "
+        "estimate. It runs only with --confirm and --budget.",
+    ),
+    ("transform", "deps"): (
+        "install or refresh dbt packages",
+        "Run dbt deps inside the project. Repo-confined, with no warehouse spend.",
+    ),
+    ("transform", "plans"): (
+        "list stored plans, newest first",
+        "List the plans in .dex/plans, pending and applied, newest first. Free.",
+    ),
+    ("transform", "macro"): (
+        "list shipped dbt macros, or plan one into the project",
+        "With no name, list the dbt macros dex ships. With a name, plan "
+        "scaffolding that macro into the project's macro directory. Repo-only.",
+    ),
+    ("transform", "references"): (
+        "find where names are used across the project",
+        "Report every use of each name across model SQL, YAML, macros, seeds "
+        "and installed packages, and say how complete the answer is. Repo-only "
+        "and free.",
+    ),
+    ("transform", "rename"): (
+        "plan every edit a rename needs",
+        "Generate one plan renaming a column, var, model, seed, snapshot, "
+        "macro or source everywhere it is used. Refuses rather than partially "
+        "applying. Repo-only and free.",
+    ),
+    ("transform", "remove"): (
+        "plan a definition's removal, refusing while reads remain",
+        "Plan the removal of a definition and refuse while any read survives, "
+        "naming each one. Pass the read edits with --edits-file. Repo-only.",
+    ),
+    ("transform", "place"): (
+        "plan where a shared derived column should be defined",
+        "Find the lowest common model that can define the column for every "
+        "target, define it there, and thread it down. --explain stores no "
+        "plan. Repo-only and free.",
+    ),
+    ("transform", "test"): (
+        "scaffold a unit test, or mutation-test existing tests",
+        "--scaffold plans a unit_tests skeleton for a model. --mutate plants "
+        "one defect at a time and reports which ones no test caught. Mutation "
+        "runs dbt on the dev target and is billed on metered connectors.",
+    ),
+    ("transform", "export"): (
+        "export a stored plan as a portable, digested document",
+        "Print one stored plan as a document another checkout can verify and "
+        "apply, with a digest over the whole plan. Repo-only and free.",
+    ),
+    ("transform", "ground"): (
+        "report what a plan depends on and how complete that is",
+        "List the models, sources, columns and relations a plan reads, what "
+        "could not be resolved, and a fingerprint of the inputs. Repo-only and "
+        "free.",
+    ),
+    ("transform", "classify"): (
+        "classify what each edit's content actually contains",
+        "Read each edit's content and label it declarative, executable, "
+        "authority-bearing, data or unknown, naming the signal. Repo-only and "
+        "free.",
+    ),
+    ("transform", "preflight"): (
+        "report what the warehouse will enforce on the next build",
+        "Read the rendered profiles.yml for provider-side controls on the dev "
+        "target and say whether any of them binds. Free and connectionless.",
+    ),
+    ("semantic", "define"): (
+        "plan new dbt semantic models or metrics",
+        "Validate new semantic models or metrics, including with dbt's own "
+        "parser, and store them as a plan. Refuses a removal. Repo-only.",
+    ),
+    ("semantic", "update"): (
+        "plan changes to existing semantic definitions",
+        "Validate changed semantic definitions, removals included, and store "
+        "them as a plan. Repo-only.",
+    ),
+    ("semantic", "plan"): (
+        "plan a mix of semantic additions, changes and removals",
+        "Validate a payload of semantic definitions and classify each as "
+        "defined, updated, unchanged or removed, then store a plan. Repo-only.",
+    ),
+    ("semantic", "ossie"): (
+        "plan whole-document edits to a native Apache Ossie layer",
+        "Validate whole Ossie documents at the paths semantic.ossie.files "
+        "configures, then store a plan. Needs the [ossie] extra. Repo-only.",
+    ),
+    ("semantic", "slayer"): (
+        "plan whole-file edits to the configured SLayer model files",
+        "Validate whole SLayer model files at the paths semantic.slayer.models "
+        "configures, with SLayer's own model, then store a plan. Needs the "
+        "[slayer] extra. Repo-only.",
+    ),
+    ("maintain", "snapshot"): (
+        "capture the known-good baseline in .dex/snapshot.json",
+        "Pin the current map and fingerprint the project layers as the "
+        "baseline drift is measured against. --project-only opens no "
+        "connection.",
+    ),
+    ("maintain", "check"): (
+        "sweep every drift axis against the snapshot",
+        "Run every drift axis against the snapshot and rank the findings. The "
+        "free axes always run; the scanning axes are offered with an estimate.",
+    ),
+    ("maintain", "schema"): (
+        "detect added, dropped, retyped or renamed columns",
+        "Compare structure against the snapshot: columns, tables, nullability, "
+        "dangling sources and changed models. Free metadata.",
+    ),
+    ("maintain", "volume"): (
+        "detect row counts that collapsed, emptied or spiked",
+        "Compare row counts against the snapshot from free metadata. Objects "
+        "with no maintained count, such as views, are named as not compared.",
+    ),
+    ("maintain", "grain"): (
+        "detect lost key uniqueness and changed grain",
+        "Re-measure key uniqueness, grain and join fanout, plus declared "
+        "grains. Scans the data, so it is billed on metered connectors.",
+    ),
+    ("maintain", "semantic"): (
+        "detect semantic definition drift and dangling references",
+        "Report changed, added and removed semantic definitions and references "
+        "that no longer resolve, for free. Dimension cardinality change is a "
+        "scan, offered with an estimate.",
+    ),
+    ("maintain", "reconcile"): (
+        "propose the edits that reconcile detected drift",
+        "Store the reconciling edits as a plan of diffs tagged mechanical or "
+        "advisory. Never applied here; use transform apply. Repo-only.",
+    ),
+    ("maintain", "verify"): (
+        "check the project is correct now, with no baseline",
+        "Check build status, column contracts, row population, grain and join "
+        "contracts against the built relations. Mostly free metadata; view row "
+        "counts and join probes are offered with an estimate.",
+    ),
+    ("viz", "preview"): (
+        "preview the semantic layer (not yet implemented)",
+        "Not yet implemented: returns a not_implemented envelope.",
+    ),
+    ("config", "get"): (
+        "show effective settings and where each came from",
+        "Print every setting, or those under a key, with its value and source. "
+        "Reads only the file: no connection, no extra needed.",
+    ),
+    ("config", "validate"): (
+        "list every problem in .dex/config.yml",
+        "Report syntax errors, refused values, unknown or duplicated keys and "
+        "credential-like keys, by setting and line. Free.",
+    ),
+    ("config", "set"): (
+        "change settings as a reviewable in-place edit",
+        "Propose the change as a diff that keeps every comment, and write it "
+        "with --confirm. Refuses credential-like keys and values. Free.",
+    ),
+    ("config", "unset"): (
+        "remove settings as a reviewable in-place edit",
+        "Propose removing keys, including ones dex does not read, as a diff, "
+        "and write it with --confirm. Free.",
+    ),
 }
 
 #: Authoring subcommands that read and report rather than author SQL, so the
@@ -243,7 +528,7 @@ last-resort credential fallback; it does not select dex's connector or override
 --connector/--path or .dex/config.yml.
 
 No warehouse yet: `dex demo` seeds a local one, no credentials needed.
-Have one already: `dex explore map` is the command to run first -- it
+Have one already: `dex explore map` is the command to run first. It
 ranks what matters, profiles it, and infers how the tables join.
 
 `dex <group> --help` lists a group's own subcommands.
@@ -261,58 +546,157 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # Real defaults live on the top-level parser so every namespace has them.
-    parser.add_argument("--connector", default=None)
-    parser.add_argument("--path", default=None)
-    parser.add_argument("--scope", action="append", default=None)
-    parser.add_argument("--project", default=None)
-    parser.add_argument("--dataset", action="append", default=None)
-    parser.add_argument("--repo-root", default=".")
-    parser.add_argument("--cache-backend", default=None)
-    parser.add_argument("--project-format", default=None)
-    parser.add_argument("--confirm", action="store_true")
-    parser.add_argument("--budget", type=float, default=None)
-    parser.add_argument("--session-ceiling", type=float, default=None)
-    parser.add_argument("--no-session-ceiling", action="store_true")
+    _add_connection_options(parser, suppress=False)
+    # Top-level only: these choose how the engine is built, so they must come
+    # before the group rather than after the subcommand.
+    parser.add_argument(
+        "--cache-backend",
+        default=None,
+        metavar="NAME",
+        help="where .dex/ state is kept for this run; must precede the group",
+    )
+    parser.add_argument(
+        "--project-format",
+        default=None,
+        metavar="NAME",
+        help="transformation project format for this run; must precede the group",
+    )
 
     common = _sub_connection_options()
     groups = parser.add_subparsers(dest="group", required=True)
     for group, subcommands in COMMAND_SURFACE.items():
-        gp = groups.add_parser(group, parents=[common], help=_GROUP_HELP.get(group))
+        gp = groups.add_parser(
+            group,
+            parents=[common],
+            help=_GROUP_HELP.get(group),
+            description=_GROUP_HELP.get(group),
+        )
         if group == "demo":
             # Positional rather than --path: --path names the warehouse dex
             # reads, everywhere, and this is the one command that writes one.
-            gp.add_argument("target", nargs="?", default=None)
+            gp.add_argument(
+                "target",
+                nargs="?",
+                default=None,
+                help="DuckDB file to create, refused if it exists "
+                "(default: dex_demo.duckdb)",
+            )
         if subcommands:
             sub = gp.add_subparsers(dest="subcommand", required=True)
             for name in subcommands:
-                sp = sub.add_parser(name, parents=[common])
+                summary, description = _SUBCOMMAND_HELP[(group, name)]
+                sp = sub.add_parser(
+                    name, parents=[common], help=summary, description=description
+                )
+                if group == "config" and name == "get":
+                    sp.add_argument(
+                        "key",
+                        nargs="?",
+                        default=None,
+                        help="show only the settings under this key",
+                    )
+                if group == "config" and name == "set":
+                    # Pairs rather than one KEY VALUE, because some settings are
+                    # only valid together. Counted in the handler, not by
+                    # argparse, so a malformed call still gets an envelope.
+                    sp.add_argument(
+                        "pairs",
+                        nargs="*",
+                        default=None,
+                        metavar="key value",
+                        help=(
+                            "one or more key and YAML value pairs, applied as one "
+                            "change"
+                        ),
+                    )
+                if group == "config" and name == "unset":
+                    # Counted in the handler too, so a call naming no key still
+                    # gets an envelope.
+                    sp.add_argument(
+                        "keys",
+                        nargs="*",
+                        default=None,
+                        metavar="key",
+                        help=(
+                            "setting or block to remove, including keys dex does not "
+                            "read"
+                        ),
+                    )
                 if group == "maintain" and name == "snapshot":
                     sp.add_argument(
-                        "--project-only", action="store_true", default=False
+                        "--project-only",
+                        action="store_true",
+                        default=False,
+                        help=(
+                            "refingerprint only the project layers; opens no connection"
+                        ),
                     )
                 if group == "explore" and name == "inventory":
                     sp.add_argument(
-                        "--rank", action="store_true", default=argparse.SUPPRESS
+                        "--rank",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="order objects by what matters, capped at 30 by default",
                     )
                     # Ranked inventory is capped by default (#289); --limit widens
                     # it, --all lifts the cap entirely. Both are no-ops without
                     # --rank, since the unranked list carries no order to cut from.
-                    sp.add_argument("--limit", type=int, default=None)
                     sp.add_argument(
-                        "--all", action="store_true", default=argparse.SUPPRESS
+                        "--limit",
+                        type=int,
+                        default=None,
+                        metavar="N",
+                        help="widen the ranked list to N objects (with --rank)",
+                    )
+                    sp.add_argument(
+                        "--all",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="lift the ranked list's cap (with --rank)",
                     )
                 if group == "explore" and name == "profile":
-                    sp.add_argument("objects", nargs="+")
+                    sp.add_argument(
+                        "objects",
+                        nargs="+",
+                        metavar="object",
+                        help="table or view to profile, as the connector qualifies it",
+                    )
                 # Variadic like `profile` above it: an agent asking a chain of
                 # small questions should pay one call, not one per question. Zero
                 # positionals is legal here rather than an argparse usage error so
                 # `--sql-file` can carry the batch instead; the shim refuses an
                 # empty call with an envelope, which is the contract.
                 if group == "explore" and name == "query":
-                    sp.add_argument("sql", nargs="*")
-                    sp.add_argument("--sql-file", default=argparse.SUPPRESS)
+                    sp.add_argument(
+                        "sql",
+                        nargs="*",
+                        metavar="statement",
+                        help=(
+                            "one SELECT per argument; each is checked and run on its "
+                            "own"
+                        ),
+                    )
+                    sp.add_argument(
+                        "--sql-file",
+                        default=argparse.SUPPRESS,
+                        metavar="FILE",
+                        help="read statements from a file, one per line or ;-separated",
+                    )
+                    # One probe across mirrored datasets (#545): each statement
+                    # names its dataset as `{ds}` and runs once per target, in
+                    # one handshake. Comma-separated and repeatable, like
+                    # `transform place --targets`.
+                    sp.add_argument(
+                        "--across",
+                        action="append",
+                        default=argparse.SUPPRESS,
+                        metavar="DATASETS",
+                        help=(
+                            "run each statement once per dataset, substituted for {ds}"
+                        ),
+                    )
                 if group == "explore" and name == "cluster":
-                    sp.add_argument("object")
+                    sp.add_argument("object", help="table or view to cluster")
                 # An off switch only. Profiling an object the connection has but
                 # the cache cannot speak for is the default, so the flag that
                 # needs a spelling is the one that restores the strict
@@ -322,10 +706,17 @@ def _build_parser() -> argparse.ArgumentParser:
                         "--no-auto-profile",
                         action="store_true",
                         default=argparse.SUPPRESS,
+                        help=(
+                            "refuse unprofiled objects instead of profiling them first"
+                        ),
                     )
                 if group == "explore" and name == "cluster":
                     sp.add_argument(
-                        "--features", action="append", default=argparse.SUPPRESS
+                        "--features",
+                        action="append",
+                        default=argparse.SUPPRESS,
+                        metavar="COLUMNS",
+                        help="numeric columns to cluster on, comma-separated",
                     )
                     sp.add_argument(
                         "-k",
@@ -333,6 +724,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         dest="k",
                         type=int,
                         default=argparse.SUPPRESS,
+                        metavar="N",
+                        help="number of clusters (chosen automatically when omitted)",
                     )
                 # `explore semantic list|query` reads and queries the dbt
                 # semantic layer (distinct from the top-level `semantic` group,
@@ -349,6 +742,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         nargs="?",
                         choices=["list", "values", "query"],
                         default="list",
+                        help="list the catalog (default), read values, or run a query",
                     )
                     # Named metrics mean something in both modes, which is why one
                     # pair of spellings serves both: in `query` they are what to
@@ -358,35 +752,113 @@ def _build_parser() -> argparse.ArgumentParser:
                     # knows the metric should not have to read past it.
                     # In `list` and `query` these are metrics; in `values` the
                     # one positional is the dimension, and `--metric` scopes it.
-                    sp.add_argument("metrics", nargs="*")
-                    sp.add_argument("--metric", action="append", default=None)
+                    sp.add_argument(
+                        "metrics",
+                        nargs="*",
+                        metavar="name",
+                        help=(
+                            "metrics, comma-separated; in values mode, the one "
+                            "dimension"
+                        ),
+                    )
+                    sp.add_argument(
+                        "--metric",
+                        action="append",
+                        default=None,
+                        metavar="METRICS",
+                        help=(
+                            "metrics to query or scope to, comma-separated; repeatable"
+                        ),
+                    )
                     # The reverse of a metric's dimension list: which metrics can
                     # be grouped by all of these. `list` only, and refused rather
                     # than dropped in the other two modes.
-                    sp.add_argument("--for-dimension", action="append", default=None)
+                    sp.add_argument(
+                        "--for-dimension",
+                        action="append",
+                        default=None,
+                        metavar="DIMENSIONS",
+                        help="list mode: metrics groupable by all these dimensions",
+                    )
                     # A word rather than a name, matched against every element's
                     # own name and the project's words about it. `list` only, and
                     # refused in the other two modes rather than dropped.
-                    sp.add_argument("--search", action="append", default=None)
+                    sp.add_argument(
+                        "--search",
+                        action="append",
+                        default=None,
+                        metavar="TERM",
+                        help="list mode: match names, labels and descriptions",
+                    )
                     # Lifts the catalog's payload caps. Deliberately `--full`
                     # rather than `--detail`: nothing here scans, so the word
                     # carries its usual sense on this surface (stop selecting,
                     # take everything) with no cost attached to it.
-                    sp.add_argument("--full", action="store_true", default=False)
-                    sp.add_argument("--group-by", action="append", default=None)
-                    sp.add_argument("--where", action="append", default=None)
-                    sp.add_argument("--order-by", action="append", default=None)
-                    sp.add_argument("--grain", default=None)
-                    sp.add_argument("--limit", type=int, default=None)
-                    sp.add_argument("--local", action="store_true", default=False)
-                    sp.add_argument("--api", action="store_true", default=False)
+                    sp.add_argument(
+                        "--full",
+                        action="store_true",
+                        default=False,
+                        help="list mode: lift the catalog's payload caps",
+                    )
+                    sp.add_argument(
+                        "--group-by",
+                        action="append",
+                        default=None,
+                        metavar="DIMENSIONS",
+                        help="query mode: dimensions to group by, comma-separated",
+                    )
+                    sp.add_argument(
+                        "--where",
+                        action="append",
+                        default=None,
+                        metavar="FILTER",
+                        help="query mode: a filter in the layer's own dialect",
+                    )
+                    sp.add_argument(
+                        "--order-by",
+                        action="append",
+                        default=None,
+                        metavar="COLUMNS",
+                        help="query mode: columns to order by, comma-separated",
+                    )
+                    sp.add_argument(
+                        "--grain",
+                        default=None,
+                        help="query mode: time grain, checked against the layer",
+                    )
+                    sp.add_argument(
+                        "--limit",
+                        type=int,
+                        default=None,
+                        metavar="N",
+                        help="query mode: return at most N rows",
+                    )
+                    sp.add_argument(
+                        "--local",
+                        action="store_true",
+                        default=False,
+                        help="dex renders and runs the SQL, under the cost guard",
+                    )
+                    sp.add_argument(
+                        "--api",
+                        action="store_true",
+                        default=False,
+                        help="dbt Cloud runs the query; no cost guard applies",
+                    )
                 # `map --full` profiles every object rather than the top-ranked;
                 # `diagram --full` draws every eligible object and column rather
                 # than the connected-and-profiled default. Same word, same sense
                 # (stop selecting, take everything), different subject.
                 if group == "explore" and name in {"map", "diagram"}:
                     sp.add_argument(
-                        "--full", action="store_true", default=argparse.SUPPRESS
+                        "--full",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                        help=(
+                            "profile every object, not only the top-ranked (billed)"
+                            if name == "map"
+                            else "draw every eligible object and column"
+                        ),
                     )
                 # Deliberately not spelled `--full`, which on `map` decides how
                 # much gets *scanned* and therefore what the run costs. This one
@@ -394,11 +866,20 @@ def _build_parser() -> argparse.ArgumentParser:
                 # nothing, and lifts none of the payload caps.
                 if group == "explore" and name == "map":
                     sp.add_argument(
-                        "--detail", action="store_true", default=argparse.SUPPRESS
+                        "--detail",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                        help=(
+                            "return every column and unprofiled object; scans "
+                            "nothing more"
+                        ),
                     )
                 if group == "explore" and name in {"relationships", "map"}:
                     sp.add_argument(
-                        "--verify", action="store_true", default=argparse.SUPPRESS
+                        "--verify",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="measure each join with an overlap probe (billed)",
                     )
                     # A column no name-based rule matched still gets a chance:
                     # opt-in and priced like --verify, this sweeps key-shaped
@@ -407,6 +888,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         "--infer-by-overlap",
                         action="store_true",
                         default=argparse.SUPPRESS,
+                        help=(
+                            "also find joins by value overlap of key-shaped columns "
+                            "(billed)"
+                        ),
                     )
                 # A running total or point-in-time snapshot profiles identically
                 # to a per-row increment; telling them apart needs a window-
@@ -417,11 +902,18 @@ def _build_parser() -> argparse.ArgumentParser:
                         "--check-cumulative",
                         action="store_true",
                         default=argparse.SUPPRESS,
+                        help=(
+                            "detect running totals and snapshots with a window scan "
+                            "(billed)"
+                        ),
                     )
                     # Default summarizes each dataset's columns to the ones that
                     # carry a finding (#288); --columns all restores the full list.
                     sp.add_argument(
-                        "--columns", choices=["all"], default=argparse.SUPPRESS
+                        "--columns",
+                        choices=["all"],
+                        default=argparse.SUPPRESS,
+                        help="return every column, not only those with a finding",
                     )
                 # Force a full re-profile even when the cache holds a fresh,
                 # schema-matching profile for a requested object (the default is
@@ -429,7 +921,10 @@ def _build_parser() -> argparse.ArgumentParser:
                 # changed in a way the cheap metadata check cannot see).
                 if group == "explore" and name in {"profile", "map", "relationships"}:
                     sp.add_argument(
-                        "--refresh", action="store_true", default=argparse.SUPPRESS
+                        "--refresh",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="re-profile even when the cached profile is fresh",
                     )
                 # Exploration starts bare: warehouse truth, independent of
                 # whatever repo dex runs from. --use-project opts in to folding
@@ -440,40 +935,82 @@ def _build_parser() -> argparse.ArgumentParser:
                         "--use-project",
                         action="store_true",
                         default=argparse.SUPPRESS,
+                        help=(
+                            "fold in the project's declared joins, grain and semantics"
+                        ),
                     )
                 if group == "explore" and name in {"relationships", "map"}:
                     sp.add_argument(
                         "--use-hosted-semantic-layer",
                         action="store_true",
                         default=argparse.SUPPRESS,
+                        help="also read the configured hosted semantic layer's catalog",
                     )
                 # transform init takes the project name; plan the intent; apply
                 # the plan id; macro the shipped-macro name (none lists them).
-                if group == "transform" and name in {
-                    "init",
-                    "plan",
-                    "apply",
-                    "macro",
-                    "export",
-                    "ground",
-                    "classify",
-                }:
-                    sp.add_argument("argument", nargs="?", default=None)
+                # One `argument` dest across these, so the handlers read one
+                # attribute; the metavar names what each one actually takes.
+                transform_positional = {
+                    "init": ("name", "name of the dbt project to create"),
+                    "plan": ("intent", "one line saying what the edits are for"),
+                    "apply": ("plan-id", "plan to apply (default: latest unapplied)"),
+                    "macro": ("macro", "shipped macro to scaffold (omit to list them)"),
+                    "export": ("plan-id", "plan to export (default: latest unapplied)"),
+                    "ground": ("plan-id", "plan to ground (default: latest unapplied)"),
+                    "classify": (
+                        "plan-id",
+                        "plan to classify (default: latest unapplied)",
+                    ),
+                }
+                if group == "transform" and name in transform_positional:
+                    metavar, positional_help = transform_positional[name]
+                    sp.add_argument(
+                        "argument",
+                        nargs="?",
+                        default=None,
+                        metavar=metavar,
+                        help=positional_help,
+                    )
                 if group == "transform" and name == "apply":
                     # The offline half of the lifecycle: apply a plan document
                     # this checkout's store has never seen. `--expect-digest` is
                     # where authenticity enters, and it is separate from the file
                     # on purpose, because the point is that it arrives by a
                     # different route than the document does.
-                    sp.add_argument("--plan-file", default=None)
-                    sp.add_argument("--expect-digest", default=None)
+                    sp.add_argument(
+                        "--plan-file",
+                        default=None,
+                        metavar="FILE",
+                        help="apply an exported plan document instead of a stored plan",
+                    )
+                    sp.add_argument(
+                        "--expect-digest",
+                        default=None,
+                        metavar="HEX",
+                        help="refuse a plan document whose digest is not this one",
+                    )
                 if group == "transform" and name == "classify":
-                    sp.add_argument("--edits-file", default=None)
+                    sp.add_argument(
+                        "--edits-file",
+                        default=None,
+                        metavar="FILE",
+                        help="classify an edits payload as JSON; '-' reads stdin",
+                    )
                 if group == "transform" and name == "preflight":
-                    sp.add_argument("--target", default=None)
+                    sp.add_argument(
+                        "--target",
+                        default=None,
+                        help=(
+                            "profiles.yml target to read (default: the configured "
+                            "dev target)"
+                        ),
+                    )
                 if group == "transform" and name == "init":
                     sp.add_argument(
-                        "--layered-schemas", action="store_true", default=False
+                        "--layered-schemas",
+                        action="store_true",
+                        default=False,
+                        help="build each layer into its own schema",
                     )
                     sp.add_argument(
                         "--in-place",
@@ -483,8 +1020,19 @@ def _build_parser() -> argparse.ArgumentParser:
                     )
                 if group == "transform" and name == "plan":
                     # The agent-authored edits payload: a JSON file, or - for stdin.
-                    sp.add_argument("--edits-file", default=None)
-                    sp.add_argument("--scaffold", action="append", default=None)
+                    sp.add_argument(
+                        "--edits-file",
+                        default=None,
+                        metavar="FILE",
+                        help="the edits payload as JSON; '-' reads stdin",
+                    )
+                    sp.add_argument(
+                        "--scaffold",
+                        action="append",
+                        default=None,
+                        metavar="TABLE",
+                        help="add a staging model skeleton for a profiled table",
+                    )
                     # Tri-state, and the default is the connector's: naming a
                     # row-affecting change is free, measuring one is a scan. So
                     # counting runs unasked only where it bills nothing, and the
@@ -504,25 +1052,52 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="name row-affecting changes without measuring them",
                     )
                 if group == "transform" and name == "build":
-                    sp.add_argument("--target", default=None)
-                    sp.add_argument("--select", default=None)
+                    sp.add_argument(
+                        "--target",
+                        default=None,
+                        help="dbt target to build; prod-looking targets are refused",
+                    )
+                    sp.add_argument(
+                        "--select",
+                        default=None,
+                        metavar="SELECTOR",
+                        help="dbt node selection, passed through to dbt",
+                    )
                     # Opt-in on every connector, free ones included. Verifying
                     # on DuckDB costs nothing, so defaulting it on there was
                     # available; one flag meaning one thing everywhere is worth
                     # more than saving the flag on one connector.
-                    sp.add_argument("--verify", action="store_true", default=False)
+                    sp.add_argument(
+                        "--verify",
+                        action="store_true",
+                        default=False,
+                        help="run the maintain verify sweep over the built nodes",
+                    )
                     # Which change this build is meant to validate, so the
                     # evidence can report coverage rather than leaving a caller to
                     # infer it from node names.
-                    sp.add_argument("--for-plan", default=None)
+                    sp.add_argument(
+                        "--for-plan",
+                        default=None,
+                        metavar="PLAN-ID",
+                        help="report whether the build covered this stored plan",
+                    )
                     # The same change, as the document a sandbox holds instead of
                     # the store id the authoring process holds.
-                    sp.add_argument("--for-plan-file", default=None)
+                    sp.add_argument(
+                        "--for-plan-file",
+                        default=None,
+                        metavar="FILE",
+                        help="report coverage of an exported plan document",
+                    )
                     # An off switch only, like `--no-auto-profile`: installing
                     # missing packages is what an interactive build should do, and
                     # the spelling that needs a flag is the sandbox's refusal.
                     sp.add_argument(
-                        "--no-install-deps", action="store_true", default=False
+                        "--no-install-deps",
+                        action="store_true",
+                        default=False,
+                        help="refuse missing dbt packages instead of installing them",
                     )
                 if group == "transform" and name == "references":
                     # Variadic like `explore query`: one call answers "where is
@@ -535,10 +1110,22 @@ def _build_parser() -> argparse.ArgumentParser:
                     # `choices`: a rejected choice exits before an envelope is
                     # built, so a typo would return no JSON line at all, and every
                     # command owes the caller exactly one.
-                    sp.add_argument("names", nargs="+")
-                    sp.add_argument("--kind", default=None)
                     sp.add_argument(
-                        "--full", action="store_true", default=argparse.SUPPRESS
+                        "names",
+                        nargs="+",
+                        metavar="name",
+                        help="name to look up; model.column resolves through ref()",
+                    )
+                    sp.add_argument(
+                        "--kind",
+                        default=None,
+                        help="narrow to one kind, such as model, column, var or metric",
+                    )
+                    sp.add_argument(
+                        "--full",
+                        action="store_true",
+                        default=argparse.SUPPRESS,
+                        help="lift the cap of 200 occurrences across 50 files",
                     )
                 if group == "transform" and name in {"rename", "remove"}:
                     # The write half of `references`, so it sits behind the
@@ -553,25 +1140,57 @@ def _build_parser() -> argparse.ArgumentParser:
                     # ride in the same atomic plan. Not `place` (#344): it takes
                     # no edits_file parameter and never read the flag, so the
                     # parser accepted it as a silent no-op.
-                    sp.add_argument("--edits-file", default=None)
+                    sp.add_argument(
+                        "--edits-file",
+                        default=None,
+                        metavar="FILE",
+                        help="hand-authored edits to store in the same plan",
+                    )
+                kind_help = "column, var, model, seed, snapshot, macro or source"
                 if group == "transform" and name == "rename":
-                    sp.add_argument("kind")
-                    sp.add_argument("old")
-                    sp.add_argument("new")
+                    sp.add_argument("kind", help=kind_help)
+                    sp.add_argument(
+                        "old", help="current name; a column is named model.column"
+                    )
+                    sp.add_argument("new", help="new name")
                 if group == "transform" and name == "remove":
-                    sp.add_argument("kind")
-                    sp.add_argument("name")
+                    sp.add_argument("kind", help=kind_help)
+                    sp.add_argument(
+                        "name", help="name to remove; a column is named model.column"
+                    )
                 if group == "transform" and name == "place":
                     # The column to define, then where it has to appear and what
                     # computes it. `--targets` repeats and splits on commas, the
                     # spelling `explore semantic query` already uses for its own
                     # lists.
-                    sp.add_argument("argument", nargs="?", default=None)
-                    sp.add_argument("--targets", action="append", default=None)
-                    sp.add_argument("--expr", default=None)
+                    sp.add_argument(
+                        "argument",
+                        nargs="?",
+                        default=None,
+                        metavar="column",
+                        help="name of the derived column to define",
+                    )
+                    sp.add_argument(
+                        "--targets",
+                        action="append",
+                        default=None,
+                        metavar="MODELS",
+                        help="models that need the column, comma-separated",
+                    )
+                    sp.add_argument(
+                        "--expr",
+                        default=None,
+                        metavar="SQL",
+                        help="SQL expression that computes the column",
+                    )
                     # Answer without storing a plan. The proposal is only worth
                     # calling one if a caller can ask for it cheaply and disagree.
-                    sp.add_argument("--explain", action="store_true", default=False)
+                    sp.add_argument(
+                        "--explain",
+                        action="store_true",
+                        default=False,
+                        help="return the reasoning without storing a plan",
+                    )
                 if group == "transform" and name == "test":
                     # Two modes, and they are opposites: `--scaffold` writes a
                     # unit test, `--mutate` measures the tests that already
@@ -580,12 +1199,32 @@ def _build_parser() -> argparse.ArgumentParser:
                     # bare `transform test` mode exists, unlike `macro`'s
                     # list-when-bare shape.
                     mode = sp.add_mutually_exclusive_group()
-                    mode.add_argument("--scaffold", default=None)
-                    mode.add_argument("--mutate", default=None)
+                    mode.add_argument(
+                        "--scaffold",
+                        default=None,
+                        metavar="MODEL",
+                        help="plan a unit test skeleton for this model",
+                    )
+                    mode.add_argument(
+                        "--mutate",
+                        default=None,
+                        metavar="MODEL",
+                        help="measure which planted defects this model's tests miss",
+                    )
                     # Only ever narrows: the engine ceiling is what keeps a run
                     # that invokes dbt once per mutant predictable.
-                    sp.add_argument("--max-mutants", type=int, default=None)
-                    sp.add_argument("--target", default=None)
+                    sp.add_argument(
+                        "--max-mutants",
+                        type=int,
+                        default=None,
+                        metavar="N",
+                        help="run at most N mutants (can only lower the cap of 20)",
+                    )
+                    sp.add_argument(
+                        "--target",
+                        default=None,
+                        help="dbt dev target to mutate against",
+                    )
                     # Tri-state, and the default is the connector's, as with
                     # --attribute-rows: comparing a survivor with the model on
                     # the dev data is free on DuckDB and a scan elsewhere, so it
@@ -605,15 +1244,36 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="report survivors without comparing them",
                     )
                 if group == "semantic" and name in {"define", "update", "plan"}:
-                    sp.add_argument("argument", nargs="?", default=None)
-                    sp.add_argument("--edits-file", default=None)
+                    sp.add_argument(
+                        "argument",
+                        nargs="?",
+                        default=None,
+                        metavar="intent",
+                        help="one line saying what the change is for",
+                    )
+                    sp.add_argument(
+                        "--edits-file",
+                        default=None,
+                        metavar="FILE",
+                        help="whole-file edits payload as JSON; '-' reads stdin",
+                    )
                     # The per-definition payload: name only what changes, and the
                     # engine writes it into the file that holds it. An entry's `op`
                     # removes one instead, which is the only way a definition goes
                     # away: never by going unmentioned.
-                    sp.add_argument("--definitions-file", default=None)
-                    sp.add_argument("--no-parse", action="store_true", default=False)
-                if group == "semantic" and name in SEMANTIC_SOURCE_FACTORIES:
+                    sp.add_argument(
+                        "--definitions-file",
+                        default=None,
+                        metavar="FILE",
+                        help="definitions written in place, as JSON; '-' reads stdin",
+                    )
+                    sp.add_argument(
+                        "--no-parse",
+                        action="store_true",
+                        default=False,
+                        help="skip validation with dbt's own parser",
+                    )
+                if group == "semantic" and name in SEMANTIC_DOCUMENT_AUTHORING:
                     # Whole documents in, so no `--definitions-file`: a native
                     # document is authored as a unit, and the mode the dbt
                     # routes carry in their subcommand name is an argument here.
@@ -622,9 +1282,23 @@ def _build_parser() -> argparse.ArgumentParser:
                         nargs="?",
                         choices=["define", "update", "plan"],
                         default=None,
+                        help=(
+                            "define new documents, update existing ones, or plan a mix"
+                        ),
                     )
-                    sp.add_argument("argument", nargs="?", default=None)
-                    sp.add_argument("--edits-file", default=None)
+                    sp.add_argument(
+                        "argument",
+                        nargs="?",
+                        default=None,
+                        metavar="intent",
+                        help="one line saying what the change is for",
+                    )
+                    sp.add_argument(
+                        "--edits-file",
+                        default=None,
+                        metavar="FILE",
+                        help="whole-document edits payload as JSON; '-' reads stdin",
+                    )
                 # maintain detectors take an optional object scope (default: whole
                 # project); reconcile takes an optional drift class to fix.
                 if group == "maintain" and name in {
@@ -635,13 +1309,23 @@ def _build_parser() -> argparse.ArgumentParser:
                     "semantic",
                     "verify",
                 }:
-                    sp.add_argument("objects", nargs="*")
+                    sp.add_argument(
+                        "objects",
+                        nargs="*",
+                        metavar="object",
+                        help=(
+                            "dbt selector to verify (default: the whole project)"
+                            if name == "verify"
+                            else "object to check (default: the whole project)"
+                        ),
+                    )
                 if group == "maintain" and name == "reconcile":
                     sp.add_argument(
                         "drift_class",
                         nargs="?",
                         choices=["schema", "volume", "grain", "semantic"],
                         default=None,
+                        help="reconcile only this drift class (default: all)",
                     )
     return parser
 
@@ -656,7 +1340,10 @@ def dispatch(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
     """
 
     try:
-        return _run(args, engine)
+        # In values-free mode every error leaving a command is held to it here,
+        # before the handlers below turn it into an envelope (#591).
+        mode = getattr(engine, "result_mode", ResultMode.FULL)
+        return call_withholding(mode, _run_allowed, args, engine)
     except DialectDependencyError as exc:
         # A missing extra, caught before the command imported anything that needed
         # it, so nothing has been opened or priced. The message names the install.
@@ -683,6 +1370,34 @@ def dispatch(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
         # arrives with no cost at all, and an empty cost block on a spend
         # refusal reads as a claim that nothing was going to be spent.
         return env.error_for(exc, env.redact(str(exc)), cost=exc.cost or env.Cost())
+
+
+def _run_allowed(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
+    mode = getattr(engine, "result_mode", ResultMode.FULL)
+    if mode is ResultMode.VALUES_FREE:
+        require_allowed(mode, _command_label(args))
+    return _run(args, engine)
+
+
+def _command_label(args: argparse.Namespace) -> str:
+    """The command as the values-free allowlist spells it: ``explore profile``,
+    and ``explore semantic list`` for the semantic modes (bare means list)."""
+
+    label = f"{args.group} {getattr(args, 'subcommand', '')}".strip()
+    if args.group == "explore" and getattr(args, "subcommand", None) == "semantic":
+        label += f" {getattr(args, 'mode', None) or 'list'}"
+    return label
+
+
+def _result_mode(args: argparse.Namespace) -> ResultMode:
+    """The mode this process runs in: the flag, or the host's pin, whichever asks
+    for values-free. Neither can ask for less than the other, and an unknown
+    value in the environment refuses rather than reading as full."""
+
+    pinned = parse_result_mode(os.environ.get(RESULT_MODE_ENV) or None)
+    if getattr(args, "values_free", False) or pinned is ResultMode.VALUES_FREE:
+        return ResultMode.VALUES_FREE
+    return ResultMode.FULL
 
 
 def _run(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
@@ -790,10 +1505,10 @@ def _run(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
     # vendor's extra. Parsing a SQL expression inside a document is optional and
     # names its own skip when the dialect engine is absent, which is a weaker
     # floor than the dbt authoring routes below can accept.
-    if args.group == "semantic" and args.subcommand in SEMANTIC_SOURCE_FACTORIES:
-        from .transform.native_semantic import cmd_semantic_ossie
+    if args.group == "semantic" and args.subcommand in SEMANTIC_DOCUMENT_AUTHORING:
+        from .transform.native_semantic import cmd_semantic_native
 
-        return cmd_semantic_ossie(args, engine)
+        return cmd_semantic_native(args, engine)
 
     # `transform apply` writes bytes a plan already validated, so what it needs
     # depends on the plan rather than on the verb. A semantic-document plan
@@ -911,47 +1626,61 @@ def main(argv: list[str] | None = None) -> int:
     # and it runs before the handlers below.
     spend: dict | None = None
     connection = env.Connection()
+    # Resolved before anything can refuse, so even a refusal states the mode. An
+    # unknown DEX_RESULT_MODE is itself a refusal, rendered below like any other.
+    result_mode: ResultMode | None = None
     # Building the engine is inside the handler, not before it: it reads the
     # config file and constructs the configured storage backend, and both can
     # refuse. Every agent wrapper expects exactly one envelope on stdout, so a
     # refusal raised here has to render as one like any other rather than as a
     # traceback the wrapper cannot parse.
     try:
-        # One engine per process, built from the resolved repo root. The default
-        # backend is what lets the subcommands stay stateless across invocations:
-        # `.dex/` on disk is how the exploration cache and the cumulative session
-        # budget survive from one command to the next, and any backend selected
-        # here has to be durable across processes for the same reason.
-        engine = DexEngine.from_repo(
-            repo_root(args),
-            cache_backend=getattr(args, "cache_backend", None),
-            project_format_name=getattr(args, "project_format", None),
-            connector=getattr(args, "connector", None),
-            path=getattr(args, "path", None),
-            project=getattr(args, "project", None),
-            datasets=getattr(args, "dataset", None),
-            scopes=getattr(args, "scope", None),
-            budget=getattr(args, "budget", None),
-            confirmed=getattr(args, "confirm", False),
-            session_ceiling=getattr(args, "session_ceiling", None),
-            decline_session_ceiling=getattr(args, "no_session_ceiling", False),
-        )
-        try:
-            envelope = dispatch(args, engine)
-        finally:
-            # Unlike an adapter, the paradigm survives a connection that could
-            # not be opened, so this still gives a refusal envelope something
-            # to name; taken in the `finally` so it reflects whatever the
-            # handler resolved, auto-detect included, not just construction.
-            paradigm = engine.paradigm
-            # Best-effort by design: a ledger that cannot be read must not
-            # replace the exception on its way out with a bookkeeping failure,
-            # which would lose the reason the command failed to report a
-            # number about it.
-            with contextlib.suppress(Exception):
-                spend = engine.settled_spend()
-            connection = engine.connection_provenance()
-            engine.close()
+        result_mode = _result_mode(args)
+        if args.group == "config":
+            # No engine, on purpose: see `config_commands`. With none, nothing
+            # below has a paradigm, a spend, or a connection to stamp, which is
+            # the truth for a verb that opens nothing.
+            from .config_commands import cmd_config
+
+            require_allowed(result_mode, _command_label(args))
+            envelope = cmd_config(args)
+        else:
+            # One engine per process, built from the resolved repo root. The default
+            # backend is what lets the subcommands stay stateless across invocations:
+            # `.dex/` on disk is how the exploration cache and the cumulative session
+            # budget survive from one command to the next, and any backend selected
+            # here has to be durable across processes for the same reason.
+            engine = DexEngine.from_repo(
+                repo_root(args),
+                cache_backend=getattr(args, "cache_backend", None),
+                project_format_name=getattr(args, "project_format", None),
+                connector=getattr(args, "connector", None),
+                path=getattr(args, "path", None),
+                project=getattr(args, "project", None),
+                datasets=getattr(args, "dataset", None),
+                scopes=getattr(args, "scope", None),
+                budget=getattr(args, "budget", None),
+                confirmed=getattr(args, "confirm", False),
+                session_ceiling=getattr(args, "session_ceiling", None),
+                decline_session_ceiling=getattr(args, "no_session_ceiling", False),
+                result_mode=result_mode,
+            )
+            try:
+                envelope = dispatch(args, engine)
+            finally:
+                # Unlike an adapter, the paradigm survives a connection that could
+                # not be opened, so this still gives a refusal envelope something
+                # to name; taken in the `finally` so it reflects whatever the
+                # handler resolved, auto-detect included, not just construction.
+                paradigm = engine.paradigm
+                # Best-effort by design: a ledger that cannot be read must not
+                # replace the exception on its way out with a bookkeeping failure,
+                # which would lose the reason the command failed to report a
+                # number about it.
+                with contextlib.suppress(Exception):
+                    spend = engine.settled_spend()
+                connection = engine.connection_provenance()
+                engine.close()
     except env.SanitizationError:
         # A sanitization failure must never be swallowed: re-raise so it surfaces
         # loudly in tests and CI rather than shipping a leak.
@@ -984,6 +1713,13 @@ def main(argv: list[str] | None = None) -> int:
     if engine is not None and engine.connection_warnings:
         envelope.warnings = list(engine.connection_warnings) + list(envelope.warnings)
 
+    # What the config file says that no command refuses (a key the schema does
+    # not know, a key written twice) rides out on every envelope the same way,
+    # since a typo in a setting is otherwise a setting that silently does
+    # nothing. The config verbs carry their own copy and build no engine.
+    if engine is not None and engine.config is not None:
+        envelope.warnings = list(engine.config.load_warnings) + list(envelope.warnings)
+
     # A config amendment dex performed on the caller's behalf (the answer to the
     # cumulative-ceiling ask, issue #283) rides out the same way, as a diff:
     # the write happened before the command did, so even a command that failed
@@ -1003,6 +1739,11 @@ def main(argv: list[str] | None = None) -> int:
     # The connection identity is stamped centrally, just like cost paradigm:
     # handlers cannot drift, and filling it performs no extra warehouse read.
     envelope.connection = connection
+
+    # Every envelope a values-free process prints says so, refusals and asks
+    # included, so a host can assert the mode on whatever comes back (#591).
+    if result_mode is ResultMode.VALUES_FREE:
+        envelope.data["result_mode"] = result_mode.value
 
     env.emit(envelope)
     return 0 if envelope.status != env.Status.ERROR else 1

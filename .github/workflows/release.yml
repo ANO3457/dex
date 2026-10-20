@@ -1,10 +1,17 @@
 name: Release
 
-# A semver tag drives the whole chain: a test gate, a coupling check, build, then
-# PyPI publish via Trusted Publishing (OIDC, no stored tokens) and the anti-squat
-# dex-core stub. The wrapper pins are bumped before tagging (scripts/
-# prepare_release.sh), so this workflow never writes back; it only verifies the
-# tagged commit is self-consistent before it publishes.
+# A semver tag drives the whole chain: a coupling check, build, then PyPI
+# publish via Trusted Publishing (OIDC, no stored tokens) and the anti-squat
+# name stubs, then the documentation site. The wrapper pins and the changelog
+# are written before tagging (scripts/prepare_release.sh), so this workflow never
+# writes back to this repository; it verifies the tagged commit is
+# self-consistent before it publishes. Its one write outside PyPI is the Dex
+# section of the documentation site, committed to exmergo/docs after publish.
+#
+# There is no test gate here. A tag points at a commit on main, every commit on
+# main arrived through a pull request, and ci.yml's `tests` and `safety` jobs
+# gate that pull request; re-running the same suite on the same commit at tag
+# time would pay twice for an answer that cannot differ.
 on:
   push:
     tags: ["v*.*.*"]
@@ -13,27 +20,10 @@ permissions:
   contents: read
 
 jobs:
-  gate:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/dex-core
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      # The cloud extras stay in the gate: their safety families importorskip
-      # on the client libraries, and a release gate that silently skips
-      # safety-critical assertions is a hole, not a speedup.
-      - name: Sync (duckdb + bigquery + snowflake + databricks + postgres + redshift + clickhouse + dev extras)
-        run: uv sync --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra dev
-      - name: Tier-1 + safety-critical gate
-        run: uv run pytest -q
-      # A safety-assertion regression blocks the release regardless of pass-rate;
-      # representative Tier-2 agent evals run here once they are wired into CI.
-
   # Read-only guard, run before publishing: the wrapper pins are bumped before
   # the tag (scripts/prepare_release.sh), so the tagged commit must already pin
-  # the version this tag will publish. If it does not, the tag was cut without
+  # the version this tag will publish and carry its CHANGELOG.md section, which
+  # the same script writes. If it does not, the tag was cut without
   # running the prepare script, and shipping it would couple the plugin to the
   # wrong engine version (especially once the public catalog pins this tag), so
   # we fail before anything reaches PyPI. No writes, so branch protection is moot.
@@ -41,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Wrapper pins must match the tag
+      - name: Wrapper pins and the changelog must match the tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           fail=0
@@ -53,14 +43,18 @@ jobs:
               fail=1
             fi
           done
+          if ! grep -qF "## [${VERSION}] - " CHANGELOG.md; then
+            echo "CHANGELOG.md has no ${VERSION} section."
+            fail=1
+          fi
           if [ "$fail" = "1" ]; then
             echo "Run scripts/prepare_release.sh ${VERSION}, commit, and re-tag."
             exit 1
           fi
-          echo "All wrapper pins match ${VERSION}."
+          echo "All wrapper pins match ${VERSION}, and CHANGELOG.md has its section."
 
   publish:
-    needs: [gate, verify-coupling]
+    needs: [verify-coupling]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -78,7 +72,7 @@ jobs:
           # hatch-vcs derives the version from the tag; it needs full history
           # and the tags, which the default shallow checkout omits.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Build sdist + wheel
         run: uv build
       - name: Assert built version matches the tag
@@ -96,39 +90,98 @@ jobs:
         run: uv publish
       # Optionally emit PEP 740 / Sigstore attestations for provenance.
 
-  # Anti-squat: claim and hold the short name `dex-core`, which redirects users to
-  # exmergo-dex-core. This is a one-time reservation, so it must be idempotent
-  # across releases. `uv publish --check-url` does NOT achieve that: it skips a
-  # file only when the remote copy is byte-identical, and a rebuilt static-version
-  # (0.0.0) stub wheel is not reproducible, so its hash differs from the copy
-  # published on the first release and uv errors ("Local file and index file do
-  # not match") instead of skipping. So we gate on whether the project already
-  # exists on PyPI and no-op if it does. Needs its own PyPI Trusted Publisher for
-  # the `dex-core` project, with a DISTINCT environment (pypi-stub): PyPI rejects
-  # two pending publishers that share an identical owner/repo/workflow/environment,
-  # so the engine job uses `pypi` and this one uses `pypi-stub`.
-  reserve-dex-core:
+  # The documentation site, published from the tag only after PyPI accepted the
+  # release, so the docs always describe what `pip install` gives you. Build,
+  # validation and the commit to exmergo/docs live in docs-site.yml.
+  #
+  # Started as a run of its own (workflow_dispatch) rather than called as a
+  # reusable workflow: its deploy job reads the docs publisher app's key from
+  # the docs-site environment, and a reusable-workflow call does not receive
+  # that environment's secrets (the v1.14.1 release published nothing for that
+  # reason, while the same job dispatched by hand did). A dispatch made with
+  # GITHUB_TOKEN is one of the events GitHub does start a run for. Pre-releases
+  # and backports are not dispatched: they never replace the newest docs.
+  docs-site:
     needs: publish
     runs-on: ubuntu-latest
-    environment: pypi-stub
+    permissions:
+      actions: write  # to start the Docs site workflow, and nothing else
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # every tag, to tell the newest final release
+      - name: Start the Docs site workflow for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          newest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::notice::${TAG} is a pre-release; the docs are not published."
+            exit 0
+          fi
+          if [ "$TAG" != "$newest" ]; then
+            echo "::notice::${TAG} is not the newest release (${newest}); a backport never replaces newer docs."
+            exit 0
+          fi
+          gh workflow run docs-site.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG" -f ref="$TAG"
+          echo "Started Docs site for ${TAG}; follow it under Actions > Docs site."
+
+  # Anti-squat: claim and hold names people would guess for the engine, each a
+  # placeholder that redirects users to exmergo-dex-core. This is a one-time
+  # reservation per name, so it must be idempotent across releases.
+  # `uv publish --check-url` does NOT achieve that: it skips a file only when the
+  # remote copy is byte-identical, and a rebuilt static-version (0.0.0) stub wheel
+  # is not reproducible, so its hash differs from the copy published on the first
+  # release and uv errors ("Local file and index file do not match") instead of
+  # skipping.
+  # So we gate on whether the project already exists on PyPI and no-op if it does.
+  #
+  # Each name needs its own PyPI Trusted Publisher with its own environment, never
+  # one shared with another job. PyPI rejects two pending publishers with an
+  # identical owner/repo/workflow/environment, and when minting a token it matches
+  # a pending publisher before a live one, so a pending publisher on a shared
+  # environment would be claimed by whichever job mints first. One environment per
+  # project also keeps each minted token scoped to that one project. Adding a name
+  # means a stub package under packages/, a matrix entry, and a pending publisher
+  # on PyPI for that project and environment.
+  reserve-names:
+    needs: publish
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: dex-core
+            path: packages/dex-core-stub
+            environment: pypi-stub
+          - project: exmergo-dex
+            path: packages/exmergo-dex-stub
+            environment: pypi-stub-exmergo-dex
+    name: reserve ${{ matrix.project }}
+    environment: ${{ matrix.environment }}
     permissions:
       contents: read  # see the publish job: job-level permissions replace, not merge.
       id-token: write
     defaults:
       run:
-        working-directory: packages/dex-core-stub
+        working-directory: ${{ matrix.path }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - name: Reserve dex-core on PyPI (once; no-op if the name already exists)
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Reserve the name on PyPI (once; no-op if it already exists)
+        env:
+          PROJECT: ${{ matrix.project }}
         run: |
           # Publish only on a definite 404 (name not yet reserved). On 200 the
           # name is already held, so skip. On any other response (network/5xx)
           # skip too, rather than risk the non-idempotent publish path above.
-          code=$(curl -s -o /dev/null -w '%{http_code}' https://pypi.org/pypi/dex-core/json)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/${PROJECT}/json")
           case "$code" in
-            200) echo "dex-core is already reserved on PyPI; nothing to do."; exit 0 ;;
-            404) echo "dex-core not found on PyPI; building and publishing the stub." ;;
+            200) echo "${PROJECT} is already reserved on PyPI; nothing to do."; exit 0 ;;
+            404) echo "${PROJECT} not found on PyPI; building and publishing the stub." ;;
             *)   echo "Unexpected HTTP ${code} from PyPI; skipping to avoid a bad publish."; exit 0 ;;
           esac
           uv build

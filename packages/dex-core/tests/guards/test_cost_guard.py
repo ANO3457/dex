@@ -582,6 +582,84 @@ def test_settling_is_idempotent():
     assert ledger.kinds().count("release") == 1
 
 
+def test_the_cap_holds_back_what_the_command_will_owe_after_its_statements():
+    """A statement allowed to run to the ceiling leaves no room for spend the
+    warehouse bills once it is done (Snowflake's idle tail), so the confirmed
+    budget would be overrun by exactly that much."""
+
+    gate = _gate(paradigm=Paradigm.COMPUTE_TIME, ceiling=100.0, connector="snowflake")
+    assert gate.statement_cap(unit="warehouse-second") == 100
+    assert gate.statement_cap(unit="warehouse-second", reserve=60.0) == 40
+    gate.record_billed(30.0)
+    assert gate.statement_cap(unit="warehouse-second", reserve=60.0) == 10
+
+
+def test_the_reserve_comes_off_the_ceiling_and_not_the_booking():
+    """The booking is the estimate, which already carries the overhead as one of
+    its lines; taking it off again would cap the statement at its bare
+    heuristic."""
+
+    ledger = _Ledger()
+    gate = _ledger_gate(
+        ledger,
+        paradigm=Paradigm.COMPUTE_TIME,
+        ceiling=1_000.0,
+        connector="snowflake",
+        session_spent=0.0,
+    )
+    gate.preflight_command(61.0)
+    assert gate.statement_cap(unit="warehouse-second", reserve=60.0) == 61
+
+
+def test_a_reserve_that_leaves_no_room_refuses_and_says_what_it_held_back():
+    gate = _gate(paradigm=Paradigm.COMPUTE_TIME, ceiling=50.0, connector="snowflake")
+    with pytest.raises(OverCeilingError) as exc_info:
+        gate.statement_cap(unit="warehouse-second", reserve=60.0)
+    assert "held back" in str(exc_info.value)
+    assert "60 warehouse-seconds" in str(exc_info.value)
+
+
+def test_settling_books_the_command_overhead_once_before_the_release():
+    ledger = _Ledger()
+    gate = _ledger_gate(ledger)
+    calls: list[int] = []
+
+    def overhead() -> tuple[float, list[str]]:
+        calls.append(1)
+        return 40.0, ["the warehouse idled after the command"]
+
+    gate.settle_overhead = overhead
+    gate.preflight_command(300.0)
+    gate.record_billed(100.0)
+    gate.settle()
+    gate.settle()
+
+    assert calls == [1]
+    assert ledger.kinds() == ["reservation", "settlement", "settlement", "release"]
+    uptime = ledger.entries[2]
+    assert uptime["billed_bytes"] == 40.0
+    assert uptime["statement_sha256"] is None
+    assert uptime["reservation_id"] == ledger.entries[0]["reservation_id"]
+    assert uptime["estimate"] == 300.0
+    assert gate.billed == 140.0
+    assert gate.spend_summary()["bytes_billed"] == 140.0
+    assert gate.settlement_notes == ["the warehouse idled after the command"]
+
+
+def test_a_failing_overhead_still_releases_the_hold():
+    ledger = _Ledger()
+    gate = _ledger_gate(ledger)
+
+    def overhead() -> tuple[float, list[str]]:
+        raise RuntimeError("the warehouse could not be read")
+
+    gate.settle_overhead = overhead
+    gate.preflight_command(300.0)
+    with pytest.raises(RuntimeError):
+        gate.settle()
+    assert ledger.kinds() == ["reservation", "release"]
+
+
 def test_a_phase_extends_the_hold_rather_than_adding_a_second():
     ledger = _Ledger()
     gate = _ledger_gate(ledger)
@@ -927,3 +1005,53 @@ def test_a_cumulative_cap_binds_on_a_statement_charged_without_a_handshake():
     # ceiling of 1_000 would admit it, the cumulative cap must not.
     with pytest.raises(OverCeilingError):
         gate.charge(100.0)
+
+
+def test_a_verified_build_shares_the_gates_reservation_id_for_one_ratio():
+    """Issue #666: a verified build's dbt row and its folded ``--verify``
+    statement rows share ``gate.reservation_id`` so :func:`settled_ratios`
+    groups them into one billed-over-estimated point, while builds that settled
+    with no gate (``reservation_id: None``) still form solo groups of their own.
+    """
+
+    from exmergo_dex_core.guards.cost_guard import ledger_row, settled_ratios
+
+    ledger = _Ledger()
+    gate = _ledger_gate(ledger)
+    gate.preflight_command(500.0)
+    # The folded `--verify` count statement bills through the gate.
+    gate.record_billed(50.0)
+    gate.settle()
+    # The dbt build settles outside the gate, stamped with the gate's token.
+    ledger.append(
+        ledger_row(
+            connector="bigquery",
+            command="transform build",
+            entry="settlement",
+            field="billed_bytes",
+            amount=350.0,
+            reservation_id=gate.reservation_id,
+            estimate=500.0,
+        )
+    )
+    # Two degraded builds with no gate (`reservation_id: None`) stay solo groups.
+    for billed in (100.0, 200.0):
+        ledger.append(
+            ledger_row(
+                connector="bigquery",
+                command="transform build",
+                entry="settlement",
+                field="billed_bytes",
+                amount=billed,
+                reservation_id=None,
+                estimate=400.0,
+            )
+        )
+
+    assert settled_ratios(
+        ledger.entries, connector="bigquery", field="billed_bytes"
+    ) == [
+        pytest.approx((50.0 + 350.0) / 500.0),
+        pytest.approx(100.0 / 400.0),
+        pytest.approx(200.0 / 400.0),
+    ]

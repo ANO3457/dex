@@ -16,9 +16,28 @@ set -euo pipefail
 
 CONTAINER=dex-pg
 PORT="${DEX_PG_PORT:-5433}"
-IMAGE=postgres:16
+# postgres:16, pinned by its multi-arch index digest so every machine and every
+# CI run start the same bytes. Bump it deliberately, re-reading the digest with
+#   docker buildx imagetools inspect postgres:16 --format '{{json .Manifest.Digest}}'
+# and keep the service container in .github/workflows/integration.yml in step.
+DIGEST=sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+IMAGE="postgres@$DIGEST"
+# No capabilities at all. Started as root, the image's entrypoint needs SETUID and
+# SETGID to drop to postgres (and CHOWN for a data directory it does not own).
+# Started as postgres, the data directory the image ships is already its own, so
+# nothing has to be granted, and `docker exec` (the seeding path below) runs as
+# postgres too. scripts/check_container_hardening.sh refuses the container if any
+# of these is missing.
+HARDENING=(
+    --user postgres
+    --cap-drop ALL
+    --security-opt no-new-privileges:true
+    --pids-limit 256
+    --memory 1g
+)
 SUPERPASS=postgres
-SEED="$(cd "$(dirname "$0")" && pwd)/postgres_seed.sql"
+SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
+SEED="$SCRIPTS/postgres_seed.sql"
 
 if [[ "${1:-}" == "--down" ]]; then
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -33,11 +52,16 @@ fi
 
 if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
     docker run -d --name "$CONTAINER" \
+        "${HARDENING[@]}" \
         -e POSTGRES_PASSWORD="$SUPERPASS" \
         -p "$PORT":5432 \
         "$IMAGE" >/dev/null
     echo "started $IMAGE as $CONTAINER on port $PORT"
-elif [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]]; then
+fi
+# Checked before a stopped container is started again, so one this script
+# created before it hardened them is refused rather than reused.
+"$SCRIPTS/check_container_hardening.sh" "$CONTAINER" "$DIGEST"
+if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]]; then
     docker start "$CONTAINER" >/dev/null
     echo "restarted existing container $CONTAINER"
 fi

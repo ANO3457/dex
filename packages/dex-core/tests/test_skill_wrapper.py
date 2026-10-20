@@ -1,4 +1,4 @@
-"""The skill wrapper's extra resolution.
+"""The skill wrapper's extra resolution, and what it hands the engine.
 
 `skills/<skill>/scripts/run.py` runs before the engine is installed, so it decides
 which packaging extras `uv` resolves. That decision is invisible from inside the
@@ -17,6 +17,8 @@ path rather than imported.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,17 @@ def test_the_three_wrappers_stay_byte_identical():
     assert len(contents) == 1, [path.as_posix() for path in WRAPPERS]
 
 
+def test_the_wrapper_knows_every_engine_connector(wrapper):
+    """An engine connector the wrapper does not name falls back to the DuckDB
+    extra, so the installed engine lacks the client and refuses every command for
+    a user who configured nothing wrong. Checked against the engine's own table,
+    so the next connector cannot land without the wrapper learning it."""
+
+    from exmergo_dex_core.adapters import _DIALECTS
+
+    assert set(wrapper._KNOWN_CONNECTORS) == set(_DIALECTS)
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -55,39 +68,71 @@ def test_the_three_wrappers_stay_byte_identical():
         (["explore", "inventory"], []),
         (["explore", "query", "select 1"], []),
         (["transform", "plan", "add a model"], []),
-        (["maintain", "check"], []),
+        (["maintain", "schema"], []),
+        (["maintain", "reconcile"], []),
+        # dbt semantic authoring reads no Ossie document.
+        (["semantic", "define", "--edits-file", "edits.json"], []),
         # scikit-learn, and only where clustering actually runs.
         (["explore", "cluster", "orders"], ["cluster"]),
+        # jsonschema for every command that can read a native Ossie layer (#536):
+        # whether the layer is Ossie is `semantic.vendor`, in the nested config
+        # the wrapper does not parse, so the extra follows the command.
+        (["semantic", "ossie", "define", "--edits-file", "edits.json"], ["ossie"]),
+        (["semantic", "ossie", "update", "--edits-file", "edits.json"], ["ossie"]),
+        (["semantic", "ossie", "plan", "--edits-file", "edits.json"], ["ossie"]),
+        (["maintain", "semantic"], ["ossie"]),
+        (["maintain", "check"], ["ossie"]),
+        (["maintain", "snapshot"], ["ossie"]),
+        (["--connector", "bigquery", "maintain", "check"], ["ossie"]),
         # `list` renders no statement on either backend, so it never needs
-        # MetricFlow. Bare `explore semantic` is `list`.
-        (["explore", "semantic"], ["semantic-api"]),
-        (["explore", "semantic", "list"], ["semantic-api"]),
-        (["explore", "semantic", "list", "--local"], ["semantic-api"]),
-        (["explore", "semantic", "list", "--api"], ["semantic-api"]),
+        # MetricFlow. Bare `explore semantic` is `list`. It can read an Ossie
+        # layer, so it takes `ossie` as well.
+        (["explore", "semantic"], ["ossie", "semantic-api"]),
+        (["explore", "semantic", "list"], ["ossie", "semantic-api"]),
+        (["explore", "semantic", "list", "--local"], ["ossie", "semantic-api"]),
+        (["explore", "semantic", "list", "--api"], ["ossie", "semantic-api"]),
         # dbt Cloud renders and executes, so --api never needs MetricFlow either.
-        (["explore", "semantic", "values", "user__tier", "--api"], ["semantic-api"]),
-        (["explore", "semantic", "query", "orders", "--api"], ["semantic-api"]),
+        (
+            ["explore", "semantic", "values", "user__tier", "--api"],
+            ["ossie", "semantic-api"],
+        ),
+        (
+            ["explore", "semantic", "query", "orders", "--api"],
+            ["ossie", "semantic-api"],
+        ),
         # A statement rendered here needs the renderer.
         (
             ["explore", "semantic", "values", "user__tier", "--local"],
-            ["semantic-api", "semantic"],
+            ["ossie", "semantic-api", "semantic"],
         ),
         (
             ["explore", "semantic", "query", "orders", "--local"],
-            ["semantic-api", "semantic"],
+            ["ossie", "semantic-api", "semantic"],
         ),
         # No flag means the backend is ambient, and the wrapper does not read the
         # nested config that decides it: both go in, so the command cannot refuse
         # for want of a dependency.
         (
             ["explore", "semantic", "values", "user__tier"],
-            ["semantic-api", "semantic"],
+            ["ossie", "semantic-api", "semantic"],
         ),
-        (["explore", "semantic", "query", "orders"], ["semantic-api", "semantic"]),
+        (
+            ["explore", "semantic", "query", "orders"],
+            ["ossie", "semantic-api", "semantic"],
+        ),
     ],
 )
 def test_the_extras_follow_the_command(wrapper, argv, expected):
     assert wrapper._feature_extras(argv) == expected
+
+
+def test_every_ossie_reading_command_takes_the_ossie_extra(wrapper):
+    """Structural: the table in the wrapper is the claim, and each row of it
+    resolves to the extra whatever flags surround the command (#536)."""
+
+    for group, subcommand in wrapper._OSSIE_READING_COMMANDS:
+        argv = ["--connector", "snowflake", group, subcommand, "--repo-root", "."]
+        assert "ossie" in wrapper._feature_extras(argv), (group, subcommand)
 
 
 def test_the_extras_are_the_connector_plus_whatever_the_command_needs(
@@ -105,13 +150,124 @@ def test_the_extras_are_the_connector_plus_whatever_the_command_needs(
 
     assert wrapper._extras(["explore", "inventory"]) == ["duckdb"]
     assert wrapper._extras(["explore", "cluster", "orders"]) == ["duckdb", "cluster"]
-    assert wrapper._extras(["--connector", "bigquery", "maintain", "check"]) == [
+    assert wrapper._extras(["--connector", "bigquery", "maintain", "schema"]) == [
         "bigquery"
+    ]
+    # `maintain check` can read an Ossie layer, so it takes `ossie` on every
+    # connector, including the one whose own tree happens to carry jsonschema.
+    assert wrapper._extras(["--connector", "bigquery", "maintain", "check"]) == [
+        "bigquery",
+        "ossie",
     ]
     assert wrapper._extras(["--connector", "snowflake", "explore", "cluster", "o"]) == [
         "snowflake",
         "cluster",
     ]
+
+
+# SLayer is too heavy to install on a guess, so it is the one extra that follows
+# the config: `semantic slayer` always, and a command that reads the semantic layer
+# only where `semantic.vendor` is `slayer` (#596, #598).
+@pytest.mark.parametrize(
+    ("argv", "vendor", "expected"),
+    [
+        (["semantic", "slayer", "define", "--edits-file", "e.json"], None, ["slayer"]),
+        (["semantic", "slayer", "plan"], "dbt", ["slayer"]),
+        (["maintain", "check"], "slayer", ["ossie", "slayer"]),
+        (["maintain", "snapshot"], "slayer", ["ossie", "slayer"]),
+        (["maintain", "semantic"], "slayer", ["ossie", "slayer"]),
+        (["maintain", "grain"], "slayer", ["slayer"]),
+        (["maintain", "reconcile"], "slayer", ["slayer"]),
+        (["--connector", "bigquery", "maintain", "schema"], "slayer", ["slayer"]),
+        # `explore semantic` reads the layer on every mode, and an `explore`
+        # command folds it in where `--use-project` asks.
+        (["explore", "semantic"], "slayer", ["ossie", "slayer", "semantic-api"]),
+        (
+            ["explore", "semantic", "list", "--metric", "orders.revenue"],
+            "slayer",
+            ["ossie", "slayer", "semantic-api"],
+        ),
+        # SLayer renders `query` and `values` itself, so both take it and
+        # neither takes MetricFlow (#685).
+        (
+            ["explore", "semantic", "query", "orders.revenue"],
+            "slayer",
+            ["ossie", "slayer", "semantic-api"],
+        ),
+        (
+            ["explore", "semantic", "values", "orders.status"],
+            "slayer",
+            ["ossie", "slayer", "semantic-api"],
+        ),
+        # A SLayer plan is validated again as `transform apply` writes it.
+        (["transform", "apply"], "slayer", ["slayer"]),
+        (["explore", "map", "--use-project"], "slayer", ["slayer"]),
+        (["explore", "relationships", "--use-project"], "slayer", ["slayer"]),
+        (["explore", "profile", "o", "--use-project"], "slayer", ["slayer"]),
+        # Never on a guess: no vendor, or another one, installs no SLayer.
+        (["maintain", "check"], None, ["ossie"]),
+        (["maintain", "check"], "ossie", ["ossie"]),
+        (["maintain", "check"], "dbt", ["ossie"]),
+        (["explore", "semantic"], "ossie", ["ossie", "semantic-api"]),
+        (["explore", "map", "--use-project"], None, []),
+        (["transform", "apply"], "dbt", []),
+        # A command that does not read the layer installs nothing for it.
+        (["explore", "inventory"], "slayer", []),
+        (["explore", "map"], "slayer", []),
+        (["transform", "plan", "x"], "slayer", []),
+    ],
+)
+def test_the_slayer_extra_follows_the_configured_vendor(
+    wrapper, argv, vendor, expected
+):
+    assert wrapper._feature_extras(argv, vendor) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("semantic:\n  vendor: slayer\n", "slayer"),
+        ("connector: duckdb\nsemantic:\n    vendor: 'SLayer'  # pinned\n", "slayer"),
+        (
+            "semantic:\n  slayer:\n    base_dir: s\n    vendor: nope\n"
+            "  vendor: slayer\n",
+            "slayer",
+        ),
+        ('semantic:  # the layer\n  vendor: "ossie"\n', "ossie"),
+        # A `vendor:` that is not semantic's own child is not semantic.vendor.
+        ("semantic:\n  slayer:\n    vendor: slayer\n", None),
+        ("duckdb:\n  vendor: slayer\nsemantic:\n  deployment: local\n", None),
+        ("vendor: slayer\n", None),
+        # Flow style is not read; the engine refuses by name instead.
+        ("semantic: {vendor: slayer}\n", None),
+        ("", None),
+    ],
+)
+def test_the_vendor_is_read_from_the_nested_block(wrapper, tmp_path, text, expected):
+    config = tmp_path / "config.yml"
+    config.write_text(text, encoding="utf-8")
+    assert wrapper._semantic_vendor_from_config(config) == expected
+
+
+def test_extras_read_the_vendor_from_the_walked_up_config(
+    wrapper, tmp_path, monkeypatch
+):
+    """The vendor comes from the same file the connector does, found the same
+    way, so a run from a subdirectory installs what the project needs."""
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".dex").mkdir()
+    (tmp_path / ".dex" / "config.yml").write_text(
+        "connector: snowflake\nsemantic:\n  vendor: slayer\n"
+        "  slayer:\n    base_dir: s\n    models: [models/w/o.yaml]\n",
+        encoding="utf-8",
+    )
+    nested = tmp_path / "models" / "staging"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    assert wrapper._extras(["maintain", "check"]) == ["snowflake", "ossie", "slayer"]
+    assert wrapper._extras(["explore", "inventory"]) == ["snowflake"]
 
 
 def test_a_flag_value_is_never_read_as_the_mode(wrapper):
@@ -121,11 +277,12 @@ def test_a_flag_value_is_never_read_as_the_mode(wrapper):
     that needed the renderer."""
 
     assert wrapper._feature_extras(["explore", "semantic", "--metric", "query"]) == [
-        "semantic-api"
+        "ossie",
+        "semantic-api",
     ]
     assert wrapper._feature_extras(
         ["explore", "semantic", "list", "--for-dimension", "values"]
-    ) == ["semantic-api"]
+    ) == ["ossie", "semantic-api"]
     # And the connection flags still do not shift the group and subcommand.
     assert wrapper._feature_extras(
         ["--connector", "bigquery", "explore", "cluster", "orders"]
@@ -179,3 +336,96 @@ def _semantic_subparser(parser):
             if "semantic" in inner.choices:
                 return inner.choices["semantic"]
     raise AssertionError("no `explore semantic` subparser found")
+
+
+# --- what the wrapper hands the engine -----------------------------------------
+#
+# The wrapper is the one process that sits between the agent's environment and
+# the engine, so it is where the engine's inputs get narrowed: the package it
+# installs comes from where the wrapper lives, and the environment it passes on
+# leaves out credentials the engine never reads.
+
+
+def test_a_skill_dir_from_the_environment_cannot_redirect_the_engine(
+    wrapper, tmp_path, monkeypatch
+):
+    """`CLAUDE_SKILL_DIR` pointing at another tree with a `packages/dex-core` two
+    levels up changes nothing: the harness already used it to find this file, and
+    reading it again would let the environment choose which code uv installs."""
+
+    decoy_skill = tmp_path / "decoy" / "skills" / "explore"
+    decoy_skill.mkdir(parents=True)
+    (tmp_path / "decoy" / "packages" / "dex-core").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_SKILL_DIR", str(decoy_skill))
+
+    spec = wrapper._engine_spec("duckdb")
+
+    real = (SKILLS.parent / "packages" / "dex-core").resolve()
+    assert spec == ["--with", f"exmergo-dex-core[duckdb] @ {real.as_uri()}"]
+
+
+def test_the_child_env_withholds_unread_credentials_and_keeps_discovery(
+    wrapper, monkeypatch
+):
+    for name, value in {
+        "CLICKHOUSE_CLOUD_API_KEY": "control-plane-key",
+        "GITHUB_TOKEN": "ghp_not_real",
+        "VIRTUAL_ENV": "/somewhere/.venv",
+        "DATABASE_URL": "postgresql://dex_ro@localhost/app",
+        "SNOWFLAKE_PRIVATE_KEY_FILE": "/keys/k.p8",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    env = wrapper._child_env()
+
+    for withheld in ("CLICKHOUSE_CLOUD_API_KEY", "GITHUB_TOKEN", "VIRTUAL_ENV"):
+        assert withheld not in env
+    assert env["DATABASE_URL"] == "postgresql://dex_ro@localhost/app"
+    assert env["SNOWFLAKE_PRIVATE_KEY_FILE"] == "/keys/k.p8"
+    assert env["PATH"] == os.environ["PATH"]
+    # A copy: the wrapper's own environment is left as it was found.
+    assert os.environ["GITHUB_TOKEN"] == "ghp_not_real"  # noqa: S105 (a dummy)
+    assert os.environ["VIRTUAL_ENV"] == "/somewhere/.venv"
+
+
+@pytest.mark.parametrize("argv", [["explore", "inventory"], ["--warm"]])
+def test_both_ways_into_uv_carry_the_child_env(argv, monkeypatch):
+    """The exec that runs a command and the warm-up's subprocess both get the
+    narrowed environment. A path that fell back to inheriting would hand the
+    engine, or the uv resolving it, everything the agent's shell holds."""
+
+    module = _wrapper()
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_not_real")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://dex_ro@localhost/app")
+    monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/uv")
+    envs: list[dict[str, str]] = []
+    # The wrapper execs on POSIX and spawns through `subprocess.call` elsewhere,
+    # and warms through `subprocess.run` everywhere. All three are intercepted,
+    # so the environment is asserted on whichever branch this platform takes,
+    # rather than forcing one by setting `os.name`, which `module.os` shares
+    # with the whole process and pathlib reads to choose its path class.
+    monkeypatch.setattr(
+        module.os, "execvp", lambda *_a: pytest.fail("exec bypassed the child env")
+    )
+    monkeypatch.setattr(
+        module.os, "execvpe", lambda _file, _cmd, env: envs.append(env) or None
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "call",
+        lambda _cmd, **kwargs: envs.append(kwargs.get("env")) or 0,
+    )
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda cmd, **kwargs: (
+            envs.append(kwargs.get("env"))
+            or subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        ),
+    )
+    monkeypatch.setattr(module.sys, "argv", ["run.py", *argv])
+
+    assert module.main() == 0
+    assert len(envs) == 1 and envs[0] is not None
+    assert "GITHUB_TOKEN" not in envs[0]
+    assert envs[0]["DATABASE_URL"] == "postgresql://dex_ro@localhost/app"

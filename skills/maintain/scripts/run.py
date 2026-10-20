@@ -13,7 +13,12 @@ subcommand> ...`.
 absent this wrapper refuses with an error envelope naming the install command,
 rather than letting the exec fail with a traceback. Invoked through `uv run` the
 shell fails first (`uv: command not found`), which is why each SKILL.md also tells
-the agent what that message means.
+the agent what that message means. Either way the install is the user's to run:
+the message leads with package-manager commands rather than a piped installer, so
+an agent relaying it has nothing to execute on the user's behalf.
+
+The engine inherits this process's environment, minus what it must not see: see
+_child_env.
 
 Two execution modes, chosen automatically:
   - Monorepo checkout (this repo): `packages/dex-core` is found above the skill,
@@ -65,7 +70,7 @@ from pathlib import Path
 # Rewritten by scripts/prepare_release.sh to the tagged version. The connector
 # extra is deliberately NOT part of this pin: it is chosen at runtime (see
 # _resolve_connector), so a release artifact is connector-neutral.
-DEX_CORE_VERSION = "1.12.7"
+DEX_CORE_VERSION = "1.15.1"
 
 # Connector id -> packaging extra. The engine's connector ids and the pyproject
 # extras share names, so this is the identity set today. An unknown or unset
@@ -79,8 +84,29 @@ _KNOWN_CONNECTORS = (
     "postgres",
     "redshift",
     "clickhouse",
+    "trino",
 )
 _DEFAULT_CONNECTOR = "duckdb"
+
+# Credentials that turn up in a developer's or a CI runner's environment and that
+# the engine never reads. They are dropped from the engine's environment so
+# nothing it loads, dbt and package code included, can pick them up. A denylist
+# rather than an allowlist on purpose: connector discovery reads open-ended
+# families (DATABASE_URL, PG*, SNOWFLAKE_*, DATABRICKS_*, AWS_*, GOOGLE_*,
+# CLICKHOUSE_PASSWORD, TRINO_*, DBT_SL_*) and dbt reads whatever env_var() a
+# project names, so an allowlist would break a working setup every time it
+# missed one. A private dbt package that authenticated through GITHUB_TOKEN
+# should switch to dbt's own DBT_ENV_SECRET_GIT_CREDENTIAL, which passes
+# through.
+_WITHHELD_FROM_ENGINE = (
+    "CLICKHOUSE_CLOUD_API_KEY",
+    "CLICKHOUSE_CLOUD_API_SECRET",
+    "DEX_TEST_CH_CLOUD_API_KEY",
+    "DEX_TEST_CH_CLOUD_API_SECRET",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GHRS_TOKEN",
+)
 
 # The one flag the wrapper answers itself. It is stripped before anything else
 # reads the argv, so it never reaches the engine and never lands in the positionals
@@ -104,6 +130,41 @@ def _connector_from_config(config_path: Path) -> str | None:
     for line in text.splitlines():
         if line.startswith("connector:"):  # top-level only; indented keys ignored
             value = line.split(":", 1)[1].split("#", 1)[0].strip().strip("'\"")
+            return value or None
+    return None
+
+
+def _semantic_vendor_from_config(config_path: Path) -> str | None:
+    """Read `semantic.vendor` from .dex/config.yml, stdlib only.
+
+    The one nested key this bootstrap reads, because it is the one that decides an
+    extra too heavy to install on a guess (see `_SLAYER_COMMANDS`). Block style
+    only: the first-level child `vendor:` under an unindented `semantic:` line.
+    Anything else, a flow mapping included, reads as unset, which installs no
+    SLayer and lets the engine refuse by name with the install line.
+    """
+
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    inside = False
+    child_indent = None
+    for line in text.splitlines():
+        body = line.split("#", 1)[0].rstrip()
+        if not body.strip():
+            continue
+        indent = len(body) - len(body.lstrip(" "))
+        if indent == 0:
+            inside = body == "semantic:"
+            child_indent = None
+            continue
+        if not inside:
+            continue
+        if child_indent is None:
+            child_indent = indent
+        if indent == child_indent and body.lstrip().startswith("vendor:"):
+            value = body.split(":", 1)[1].strip().strip("'\"").lower()
             return value or None
     return None
 
@@ -148,6 +209,19 @@ def _resolve_connector(argv: list[str], cwd: Path) -> str:
     return connector if connector in _KNOWN_CONNECTORS else _DEFAULT_CONNECTOR
 
 
+def _resolve_semantic_vendor(argv: list[str], cwd: Path) -> str | None:
+    """The configured `semantic.vendor`, from the same walked-up .dex/config.yml
+    the connector comes from, or None where nothing says."""
+
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--repo-root", default=".")
+    known, _ = parser.parse_known_args(argv)
+    config_path = _find_config(cwd / known.repo_root)
+    if config_path is None:
+        return None
+    return _semantic_vendor_from_config(config_path)
+
+
 # Every value-taking flag this peek has to consume, so a flag's *value* is never
 # mistaken for the group, subcommand, or mode being run. The global connection
 # flags, plus the ones `explore semantic` takes, because a metric read as a mode
@@ -177,6 +251,37 @@ _VALUE_FLAGS = (
 # either backend and therefore never needs the renderer.
 _SEMANTIC_RENDERING_MODES = ("values", "query")
 
+# The commands that can read a native Ossie semantic layer, as (group,
+# subcommand). The `ossie` extra is `jsonschema` and nothing heavier, so it is
+# taken whenever the layer *might* be read rather than resolved from
+# `semantic.vendor`, which sits in a nested config block this bootstrap does not
+# parse (#536). Without it the engine refuses by name when the vendor is `ossie`,
+# which is the correct refusal and the one this exists to prevent; on BigQuery it
+# worked only because that connector's own tree happened to carry `jsonschema`.
+_OSSIE_READING_COMMANDS = (
+    ("explore", "semantic"),
+    ("semantic", "ossie"),
+    ("maintain", "semantic"),
+    ("maintain", "check"),
+    ("maintain", "snapshot"),
+)
+
+
+# SLayer is the opposite trade. Its extra brings FastAPI, uvicorn, mcp, duckdb,
+# jafgen and tantivy, far too much to install on every `maintain` run of every
+# repository, so it follows the config instead: `semantic slayer` always takes it,
+# and a command that reads the semantic layer takes it only where
+# `semantic.vendor` is `slayer` (read by `_semantic_vendor_from_config`): every
+# `maintain` command, `explore semantic`, `transform apply` (a SLayer plan is
+# validated again as it is written), and an `explore` command asked to fold the
+# layer in with `--use-project`. Where the read misses, the engine refuses by
+# name with the install line rather than failing on an import.
+_SLAYER_COMMANDS = (("semantic", "slayer"),)
+_SLAYER_BACKED_GROUPS = ("maintain",)
+_SLAYER_BACKED_COMMANDS = (("explore", "semantic"), ("transform", "apply"))
+_SLAYER_BACKED_FLAG = "--use-project"
+_SLAYER_VENDOR = "slayer"
+
 
 def _positionals(argv: list[str]) -> list[str]:
     """The bare tokens of an invocation: group, subcommand, and whatever follows.
@@ -192,7 +297,7 @@ def _positionals(argv: list[str]) -> list[str]:
     return [tok for tok in remaining if not tok.startswith("-")]
 
 
-def _feature_extras(argv: list[str]) -> list[str]:
+def _feature_extras(argv: list[str], vendor: str | None = None) -> list[str]:
     """The extras this invocation needs on top of the connector's.
 
     Two commands need more than a warehouse client, and both are resolved from the
@@ -209,23 +314,47 @@ def _feature_extras(argv: list[str]) -> list[str]:
     that could execute either way takes both. That errs toward a heavier install
     and never toward a command that refuses for want of a dependency, which is the
     failure this exists to prevent.
+
+    The same rule gives every command in `_OSSIE_READING_COMMANDS` the `ossie`
+    extra: whether the layer is native Ossie is `semantic.vendor`, in that same
+    nested block, so the extra follows the command rather than the config.
+
+    `slayer` is the exception that does read `vendor`, the configured
+    `semantic.vendor`, because it is too heavy to take on a guess (see
+    `_SLAYER_COMMANDS`). The same read keeps MetricFlow out of a SLayer `query` or
+    `values`: SLayer renders those itself, so `semantic` would be installed for
+    nothing.
     """
 
     positionals = _positionals(argv)
-    if positionals[:2] == ["explore", "cluster"]:
+    command = tuple(positionals[:2])
+    if command == ("explore", "cluster"):
         return ["cluster"]
-    if positionals[:2] != ["explore", "semantic"]:
-        return []
+    extras = ["ossie"] if command in _OSSIE_READING_COMMANDS else []
+    group = command[0] if command else None
+    reads_layer = (
+        group in _SLAYER_BACKED_GROUPS
+        or command in _SLAYER_BACKED_COMMANDS
+        or (group == "explore" and _SLAYER_BACKED_FLAG in argv)
+    )
+    if command in _SLAYER_COMMANDS or (vendor == _SLAYER_VENDOR and reads_layer):
+        extras.append("slayer")
+    if command != ("explore", "semantic"):
+        return extras
     mode = positionals[2] if len(positionals) > 2 else "list"
-    if mode in _SEMANTIC_RENDERING_MODES and "--api" not in argv:
-        return ["semantic-api", "semantic"]
-    return ["semantic-api"]
+    renders_with_metricflow = vendor != _SLAYER_VENDOR and "--api" not in argv
+    if mode in _SEMANTIC_RENDERING_MODES and renders_with_metricflow:
+        return [*extras, "semantic-api", "semantic"]
+    return [*extras, "semantic-api"]
 
 
 def _engine_spec(extras: str, skill_dir: Path | None = None) -> list[str]:
-    skill_dir = skill_dir or Path(
-        os.environ.get("CLAUDE_SKILL_DIR", Path(__file__).resolve().parent.parent)
-    )
+    # The skill directory is where this file lives, never an environment variable:
+    # the harness already ran `${CLAUDE_SKILL_DIR}/scripts/run.py`, and honoring
+    # the variable a second time would let whoever controls the environment point
+    # uv at a different `packages/dex-core` to install and run. `skill_dir` exists
+    # for tests.
+    skill_dir = skill_dir or Path(__file__).resolve().parent.parent
     local_pkg = (skill_dir / ".." / ".." / "packages" / "dex-core").resolve()
     if local_pkg.is_dir():
         # Resolve the local package WITH the resolved extras (a plain path drops
@@ -241,7 +370,11 @@ def _extras(argv: list[str]) -> list[str]:
     Warm-up and a real run both resolve here, on the same argv, which is what stops
     a warmed environment from disagreeing with the one the next command asks for."""
 
-    return [_resolve_connector(argv, Path.cwd()), *_feature_extras(argv)]
+    cwd = Path.cwd()
+    return [
+        _resolve_connector(argv, cwd),
+        *_feature_extras(argv, _resolve_semantic_vendor(argv, cwd)),
+    ]
 
 
 def _uv_run(engine_spec: list[str], tail: list[str]) -> list[str]:
@@ -253,6 +386,20 @@ def _uv_run(engine_spec: list[str], tail: list[str]) -> list[str]:
     than resolving the engine."""
 
     return ["uv", "run", "--no-project", *engine_spec, *tail]
+
+
+def _child_env() -> dict[str, str]:
+    """The environment the engine (and the warm-up's uv) runs with.
+
+    This process's environment minus the credentials listed in
+    _WITHHELD_FROM_ENGINE and minus `VIRTUAL_ENV`: the engine runs in uv's own
+    ephemeral environment, so an inherited one (the user's activated venv) is
+    irrelevant there and only makes uv print a mismatch warning on every call.
+    A copy, so this process's own environment is left as it was found.
+    """
+
+    withheld = {*_WITHHELD_FROM_ENGINE, "VIRTUAL_ENV"}
+    return {key: value for key, value in os.environ.items() if key not in withheld}
 
 
 def _envelope(
@@ -313,6 +460,7 @@ def _warm(argv: list[str]) -> int:
         _uv_run(spec, ["python", "-c", "import exmergo_dex_core"]),
         capture_output=True,
         text=True,
+        env=_child_env(),
     )
     elapsed = round(time.monotonic() - started, 3)
     if completed.returncode != 0:
@@ -355,18 +503,16 @@ def main() -> int:
                 "error",
                 errors=[
                     "dex runs its engine through uv, which was not found on "
-                    "PATH. Install it with: "
-                    "curl -LsSf https://astral.sh/uv/install.sh | sh "
-                    "(or `brew install uv`, or `pipx install uv`), then re-run."
+                    "PATH. Install it with `brew install uv` or `pipx install uv` "
+                    "(other platforms: "
+                    "https://docs.astral.sh/uv/getting-started/installation/), "
+                    "then re-run. An agent relays this to the user rather than "
+                    "running an installer itself."
                 ],
                 reason="prerequisite",
             )
         )
         return 1
-    # The engine runs in uv's own ephemeral environment, so an inherited
-    # VIRTUAL_ENV (e.g. the user's activated venv) is irrelevant to both paths
-    # below and only makes uv print a mismatch warning on every call. Drop it.
-    os.environ.pop("VIRTUAL_ENV", None)
     if _WARM_FLAG in argv:
         return _warm([arg for arg in argv if arg != _WARM_FLAG])
     # The connector extra is always installed; `explore cluster` and
@@ -380,13 +526,13 @@ def main() -> int:
         # Windows keeps the spawn: exec there hands control back to the shell
         # before the child finishes, and the prompt would interleave with the one
         # envelope a caller is reading off stdout.
-        return subprocess.call(cmd)
+        return subprocess.call(cmd, env=_child_env())
     # Exec rather than spawn everywhere else: the wrapper has nothing left to do
     # once the engine starts, and replacing the process hands over the terminal,
     # the signals, and the exit code directly instead of relaying them through a
     # parent that is only waiting.
-    os.execvp(cmd[0], cmd)
-    return 0  # os.execvp does not return; this keeps the signature a plain int
+    os.execvpe(cmd[0], cmd, _child_env())
+    return 0  # os.execvpe does not return; this keeps the signature a plain int
 
 
 if __name__ == "__main__":

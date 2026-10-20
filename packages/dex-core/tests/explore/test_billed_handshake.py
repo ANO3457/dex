@@ -1427,6 +1427,49 @@ def test_budget_exhaustion_carries_both_the_ceiling_and_the_spend(
     assert envelope.data["spend"]["bytes_billed"] == 5_000
 
 
+def test_budget_exhaustion_reports_the_settled_spend_a_finished_command_would(
+    fake_sf_connection, tmp_path
+):
+    """What the attempt cost includes what the warehouse bills for it as a
+    whole, and in the unit it bills in, exactly as a finished command's spend
+    does: reading the gate's running total instead left a Snowflake resume and
+    idle tail out of the number a caller sizes the re-run by."""
+
+    from fakes.snowflake import FakeResult
+
+    from exmergo_dex_core.adapters.snowflake import SnowflakeAdapter
+    from exmergo_dex_core.config import SnowflakeTarget
+    from exmergo_dex_core.explore import commands as cmds
+    from exmergo_dex_core.guards.cost_guard import CostGate
+
+    fake_sf_connection.row_resolver = lambda sql: FakeResult(
+        rows=[{"n": 1}], seconds=1.0
+    )
+    adapter = SnowflakeAdapter(
+        connection=fake_sf_connection,
+        cost_gate=CostGate(
+            paradigm=Paradigm.COMPUTE_TIME,
+            ceiling=600.0,
+            session_ceiling=None,
+            session_spent=0.0,
+            confirmed=True,
+            connector="snowflake",
+            command="explore profile",
+        ),
+        target=SnowflakeTarget(warehouse="DEX_WH"),
+        clock=fake_sf_connection.clock,
+    )
+    adapter.run_query(
+        'SELECT COUNT(*) AS n FROM "SHOP"."PUBLIC"."CUSTOMERS"',
+        max_rows=10,
+        timeout_seconds=200,
+    )
+    error = cmds._budget_exhausted(FilesystemStore(tmp_path), adapter, [], 3)
+    assert error.spend["seconds_billed"] == pytest.approx(61.0)
+    assert error.spend["credits_billed"] > 0
+    assert error.spend["reserved"] is None
+
+
 # --- the cumulative cap that was never set ---------------------------------------
 #
 # `effective_ceiling()` returns the tighter of the per-command and the remaining
@@ -1772,6 +1815,9 @@ def test_a_refused_statement_reports_its_reason_its_object_and_its_spend(
     error = payload["errors"][0]
     assert "Bad int64 value" in error  # the server's own diagnosis, verbatim
     assert "test-proj.shop.events" in error  # and which object it was about
+    # It ran and failed, and naming the object rebuilt the exception on the way
+    # out: the door it met survives that rebuild (issue #524).
+    assert payload["data"]["stage"] == "run"
     # Metered and failed is not the same as free: the first object's scan was
     # billed and the envelope says so.
     assert payload["data"]["spend"]["bytes_billed"] > 0
@@ -1840,6 +1886,123 @@ def test_a_statement_bigquery_will_not_plan_is_refused_not_classified_internal(
     assert refusal in payload["errors"][0]  # BigQuery's own words reach the host
     # Nothing got past the dry run, so no statement was asked to execute.
     assert all(call.dry_run for call in fake_bq_client.query_calls)
+
+
+def _query_argv(tmp_path: Path, *statements: str) -> list[str]:
+    return [
+        "--repo-root",
+        str(tmp_path),
+        "--connector",
+        "bigquery",
+        "explore",
+        "query",
+        *statements,
+        "--confirm",
+        "--budget",
+        str(float(100 * MB)),
+    ]
+
+
+def _route_to_one_adapter(fake_bq_client, monkeypatch) -> None:
+    from exmergo_dex_core.engine import DexEngine
+
+    def opener(self, command=None, *, budget=None, confirmed=None):
+        if self._adapter_instance is None:
+            self._adapter_instance = _adapter(
+                fake_bq_client, confirmed=True, budget=float(100 * MB)
+            )
+        return self._adapter_instance
+
+    monkeypatch.setattr(DexEngine, "_adapter", opener)
+
+
+def test_the_envelope_names_the_door_a_refused_statement_met(
+    fake_bq_client, monkeypatch, tmp_path, capsys
+):
+    """One command and one statement, refused at each door (issue #524).
+
+    The two tests above pin that both doors read `execution_failure`. That stays
+    true, and it is not enough for a host that has to act on the difference: a
+    statement BigQuery would not plan has to be rewritten, while one that ran
+    and failed may have billed and may fail on the data rather than the SQL.
+    `data.stage` is the difference, readable without parsing the server's prose.
+    """
+
+    from google.api_core import exceptions as api_exceptions
+
+    from exmergo_dex_core.cli import main
+
+    _seed_query_cache(tmp_path)
+    _route_to_one_adapter(fake_bq_client, monkeypatch)
+    argv = _query_argv(
+        tmp_path, "SELECT 1 / id AS r FROM `test-proj`.`shop`.`customers`"
+    )
+
+    plan = fake_bq_client.query
+
+    def refuse_to_plan(sql, job_config=None, location=None):
+        if job_config is not None and job_config.dry_run:
+            raise api_exceptions.BadRequest("Unrecognized name: n at [1:12]")
+        return plan(sql, job_config=job_config, location=location)
+
+    monkeypatch.setattr(fake_bq_client, "query", refuse_to_plan)
+    assert main(argv) == 1
+    planned = json.loads(capsys.readouterr().out)
+    assert all(call.dry_run for call in fake_bq_client.query_calls)
+
+    monkeypatch.setattr(fake_bq_client, "query", plan)
+    fake_bq_client.result_error = api_exceptions.BadRequest(
+        "Query error: division by zero: 1 / 0 at [1:8]"
+    )
+    assert main(argv) == 1
+    ran = json.loads(capsys.readouterr().out)
+    assert not all(call.dry_run for call in fake_bq_client.query_calls)
+
+    assert planned["reason"] == ran["reason"] == Reason.EXECUTION_FAILURE.value
+    assert planned["data"]["stage"] == "plan"
+    assert ran["data"]["stage"] == "run"
+
+
+def test_a_batch_names_the_door_on_the_statement_that_met_it(
+    fake_bq_client, monkeypatch, tmp_path, capsys
+):
+    """A batch reports a failed statement against that statement rather than
+    through the envelope's own error, so the door has to ride there too: beside
+    the `reason` it already carries, and empty on a statement that answered."""
+
+    from google.api_core import exceptions as api_exceptions
+
+    from exmergo_dex_core.cli import main
+
+    _seed_query_cache(tmp_path)
+    _route_to_one_adapter(fake_bq_client, monkeypatch)
+    executes = fake_bq_client._execution_error
+
+    def divide_by_zero(sql_text, job_config, total_bytes):
+        if "1 / id" in sql_text:
+            return api_exceptions.BadRequest(
+                "Query error: division by zero: 1 / 0 at [1:8]"
+            )
+        return executes(sql_text, job_config, total_bytes)
+
+    fake_bq_client._execution_error = divide_by_zero
+
+    rc = main(
+        _query_argv(
+            tmp_path,
+            "SELECT COUNT(*) AS n FROM `test-proj`.`shop`.`customers`",
+            "SELECT 1 / id AS r FROM `test-proj`.`shop`.`customers`",
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    answered, failed = payload["data"]["results"]
+    assert answered["status"] == "ok"
+    assert answered["stage"] is None
+    assert failed["status"] == "failed"
+    assert failed["reason"] == Reason.EXECUTION_FAILURE.value
+    assert failed["stage"] == "run"
 
 
 def test_a_refusal_that_never_reached_the_warehouse_reports_no_spend(

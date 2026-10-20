@@ -49,9 +49,9 @@ class SemanticLayer(Protocol):
     """The behavior required from a semantic layer and its runtime.
 
     A layer is the semantic system of record, whether it is a local dbt
-    artifact, dbt Cloud, or native Ossie documents.  ``backend`` was the old
-    name for this seam; it hid that all three implementations own discovery as
-    well as execution.
+    artifact, dbt Cloud, native Ossie documents, or SLayer model files.
+    ``backend`` was the old name for this seam; it hid that every
+    implementation owns discovery as well as execution.
     """
 
     descriptor: BackendDescriptor
@@ -63,6 +63,18 @@ class SemanticLayer(Protocol):
     def values(self, dimension: str, metrics: list[str]) -> Any: ...
 
     def filter_refs(self, clauses: list[str]) -> list[str] | None: ...
+
+    def time_axis_refs(self, metrics: list[str]) -> list[str] | None:
+        """The dimension tokens this layer's time token buckets for ``metrics``.
+
+        A time grouping (MetricFlow's ``metric_time``, SLayer's ``--grain``)
+        projects the time dimension of each measure the metrics read, without
+        the caller naming it, so the PII gate screens these tokens as it screens
+        a grouped dimension. None is this backend's stated position that it
+        cannot resolve them, which leaves the time token on the name heuristic
+        and the result disclosing that it did.
+        """
+        ...
 
     def declared_relationships(self) -> list[Any]:
         """Native full-pair declarations, or an empty list when unavailable."""
@@ -148,6 +160,7 @@ def values_gap(backend: Any) -> str:
 _EXECUTION_DEPLOYMENTS: dict[str, dict[str, str]] = {
     "dbt": {EXECUTION_DEX: "local", EXECUTION_VENDOR: "dbt_cloud"},
     "ossie": {EXECUTION_DEX: "local"},
+    "slayer": {EXECUTION_DEX: "local"},
 }
 
 
@@ -171,6 +184,12 @@ def _local_ossie(engine: Any) -> SemanticLayer:
     return LocalOssieLayer.from_engine(engine)
 
 
+def _local_slayer(engine: Any) -> SemanticLayer:
+    from .slayer import LocalSlayerLayer
+
+    return LocalSlayerLayer.from_engine(engine)
+
+
 # Which backend answers for a resolved (vendor, deployment) pair. A table rather
 # than a chain of conditions, so a vendor is a row here and nowhere else, and so
 # a deployment that resolved is a deployment that gets used: the previous shape
@@ -184,6 +203,7 @@ _BACKENDS: dict[tuple[str, str], Callable[[Any], SemanticLayer]] = {
     ("dbt", "local"): _local_metricflow,
     ("dbt", "dbt_cloud"): _hosted_dbt_cloud,
     ("ossie", "local"): _local_ossie,
+    ("slayer", "local"): _local_slayer,
 }
 
 # Deployments dex executes itself, so a hosted semantic source (a dbt Cloud
@@ -202,6 +222,12 @@ _SOURCE_REFUSALS: dict[tuple[str, str], str] = {
         "meaning for native Apache Ossie documents, which are files in this "
         "repository. Drop the source, or select a hosted dbt semantic layer "
         "with semantic.vendor: dbt and semantic.deployment: dbt_cloud"
+    ),
+    ("slayer", "local"): (
+        "a semantic source supplies a hosted dbt Cloud token and has no "
+        "meaning for SLayer model files, which are files in this repository. "
+        "Drop the source, or select a hosted dbt semantic layer with "
+        "semantic.vendor: dbt and semantic.deployment: dbt_cloud"
     ),
 }
 
@@ -240,6 +266,15 @@ def resolve_semantic_layer(
         deployment = canonical_semantic_deployment(configured or "local")
 
     build = _BACKENDS.get((vendor, deployment))
+    if build is None and deployment in SEMANTIC_DEPLOYMENTS[vendor]:
+        # A deployment the vendor has, with no runtime dex can drive yet. Said
+        # as that, rather than as a deployment that does not exist, which would
+        # send the reader to change a setting that is already right.
+        raise SemanticBackendError(
+            f"dex has no `explore semantic` backend for semantic vendor "
+            f"'{vendor}' yet; the {vendor} layer is configured, and this command "
+            "cannot read it"
+        )
     if build is None:
         raise SemanticBackendError(
             f"vendor '{vendor}' has no deployment '{deployment}'; use one of "

@@ -153,8 +153,8 @@ def test_firewalled_query_round_trip(
             f"SELECT COUNT(*) AS n FROM {REGION}",  # noqa: S608 (test SQL, fixed table)
             "--confirm",
             "--budget",
-            # Covers the 60s resume minimum when the warehouse is cold: the
-            # estimate honestly includes it, so the budget must too.
+            # Covers the warehouse uptime the estimate quotes (the 60s resume
+            # minimum when cold, the idle tail when warm), so the budget must too.
             str(SF_MAX_SECONDS + 90),
         ],
         capsys,
@@ -371,7 +371,9 @@ def test_key_value_shapes_ignore_short_codes_and_still_catch_mixed_ids(
             "SKUS",
             "--confirm",
             "--budget",
-            str(SF_MAX_SECONDS),
+            # The scans plus the warehouse uptime the estimate quotes: the idle
+            # tail on a warm warehouse, the 60s resume minimum on a cold one.
+            str(SF_MAX_SECONDS + 90),
         ],
         capsys,
     )

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Read-only ClickHouse Cloud admission check. This performs no SQL connection,
-# so an over-budget refusal cannot wake an idled service.
+# so an over-budget refusal cannot wake an idled service. It authenticates with
+# the scoped CI key from DEX_SECRETS_DIR (see secrets.sh), and only the two
+# clickhousectl calls ever hold it.
 
 set -euo pipefail
 # jq -e and a failed command substitution exit under set -e without a word, which
@@ -30,20 +32,17 @@ for tool in clickhousectl jq; do
   command -v "$tool" >/dev/null || { echo "$tool is required on PATH" >&2; exit 2; }
 done
 
-# The GitHub environment uses dex-specific names. clickhousectl deliberately
-# receives only the two variables it understands, and neither value is printed.
-export CLICKHOUSE_CLOUD_API_KEY="${DEX_TEST_CH_CLOUD_API_KEY:-${CLICKHOUSE_CLOUD_API_KEY:-}}"
-export CLICKHOUSE_CLOUD_API_SECRET="${DEX_TEST_CH_CLOUD_API_SECRET:-${CLICKHOUSE_CLOUD_API_SECRET:-}}"
-[[ -n "$CLICKHOUSE_CLOUD_API_KEY" ]] || { echo "Cloud API key is required" >&2; exit 2; }
-[[ -n "$CLICKHOUSE_CLOUD_API_SECRET" ]] || { echo "Cloud API secret is required" >&2; exit 2; }
+# shellcheck source=scripts/clickhouse_cloud/secrets.sh
+source "$(dirname "${BASH_SOURCE[0]}")/secrets.sh"
+use_cloud_credentials scoped
 
-SERVICE_JSON=$(clickhousectl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
+SERVICE_JSON=$(cloudctl cloud service get "$SERVICE" --org-id "$ORGANIZATION" --json)
 ACTUAL_ID=$(jq -er '.id' <<<"$SERVICE_JSON")
 [[ "$ACTUAL_ID" == "$SERVICE" ]] || {
   echo "control plane returned service $ACTUAL_ID, expected $SERVICE" >&2; exit 1; }
 
 TODAY=$(date -u +%F)
-USAGE_JSON=$(clickhousectl cloud org usage \
+USAGE_JSON=$(cloudctl cloud org usage \
   --org-id "$ORGANIZATION" --from-date "$TODAY" --to-date "$TODAY" --json)
 COMPUTE_CHC=$(jq -er --arg service "$SERVICE" '
   [.costs[]? | select((.serviceId // .entityId) == $service) |

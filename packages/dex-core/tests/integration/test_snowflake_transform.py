@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -125,8 +126,18 @@ def test_init_plan_apply_build_into_the_scratch_database(
     assert built["status"] == "ok"
     statuses = {n["name"]: n["status"] for n in built["data"]["nodes"]}
     assert statuses.get(MODEL_NAME) == "success"
-    # Warehouse time is accounted: the compute-time build records seconds.
-    assert built["data"]["spend"]["seconds_billed"] >= 0
+    # Warehouse time is accounted, and as uptime: a build that left the
+    # warehouse idle owes at least its AUTO_SUSPEND tail, whatever dbt's
+    # statements took, and one that resumed it at least the 60-second minimum.
+    seconds = built["data"]["spend"]["seconds_billed"]
+    assert seconds >= 0
+    uptime = [w for w in built["warnings"] if "no statement reported" in w]
+    assert uptime, built["warnings"]
+    tail = re.search(r"its (\d+)-second AUTO_SUSPEND tail is charged", uptime[0])
+    if tail:
+        assert seconds >= int(tail.group(1))
+    if "This command resumed" in uptime[0]:
+        assert seconds >= 60
 
     # The relation exists exactly where the dev target points, then
     # best-effort cleanup; the transient database is the backstop.

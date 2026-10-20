@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import write_manifest, write_semantic_manifest
 from maintain.conftest import SEMANTIC_YAML
 
@@ -20,9 +22,11 @@ from exmergo_dex_core.dbt_project import (
     jinja_calls,
     jinja_regions,
     load,
+    model_file,
     resolve_target,
     write_edits,
 )
+from exmergo_dex_core.errors import RequestError
 
 
 def test_load_parses_project_and_files(dbt_project_dir: Path):
@@ -130,6 +134,42 @@ def test_write_edits_create_new_file(dbt_project_dir: Path):
     assert result.written == ["models/marts/fct_orders.sql"]
     assert result.diffs[0]["op"] == "create"
     assert (dbt_project_dir / "models/marts/fct_orders.sql").is_file()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="mode bits are synthetic on Windows")
+def test_write_edits_leaves_profiles_owner_only_and_other_files_alone(
+    dbt_project_dir: Path,
+):
+    """profiles.yml is the file people hand-edit a password into, so dex writes it
+    0600 whatever the umask, and tightens an existing one it rewrites. Everything
+    else keeps the umask's mode: a model is not a credential, and a 0600 model
+    would be a surprise in a shared checkout."""
+
+    profiles = dbt_project_dir / "profiles.yml"
+    profiles.chmod(0o644)
+    previous = os.umask(0o022)
+    try:
+        result = write_edits(
+            [
+                Edit(
+                    path="profiles.yml",
+                    new_content=profiles.read_text(encoding="utf-8") + "# touched\n",
+                    old_content_hash=content_hash(profiles.read_text(encoding="utf-8")),
+                ),
+                Edit(
+                    path="models/marts/fct_orders.sql",
+                    new_content="select 2 as id\n",
+                    old_content_hash=None,
+                ),
+            ],
+            dbt_project_dir,
+        )
+    finally:
+        os.umask(previous)
+    assert sorted(result.written) == ["models/marts/fct_orders.sql", "profiles.yml"]
+    assert profiles.stat().st_mode & 0o777 == 0o600
+    model = dbt_project_dir / "models/marts/fct_orders.sql"
+    assert model.stat().st_mode & 0o777 == 0o644
 
 
 def test_write_edits_human_edit_is_a_conflict(dbt_project_dir: Path):
@@ -489,6 +529,129 @@ def test_definitions_yaml_namespaced_composite_unique_key(dbt_project_dir: Path)
     assert composite.columns == ["id", "email"]
 
 
+_GRAIN = {"combination_of_columns": ["order_id", "line_number"]}
+_JOIN = {"to": "ref('stg_customers')", "field": "id"}
+
+
+@pytest.mark.parametrize(
+    ("grain_test", "join_test"),
+    [
+        pytest.param(
+            {"dbt_utils.unique_combination_of_columns": _GRAIN},
+            {"relationships": _JOIN},
+            id="inputs-beside-the-name",
+        ),
+        pytest.param(
+            {"dbt_utils.unique_combination_of_columns": {"arguments": _GRAIN}},
+            {"relationships": {"arguments": _JOIN}},
+            id="inputs-under-arguments",
+        ),
+        pytest.param(
+            {
+                "name": "stg_orders_grain",
+                "test_name": "dbt_utils.unique_combination_of_columns",
+                "arguments": _GRAIN,
+            },
+            {
+                "name": "stg_orders_customer",
+                "test_name": "relationships",
+                "arguments": _JOIN,
+            },
+            id="test-name-with-arguments",
+        ),
+        pytest.param(
+            {"test_name": "dbt_utils.unique_combination_of_columns", **_GRAIN},
+            {"test_name": "relationships", **_JOIN},
+            id="test-name-with-inputs-beside-it",
+        ),
+    ],
+)
+def test_definitions_yaml_reads_every_spelling_dbt_reads(
+    dbt_project_dir: Path, grain_test: dict, join_test: dict
+):
+    """#565: dbt has asked for a generic test's inputs under ``arguments:``
+    since 1.10.8, and the compiled read always saw them because dbt merges
+    that block into the manifest's kwargs. The YAML read now merges it the
+    same way, and reads the ``test_name:`` spelling, so every form dbt
+    accepts yields the same composite key and the same foreign key."""
+
+    (dbt_project_dir / "models" / "staging" / "stg_orders.sql").write_text(
+        "select 1 as order_id, 1 as line_number, 1 as customer_id\n",
+        encoding="utf-8",
+    )
+    schema = {
+        "version": 2,
+        "models": [
+            {
+                "name": "stg_orders",
+                "data_tests": [grain_test],
+                "columns": [{"name": "customer_id", "data_tests": [join_test]}],
+            }
+        ],
+    }
+    (dbt_project_dir / "models" / "staging" / "orders_schema.yml").write_text(
+        yaml.safe_dump(schema, sort_keys=False), encoding="utf-8"
+    )
+    defs = definitions(dbt_project_dir)
+    assert defs.relationship_source == "yaml"
+    (composite,) = defs.declared_composite_keys
+    assert (composite.model, composite.columns) == (
+        "stg_orders",
+        ["order_id", "line_number"],
+    )
+    (fk,) = defs.foreign_keys
+    assert (fk.model, fk.column, fk.to_model, fk.to_column) == (
+        "stg_orders",
+        "customer_id",
+        "stg_customers",
+        "id",
+    )
+
+
+def test_definitions_yaml_arguments_win_over_the_keys_beside_them(
+    dbt_project_dir: Path,
+):
+    """dbt merges ``arguments:`` over its siblings, so where a project writes
+    an input in both places the one under ``arguments:`` is the one dbt
+    tests, and the one dex must report."""
+
+    (dbt_project_dir / "models" / "staging" / "schema.yml").write_text(
+        "version: 2\n"
+        "models:\n"
+        "  - name: stg_customers\n"
+        "    data_tests:\n"
+        "      - unique_combination_of_columns:\n"
+        "          combination_of_columns: [id, name]\n"
+        "          arguments:\n"
+        "            combination_of_columns: [id, email]\n",
+        encoding="utf-8",
+    )
+    (composite,) = definitions(dbt_project_dir).declared_composite_keys
+    assert composite.columns == ["id", "email"]
+
+
+def test_definitions_yaml_reads_unique_and_not_null_by_test_name(
+    dbt_project_dir: Path,
+):
+    (dbt_project_dir / "models" / "staging" / "schema.yml").write_text(
+        "version: 2\n"
+        "models:\n"
+        "  - name: stg_customers\n"
+        "    columns:\n"
+        "      - name: id\n"
+        "        data_tests:\n"
+        "          - name: stg_customers_id_unique\n"
+        "            test_name: unique\n"
+        "          - test_name: not_null\n"
+        "            config:\n"
+        "              severity: warn\n",
+        encoding="utf-8",
+    )
+    (key,) = definitions(dbt_project_dir).declared_keys
+    assert (key.model, key.column) == ("stg_customers", "id")
+    assert key.unique is True and key.not_null is True
+
+
 def test_definitions_manifest_source_parent_and_backtick_quoting(
     dbt_project_dir: Path,
 ):
@@ -734,8 +897,24 @@ def test_jinja_skips_an_unbalanced_call_without_losing_the_rest():
 
 
 def test_jinja_reads_a_keyword_argument_as_unread():
+    # A keyword argument is left out of args.
     (call,) = jinja_calls("{{ config(materialized='view') }}")
-    assert call.args == (None,)
+    assert call.args == ()
+
+
+@pytest.mark.parametrize(
+    "template,args",
+    [
+        ("{{ ref('dim_orders', v=1) }}", ("dim_orders",)),
+        ("{{ ref('dim_orders', version=1) }}", ("dim_orders",)),
+        ("{{ ref('dim_orders', v = 1) }}", ("dim_orders",)),
+        ("{{ ref('dim_orders', version = 1) }}", ("dim_orders",)),
+        ("{{ ref('pkg', 'dim_orders', version=2) }}", ("pkg", "dim_orders")),
+        ("{{ ref(var('x')) }}", (None,)),
+    ],
+)
+def test_jinja_drops_a_keyword_argument_and_keeps_the_positional_name(template, args):
+    assert jinja_calls(template)[0].args == args
 
 
 def test_jinja_regions_returns_a_region_that_calls_nothing():
@@ -901,3 +1080,106 @@ def test_a_semantic_model_s_grain_lands_on_the_version_it_reads(dbt_project_dir:
     defs = definitions(dbt_project_dir)
     assert "dim_customers_v2" not in defs.model_relations
     assert defs.primary_entities == {"dim_customers.v2": "id"}
+
+
+# --- which file builds a model ------------------------------------------------
+
+
+def _layout(root: Path, files: list[str], **paths: list[str]):
+    """A project on disk with the given path keys, read back through `load()`, so
+    the keys under test are the ones the engine itself builds."""
+
+    lines = ["name: p", "profile: p"]
+    lines += [
+        f"{key.replace('_', '-')}: {json.dumps(value)}" for key, value in paths.items()
+    ]
+    (root / "dbt_project.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for rel in files:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("select 1 as id\n", encoding="utf-8")
+    return load(root)
+
+
+@pytest.mark.parametrize(
+    "model_paths,path",
+    [
+        (["models"], "models/staging/stg_one.sql"),
+        # Two segments in one entry: stringified with the platform separator it
+        # was `src\models` on Windows, which no POSIX key starts with.
+        (["src/models"], "src/models/staging/stg_one.sql"),
+        # dbt reads both as `models`, and `load()` keys never carry the `./` or
+        # the trailing slash.
+        (["./models"], "models/staging/stg_one.sql"),
+        (["models/"], "models/staging/stg_one.sql"),
+        (["lib", "models"], "models/stg_one.sql"),
+    ],
+)
+def test_model_file_finds_the_model_however_its_model_path_is_spelled(
+    tmp_path: Path, model_paths: list[str], path: str
+):
+    view = _layout(tmp_path, [path], model_paths=model_paths)
+    assert model_file(view, "stg_one") == path
+
+
+def test_model_file_does_not_take_a_sibling_directory_for_the_model_path(
+    tmp_path: Path,
+):
+    """`models_analysis` begins with the characters `models` and is not under it."""
+
+    view = _layout(
+        tmp_path,
+        ["models/stg_one.sql", "models_analysis/stg_ghost.sql"],
+        model_paths=["models"],
+        analysis_paths=["models_analysis"],
+    )
+    assert "models_analysis/stg_ghost.sql" in view.files
+    with pytest.raises(
+        RequestError, match="no model named 'stg_ghost' found under models"
+    ):
+        model_file(view, "stg_ghost")
+
+
+def test_model_file_takes_the_model_over_an_analysis_of_the_same_name(tmp_path: Path):
+    view = _layout(
+        tmp_path,
+        ["models/stg_one.sql", "models_analysis/stg_one.sql"],
+        model_paths=["models"],
+        analysis_paths=["models_analysis"],
+    )
+    assert model_file(view, "stg_one") == "models/stg_one.sql"
+
+
+def test_model_file_refuses_a_name_two_model_files_share(tmp_path: Path):
+    """dbt refuses two models of one name at parse, so naming both is the answer
+    rather than picking whichever the scan reached first."""
+
+    view = _layout(
+        tmp_path,
+        ["lib/stg_one.sql", "models/staging/stg_one.sql"],
+        model_paths=["lib", "models"],
+    )
+    with pytest.raises(RequestError, match="ambiguous") as caught:
+        model_file(view, "stg_one")
+    assert "lib/stg_one.sql" in str(caught.value)
+    assert "models/staging/stg_one.sql" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "path", ["snapshots/stg_one.sql", "models/stg_one.yml", "macros/stg_one.sql"]
+)
+def test_model_file_ignores_a_file_of_that_name_that_is_not_a_model(
+    tmp_path: Path, path: str
+):
+    view = _layout(tmp_path, [path], model_paths=["models"])
+    assert path in view.files
+    with pytest.raises(RequestError, match="no model named 'stg_one'"):
+        model_file(view, "stg_one")
+
+
+def test_model_file_matches_the_name_with_its_case(tmp_path: Path):
+    """`ref()` matches case, so a model is found by the name its file spells."""
+
+    view = _layout(tmp_path, ["models/Stg_One.sql"], model_paths=["models"])
+    assert model_file(view, "Stg_One") == "models/Stg_One.sql"
+    with pytest.raises(RequestError):
+        model_file(view, "stg_one")

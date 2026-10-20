@@ -22,10 +22,14 @@ import pytest
 pytest.importorskip("sqlglot")
 
 from exmergo_dex_core.config import DexConfig
+from exmergo_dex_core.dbt_project import load
 from exmergo_dex_core.engine import DexEngine
+from exmergo_dex_core.envelope import Reason, reason_for
+from exmergo_dex_core.errors import RequestError
 from exmergo_dex_core.storage import FilesystemStore
 from exmergo_dex_core.transform import commands as transform_commands
 from exmergo_dex_core.transform import mutation
+from exmergo_dex_core.transform.test_scaffold import unit_test_scaffold_edits
 
 MODEL_SQL = """select
     o.id,
@@ -298,6 +302,103 @@ def test_a_model_dex_will_not_mutate_is_refused_before_any_test_runs(
     assert not [c for c in calls if c["argv"][1] == "test"]
 
 
+def _write_project_yml(project: Path, **paths: list[str]) -> None:
+    lines = ["name: dex_test", 'version: "1.0.0"', "profile: dex_test"]
+    lines += [
+        f"{key.replace('_', '-')}: {json.dumps(value)}" for key, value in paths.items()
+    ]
+    (project / "dbt_project.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def ghost(project: Path) -> Path:
+    """An analysis named after a model that does not exist.
+
+    `models_analysis` begins with the characters `models` and is not under it,
+    so only a lookup that compares whole path segments keeps it out.
+    """
+
+    _write_project_yml(
+        project, model_paths=["models"], analysis_paths=["models_analysis"]
+    )
+    (project / "models_analysis").mkdir()
+    (project / "models_analysis" / "stg_ghost.sql").write_text(
+        "select 1 as id\n", encoding="utf-8"
+    )
+    return project
+
+
+def test_an_analysis_beside_the_model_path_is_refused_before_dbt_runs(
+    ghost, recorded_dbt, monkeypatch
+):
+    """Taken for the model, the analysis got the ephemeral header and a `dbt
+    compile`, and the refusal came from dbt's answer instead of from the parse,
+    where a name that is not a model costs nothing to ask about."""
+
+    calls, _plan = recorded_dbt
+    _skip_dev_target_check(monkeypatch)
+
+    with pytest.raises(RequestError, match="no model named 'stg_ghost'"):
+        transform_commands.test_mutations(_engine(ghost), "stg_ghost")
+    assert calls == []
+
+
+def test_scaffold_and_mutate_refuse_a_name_that_is_not_a_model_the_same_way(
+    ghost, recorded_dbt, monkeypatch
+):
+    """The two halves of `transform test` read one lookup, so they cannot
+    disagree about which file is a model: same refusal, same envelope reason."""
+
+    _skip_dev_target_check(monkeypatch)
+
+    with pytest.raises(RequestError) as scaffold:
+        unit_test_scaffold_edits(load(ghost), None, "stg_ghost")
+    with pytest.raises(RequestError) as mutate:
+        transform_commands.test_mutations(_engine(ghost), "stg_ghost")
+
+    assert str(mutate.value) == str(scaffold.value)
+    assert reason_for(mutate.value) is Reason.REQUEST
+
+
+@pytest.mark.parametrize("model_paths", [["src/models"], ["./src/models"]])
+def test_a_model_under_a_nested_model_path_is_the_file_that_gets_mutated(
+    project, recorded_dbt, monkeypatch, model_paths
+):
+    """`src/models` is one configured entry and two path segments. Compared as a
+    string built with the platform's separator, it never matched the POSIX keys
+    `load()` builds on Windows, so `--mutate` refused a model `--scaffold` found.
+    Asserted on the file the ephemeral header lands in, because a run that
+    patched any other file would still complete against the faked manifest."""
+
+    calls, plan = recorded_dbt
+    plan["manifest"] = _manifest()
+    plan["results"] = _results()
+    _skip_dev_target_check(monkeypatch)
+    _write_project_yml(project, model_paths=model_paths)
+    (project / "src").mkdir()
+    shutil.move(project / "models", project / "src" / "models")
+
+    shadow_run = importlib.import_module("exmergo_dex_core.transform.build").ShadowRun
+    patched: list[str] = []
+    original_write = shadow_run.write
+
+    def record(self, rel_path, text):
+        if mutation.EPHEMERAL_HEADER in text:
+            patched.append(rel_path)
+        return original_write(self, rel_path, text)
+
+    monkeypatch.setattr(shadow_run, "write", record)
+
+    result = transform_commands.test_mutations(_engine(project), "fct")
+
+    # The first header is the one the lookup placed; every write after it is a
+    # mutant or the baseline twin, filed beside the model it found.
+    assert patched[0] == "src/models/staging/fct.sql"
+    assert {path.rsplit("/", 1)[0] for path in patched} == {"src/models/staging"}
+    assert result.model == "fct"
+    assert any(c["argv"][1] == "test" for c in calls)
+
+
 def test_a_cap_above_the_ceiling_is_refused_without_touching_dbt(project, recorded_dbt):
     calls, _ = recorded_dbt
     with pytest.raises(ValueError, match="above the engine ceiling"):
@@ -511,8 +612,13 @@ def test_a_name_the_project_already_uses_turns_the_check_off(
         (False, "free_local", "duckdb", "--no-check-equivalence"),
         (None, "bytes_scanned", "bigquery", "opt-in: re-run with --check-equivalence"),
         (None, "compute_time", "snowflake", "opt-in"),
+        (None, "db_load", "postgres", "opt-in: re-run with --check-equivalence"),
         (True, "compute_time", "redshift", "no verified whole-row comparison"),
-        (True, "db_load", "postgres", "no verified whole-row comparison"),
+        (True, "compute_time", "databricks", "no verified whole-row comparison"),
+        (True, "db_load", "trino", "no verified whole-row comparison"),
+        # Unasked on a connector with no comparison: the reason is the missing
+        # comparison, never an invitation to a flag that cannot help.
+        (None, "db_load", "trino", "no verified whole-row comparison"),
     ],
 )
 def test_the_check_is_off_with_a_reason_rather_than_absent(
@@ -617,6 +723,102 @@ def test_the_budget_can_stop_the_batch_before_a_survivors_comparison(project):
     assert "budget ran out" in first["equivalence"]["reason"]
     assert result["counts"]["not_run"] == len(batch.mutants) - 1
     assert any("budget covered 1 of" in w for w in warnings)
+
+
+class _UptimeStandIn:
+    """Owes a fixed amount beyond the batch's statements until it settles, the
+    way the Snowflake model owes a resume minimum and an idle tail."""
+
+    def __init__(self, owed: float):
+        self.owed = owed
+        self.observed: list[tuple[float, float | None]] = []
+        self.settled = 0
+
+    def pending(self) -> float:
+        return 0.0 if self.settled else self.owed
+
+    def quote(self) -> float:
+        return self.pending()
+
+    def observe(self, seconds: float, *, span: float | None = None) -> None:
+        self.observed.append((seconds, span))
+
+    def settle(self) -> tuple[float, list[str]]:
+        self.settled += 1
+        if self.settled > 1:
+            return 0.0, []
+        return self.owed, ["the warehouse idled after the batch"]
+
+
+def test_the_stop_rule_leaves_room_for_what_the_warehouse_bills_beyond_the_runs(
+    project,
+):
+    """A warehouse that bills uptime owes its idle tail once the last run is
+    done. A batch that spends the whole budget on runs leaves the tail over it,
+    so the stop rule counts what is still owed before admitting the next run,
+    and the batch settles that once, as one more row of its own."""
+
+    import json
+
+    from exmergo_dex_core.envelope import Paradigm
+    from exmergo_dex_core.transform.commands import _run_mutants
+
+    batch = mutation.enumerate_mutants(
+        mutation.prepare("select a from t where a > 1 and b > 2", dialect="duckdb")
+    )
+    assert len(batch.mutants) > 2
+    shadow = _CopyStandIn()
+    prices = {"(baseline)": 10.0, **{m.id: 10.0 for m in batch.mutants}}
+    uptime = _UptimeStandIn(owed=75.0)
+    store = FilesystemStore(project.parent)
+    result = _run_mutants(
+        shadow,
+        "models/fct.sql",
+        batch,
+        model="fct",
+        paradigm=Paradigm.COMPUTE_TIME,
+        connector="snowflake",
+        store=store,
+        ceiling=100.0,
+        estimate=None,
+        mutation_mod=mutation,
+        prices=prices,
+        uptime=uptime,
+    )
+    _runs, spend, warnings = result.pop("_meta")
+
+    # The baseline, then one mutant: 10 + 75 + 10 fits, 20 + 75 + 10 does not.
+    assert shadow.invoked == ["test", "test"]
+    assert result["counts"]["not_run"] == len(batch.mutants) - 1
+    assert uptime.observed == [(10.0, None), (10.0, None)]
+    assert uptime.settled == 1
+    assert spend["seconds_billed"] == pytest.approx(95.0)
+    assert "the warehouse idled after the batch" in warnings
+    ledger = (project.parent / ".dex" / "spend.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in ledger]
+    assert [r["billed_seconds"] for r in rows] == [10.0, 10.0, 75.0]
+    assert {r["command"] for r in rows} == {"transform test"}
+    assert all(r["estimate"] is None for r in rows)
+
+
+def test_the_uptime_quote_is_a_line_of_its_own_and_never_a_run_price():
+    from exmergo_dex_core.transform.build import UPTIME_LINE
+    from exmergo_dex_core.transform.commands import _price_mutations
+
+    class _Quoting(_TextPricedAdapter):
+        def __init__(self):
+            self.warehouse_uptime = _UptimeStandIn(owed=60.0)
+
+    adapter = _Quoting()
+    batch = mutation.enumerate_mutants(
+        mutation.prepare("select a from t where a > 1 and b > 2", dialect="duckdb")
+    )
+    estimate, per_table, prices, _notes = _price_mutations(
+        adapter, _PricingCopy(None), "models/fct.sql", batch, {"name": "fct"}, mutation
+    )
+    assert per_table[UPTIME_LINE] == 60.0
+    assert UPTIME_LINE not in prices
+    assert estimate == pytest.approx(sum(per_table.values()))
 
 
 class _TextPricedAdapter:
@@ -1115,3 +1317,137 @@ def test_the_days_total_excludes_the_reservation_the_command_is_still_holding():
     assert gate.settled, "the reservation has to be released before the read"
     assert refreshed["session_spent_today"] == 6_000.0
     assert refreshed["bytes_billed"] == 6_000.0, "what the runs billed is unchanged"
+
+
+class _TranslatingAdapter(_TextPricedAdapter):
+    """Stand-in compute-time adapter that translates settled seconds."""
+
+    def __init__(self, translate_fn, *, dialect: str = "snowflake", uptime=None):
+        from exmergo_dex_core.envelope import Paradigm
+        from exmergo_dex_core.guards.cost_guard import CostGate
+
+        self.dialect = dialect
+        self.paradigm = Paradigm.COMPUTE_TIME
+        self.cost_gate = CostGate(
+            paradigm=Paradigm.COMPUTE_TIME,
+            ceiling=10_000,
+            session_ceiling=None,
+            session_spent=0.0,
+            confirmed=True,
+            connector=dialect,
+        )
+        self.warehouse_uptime = uptime
+        self.translated_Args: list[float] = []
+        self._translate_fn = translate_fn
+
+    def compute_spend_translation(self, seconds: float) -> dict[str, float]:
+        self.translated_Args.append(seconds)
+        return self._translate_fn(seconds)
+
+
+def test_snowflake_mutation_spend_reports_credits_billed_including_uptime(
+    project, recorded_dbt, monkeypatch
+):
+    """On Snowflake the batch translates its total settled `seconds_billed`
+    (runs plus settled warehouse uptime) once into `credits_billed`."""
+
+    calls, plan = recorded_dbt
+    plan["manifest"] = _manifest()
+    plan["results"] = [
+        {
+            "unique_id": "test.p.not_null_fct_a.abc123",
+            "status": "pass",
+            "execution_time": 15.0,
+        }
+    ]
+    _skip_dev_target_check(monkeypatch)
+
+    uptime = _UptimeStandIn(owed=60.0)
+    adapter = _TranslatingAdapter(
+        lambda seconds: {
+            "credits_billed": round(seconds / 3600.0, 6),
+            "usd_billed": round((seconds / 3600.0) * 3.0, 4),
+        },
+        dialect="snowflake",
+        uptime=uptime,
+    )
+    monkeypatch.setattr(DexEngine, "_adapter", lambda self, command=None, **kw: adapter)
+
+    engine = _engine(project, connector="snowflake", confirmed=True, budget=600.0)
+    result = transform_commands.test_mutations(engine, "fct")
+
+    test_runs = sum(1 for c in calls if c["argv"][1] == "test")
+    expected_seconds = test_runs * 15.0 + 60.0
+    assert result.spend["seconds_billed"] == pytest.approx(expected_seconds)
+    assert result.spend["credits_billed"] == pytest.approx(
+        round(expected_seconds / 3600.0, 6)
+    )
+    assert result.spend["usd_billed"] == pytest.approx(
+        round((expected_seconds / 3600.0) * 3.0, 4)
+    )
+    # Called once at 0.0 during pricing, then once after runs + uptime settle.
+    assert adapter.translated_Args == [0.0, pytest.approx(expected_seconds)]
+
+
+def test_clickhouse_cloud_mutation_proves_capacity_before_runs_and_translates_spend(
+    project, recorded_dbt, monkeypatch
+):
+    """ClickHouse Cloud proves live capacity at 0.0 seconds while pricing, before
+    any `dbt test` runs, and reports `compute_unit_hours_billed` on settlement."""
+
+    calls, plan = recorded_dbt
+    plan["manifest"] = _manifest()
+    plan["results"] = [
+        {
+            "unique_id": "test.p.not_null_fct_a.abc123",
+            "status": "pass",
+            "execution_time": 18.0,
+        }
+    ]
+    _skip_dev_target_check(monkeypatch)
+
+    test_calls_at_translate: list[int] = []
+
+    def translate(seconds: float) -> dict[str, float]:
+        test_calls_at_translate.append(sum(1 for c in calls if c["argv"][1] == "test"))
+        return {"compute_unit_hours_billed": round(seconds * 2.0 / 3600.0, 6)}
+
+    adapter = _TranslatingAdapter(translate, dialect="clickhouse")
+    monkeypatch.setattr(DexEngine, "_adapter", lambda self, command=None, **kw: adapter)
+
+    engine = _engine(project, connector="clickhouse", confirmed=True, budget=600.0)
+    result = transform_commands.test_mutations(engine, "fct")
+
+    total_test_runs = sum(1 for c in calls if c["argv"][1] == "test")
+    assert total_test_runs >= 2
+    # First translation happened before any `dbt test` ran; second after all ran.
+    assert test_calls_at_translate == [0, total_test_runs]
+    expected_seconds = total_test_runs * 18.0
+    assert result.spend["seconds_billed"] == pytest.approx(expected_seconds)
+    assert result.spend["compute_unit_hours_billed"] == pytest.approx(
+        round(expected_seconds * 2.0 / 3600.0, 6)
+    )
+
+
+def test_clickhouse_cloud_mutation_fails_before_first_run_when_capacity_unproved(
+    project, recorded_dbt, monkeypatch
+):
+    """If proving live capacity fails during `_price_mutations`, no `dbt test`
+    invocation may run."""
+
+    calls, plan = recorded_dbt
+    plan["manifest"] = _manifest()
+    plan["results"] = _results()
+    _skip_dev_target_check(monkeypatch)
+
+    def missing_capacity(_seconds: float) -> dict[str, float]:
+        raise RuntimeError("ClickHouse Cloud capacity could not be proved")
+
+    adapter = _TranslatingAdapter(missing_capacity, dialect="clickhouse")
+    monkeypatch.setattr(DexEngine, "_adapter", lambda self, command=None, **kw: adapter)
+
+    engine = _engine(project, connector="clickhouse", confirmed=True, budget=600.0)
+    with pytest.raises(RuntimeError, match="capacity could not be proved"):
+        transform_commands.test_mutations(engine, "fct")
+
+    assert not [c for c in calls if c["argv"][1] == "test"]

@@ -1,0 +1,265 @@
+name: Docs site
+
+# Builds and validates the Dex section of the documentation site, and on a
+# release publishes it.
+#
+# docs.exmergo.com is served by Mintlify from exmergo/docs, which owns the site's
+# settings and its home page. Each product publishes one folder of it, and this
+# repository's folder is dex/, served at docs.exmergo.com/dex.
+# scripts/build_docs_site.py builds that folder from docs/, references/, the CLI
+# parser and CHANGELOG.md, including the menu (dex/navigation.json) and redirects
+# (dex/redirects.json) that exmergo/docs reads with `$ref`. `main` never holds
+# the built pages: they are transformed copies of references/, and committing
+# them would double every reference diff and break the documentation policy
+# tests, which allow each policy statement in exactly one file.
+#
+# When it runs:
+#   - on a pull request or a push to main touching the sources: build the
+#     section into a copy of exmergo/docs and validate the whole site, so a
+#     broken link, an MDX parse error or a menu the shared site cannot read
+#     fails review.
+#   - by dispatch (workflow_dispatch): build, validate, and commit dex/ to
+#     exmergo/docs. release.yml dispatches it for each new final release tag,
+#     after PyPI publish, so docs never go live for a release that failed to
+#     publish and always describe what `pip install` gives you. By hand it
+#     publishes the newest final release tag, or any ref with allow_untagged
+#     (bootstrap or rollback only).
+#
+# There is no workflow_call entry: a reusable-workflow call does not receive the
+# docs-site environment's secrets, which the deploy needs, so release.yml starts
+# this workflow as a run of its own instead.
+#
+# The deploy writes dex/ in exmergo/docs and nothing else, as an ordinary commit
+# on its main branch: another product publishing at the same time cannot be
+# overwritten, and a push that loses that race rebases and retries, which cannot
+# conflict because no two products share a folder.
+#
+# One-time setup (a maintainer):
+#   - An organization GitHub App (the docs publisher) installed on exmergo/docs
+#     only, with Contents: read and write. Its client ID is the
+#     DOCS_APP_CLIENT_ID variable and its private key the DOCS_APP_PRIVATE_KEY
+#     secret of this repository's `docs-site` environment, whose deployment
+#     rule allows `main` and `v*` tags. The organization disables deploy keys.
+#   - Never edit dex/ in exmergo/docs: every release replaces it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        type: string
+        default: ""
+        description: "Tag to publish; empty means the newest final release tag"
+      allow_untagged:
+        type: boolean
+        default: false
+        description: "Publish a ref that is not the newest final tag (bootstrap or rollback only)"
+  pull_request:
+    branches: [main]
+    paths: &sources
+      - docs/**
+      - references/**
+      - CHANGELOG.md
+      - scripts/build_docs_site.py
+      - scripts/check_no_em_dashes.py
+      - packages/dex-core/src/exmergo_dex_core/cli.py
+      - packages/dex-core/src/exmergo_dex_core/config.py
+      - .github/workflows/docs-site.yml
+  push:
+    branches: [main]
+    paths: *sources
+
+permissions:
+  contents: read
+
+env:
+  # The single source of the Mintlify CLI version. Dependabot does not track npm
+  # here, so moving it is a deliberate edit, made on this job's evidence.
+  MINT_VERSION: "4.2.994"
+  DO_NOT_TRACK: "1"
+  MINTLIFY_TELEMETRY_DISABLED: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: docs-site-build-${{ github.event.pull_request.number || inputs.ref || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    outputs:
+      ref: ${{ steps.decide.outputs.ref }}
+      sha: ${{ steps.decide.outputs.sha }}
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Every tag, so "the newest final release" can be computed.
+          fetch-depth: 0
+      # Inputs arrive through env and are never interpolated into the script.
+      - name: Decide what to build and whether it ships
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          CALL_REF: ${{ inputs.ref }}
+          ALLOW_UNTAGGED: ${{ inputs.allow_untagged }}
+        run: |
+          set -euo pipefail
+          newest=$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          deploy=false
+          release=""
+          ref=""
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            ref="${CALL_REF:-$newest}"
+            if [ "$ref" = "$newest" ]; then
+              deploy=true
+              release="$ref"
+            elif [ "$ALLOW_UNTAGGED" = "true" ]; then
+              deploy=true
+              echo "::warning::Publishing ${ref}, which is not the newest final release (${newest})."
+            else
+              echo "::error::${ref} is not the newest final release (${newest}). Set allow_untagged to publish it anyway."
+              exit 1
+            fi
+          fi
+          if [ -n "$ref" ]; then
+            git checkout --quiet --detach "$ref"
+          fi
+          if [ ! -f scripts/build_docs_site.py ]; then
+            echo "::error::${ref:-this ref} predates the docs site."
+            exit 1
+          fi
+          {
+            echo "ref=${ref:-$GITHUB_REF_NAME}"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "deploy=${deploy}"
+            echo "release=${release}"
+          } >> "$GITHUB_OUTPUT"
+      # The shared site as it stands, so the section is validated where it will
+      # live: inside exmergo/docs's settings, home page and product switcher.
+      # Public, so it needs no credential; never written from this job.
+      - name: Check out the shared site
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: exmergo/docs
+          ref: main
+          path: exmergo-docs
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - name: Build the Dex section into the shared site
+        env:
+          RELEASE: ${{ steps.decide.outputs.release }}
+        run: |
+          uv run --project packages/dex-core python scripts/build_docs_site.py \
+            --out "$RUNNER_TEMP/site" --site exmergo-docs --require-help \
+            ${RELEASE:+--release "$RELEASE"}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      # Installed outside the checkout, like the Mermaid canary in ci.yml, so no
+      # dependency tree lands in the working copy of a Python repo.
+      - name: Install the Mintlify CLI outside the repo
+        run: npm install --prefix "$RUNNER_TEMP/mint" --no-audit --no-fund --silent "mint@${MINT_VERSION}"
+      # Both commands exit non-zero on a finding. --check-anchors matters: the
+      # build checks anchors against GitHub's heading IDs, Mintlify derives some
+      # differently, and a link has to work on both.
+      - name: Validate with Mintlify
+        working-directory: ${{ runner.temp }}/site
+        run: |
+          mint="$RUNNER_TEMP/mint/node_modules/.bin/mint"
+          "$mint" --version
+          "$mint" validate
+          "$mint" broken-links --check-anchors --check-redirects --check-snippets
+      # Colour contrast of the docs.json palette in both modes, and alt text on
+      # every image. Exits non-zero on a failure; a "consider AAA" suggestion
+      # is a warning and passes.
+      - name: Accessibility
+        working-directory: ${{ runner.temp }}/site
+        run: '"$RUNNER_TEMP/mint/node_modules/.bin/mint" a11y'
+      # The third-party CLI only ever runs in this read-only job; the deploy job
+      # publishes exactly the section validated here.
+      - name: Keep the validated section for the deploy job
+        if: steps.decide.outputs.deploy == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dex-section
+          path: ${{ runner.temp }}/site/dex
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # This repository is only read. The write is to exmergo/docs, with the app
+    # credentials held by the docs-site environment.
+    permissions:
+      contents: read
+    concurrency:
+      group: docs-site-deploy
+      cancel-in-progress: false
+    environment:
+      name: docs-site
+      url: https://docs.exmergo.com/dex
+    steps:
+      # A token minted per run by the organization's docs publisher app, valid
+      # for about an hour and narrowed here to one repository and one
+      # permission, whatever else the app is ever granted. The organization
+      # disables deploy keys, which is why this is not one.
+      - name: Get a token that can write exmergo/docs
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.DOCS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DOCS_APP_PRIVATE_KEY }}
+          owner: exmergo
+          repositories: docs
+          permission-contents: write
+      - name: Check out the shared site with write access
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: exmergo/docs
+          ref: main
+          path: exmergo-docs
+          token: ${{ steps.token.outputs.token }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dex-section
+          path: ${{ runner.temp }}/dex
+      # Replaces dex/ and nothing else, as an ordinary commit. A push rejected
+      # because another product published in between rebases onto it and
+      # retries; that cannot conflict, since no two products share a folder,
+      # and a conflict therefore means someone edited dex/ by hand, which should
+      # stop the deploy and be looked at.
+      - name: Commit the Dex section to exmergo/docs
+        working-directory: exmergo-docs
+        env:
+          REF: ${{ needs.build.outputs.ref }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Set for the checkout rather than per command: the retry below
+          # rebases, which rewrites the commit and needs a committer too.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -rf dex
+          cp -R "$RUNNER_TEMP/dex" dex
+          git add --all dex
+          if git diff --cached --quiet; then
+            echo "dex/ already holds this build; nothing to publish"
+            exit 0
+          fi
+          git commit --quiet -m "Dex docs for ${REF}" -m "Built from exmergo/dex@${SHA}"
+          for attempt in 1 2 3; do
+            if git push --quiet origin HEAD:main; then
+              echo "Published dex/ for ${REF}."
+              exit 0
+            fi
+            echo "Push rejected (attempt ${attempt}); rebasing onto the latest main."
+            git pull --quiet --rebase origin main
+          done
+          echo "::error::Could not publish dex/ after three attempts."
+          exit 1

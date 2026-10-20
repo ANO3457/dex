@@ -1,15 +1,18 @@
 {
   "name": "dex",
+  "displayName": "Exmergo Dex",
   "description": "Analytics engineering for Claude Code and any agent: data warehouse exploration, dbt transformation and semantic modeling, and schema-drift maintenance on dbt.",
-  "version": "1.12.7",
+  "version": "1.15.1",
   "author": {
     "name": "Exmergo, Inc.",
     "email": "support@exmergo.com",
     "url": "https://www.exmergo.com"
   },
-  "homepage": "https://www.exmergo.com/dex",
+  "homepage": "https://docs.exmergo.com/dex",
   "repository": "https://github.com/exmergo/dex",
   "license": "Apache-2.0",
+  "privacyPolicyUrl": "https://www.exmergo.com/privacy/dex",
+  "supportUrl": "https://github.com/exmergo/dex/issues",
   "keywords": [
     "analytics-engineering",
     "dbt",
@@ -27,6 +30,7 @@
     "data-contracts",
     "redshift",
     "postgres",
-    "clickhouse"
+    "clickhouse",
+    "trino"
   ]
 }

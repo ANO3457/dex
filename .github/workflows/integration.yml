@@ -5,6 +5,11 @@ name: Integration
 # job is the documented exception: a service-scoped read-only API key and two
 # database credentials live only in a main-protected environment and rotate
 # through scripts/setup_clickhouse_cloud_ci.sh.
+# Every stored credential reaches only what reads it, never a whole job: a key
+# is written to an owner-only file by one step and read by the one command that
+# needs it (scripts/clickhouse_cloud/secrets.sh for the Cloud API key), and a
+# password rides on the env of the single step whose tests use it. Anything
+# else a job runs (uv, pytest's plugins, dbt, the engine) never inherits them.
 # Deliberately NOT a merge or release gate: ci.yml stays deterministic and
 # fork-runnable; this workflow answers "does the connector still work against
 # the real service" on main and on a schedule. Each suite reads shared/public
@@ -45,6 +50,14 @@ name: Integration
 #   ClickHouse Cloud job uses the protected clickhouse-cloud-integration
 #   environment, refuses on the UTC-day CHC threshold before any SQL connection
 #   wakes the service, and shares the same parameterized data fixture.
+#   Trino: no setup for the exhaustive suite. It runs against a container pair
+#   started by scripts/setup_trino_dev.sh (Trino plus the Postgres database its
+#   keyless Iceberg catalog keeps table pointers in): free, keyless, and
+#   fork-runnable, Iceberg included. A separate narrow trino_iceberg job reads
+#   the Glue and S3 Iceberg catalog under the protected
+#   trino-iceberg-integration environment, through an IAM role that trusts only
+#   that environment's OIDC tokens and may write only the dbt dev database
+#   (scripts/setup_trino_iceberg_ci.sh; a budget alert is the backstop).
 on:
   push:
     branches: [main]
@@ -52,6 +65,13 @@ on:
       - "packages/dex-core/**"
       - "scripts/clickhouse*"
       - "scripts/clickhouse_cloud/**"
+      - "scripts/setup_*_dev.sh"
+      - "scripts/setup_clickhouse_cloud_ci.sh"
+      - "scripts/postgres_seed.sql"
+      - "scripts/check_container_hardening.sh"
+      - "scripts/trino*"
+      - "scripts/trino/**"
+      - "scripts/setup_trino_iceberg_ci.sh"
       - ".github/workflows/integration.yml"
   schedule:
     - cron: "17 5 * * 1"
@@ -97,11 +117,13 @@ jobs:
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_INTEGRATION_SA }}
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-      - name: Sync (bigquery + duckdb + dev extras)
-        run: uv sync --extra bigquery --extra duckdb --extra dev
+      # [slayer] runs the governed SLayer query smoke (test_slayer_query.py),
+      # which skips itself without it.
+      - name: Sync (bigquery + duckdb + slayer + dev extras)
+        run: uv sync --extra bigquery --extra duckdb --extra slayer --extra dev
       - name: Live BigQuery integration suite
         run: uv run pytest tests/integration -q -m bigquery
 
@@ -142,11 +164,13 @@ jobs:
             const token = await core.getIDToken('snowflakecomputing.com')
             core.setSecret(token)
             core.exportVariable('SNOWFLAKE_TOKEN', token)
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-      - name: Sync (snowflake + duckdb + dev extras)
-        run: uv sync --extra snowflake --extra duckdb --extra dev
+      # [slayer] runs the governed SLayer query smoke (test_slayer_query.py),
+      # which skips itself without it.
+      - name: Sync (snowflake + duckdb + slayer + dev extras)
+        run: uv sync --extra snowflake --extra duckdb --extra slayer --extra dev
       # Keyless: connect, explore, and the transform tests' own skip guard all
       # run on the workload identity above. The transform tests skip themselves
       # here (dbt cannot authenticate that way) and run in the next step.
@@ -159,31 +183,40 @@ jobs:
       # blast radius is unchanged (read the samples, write the transient
       # scratch database) and DEX_CI itself stays keyless. The secret is
       # readable only by this environment, whose deployments are pinned to
-      # main, so a pull request cannot reach it. Emptying SNOWFLAKE_TOKEN and
-      # the WIF provider is what makes discovery pick the key pair rather than
-      # the token the job already minted.
+      # main, so a pull request cannot reach it.
+      # The PEM is materialized by a step of its own so the step that runs
+      # pytest never holds it: a child can read its parent's initial
+      # environment from /proc, so unsetting it for the child alone would not
+      # be enough. The test step gets only the file's path, and the file is
+      # owner-only because dex refuses a key file other accounts can read.
+      - name: Materialize the dbt key pair for the transform suite
+        env:
+          SNOWFLAKE_DBT_USER: ${{ vars.DEX_TEST_SNOWFLAKE_DBT_USER }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.DEX_TEST_SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          # Without these the suite reads Snowflake as "not configured" and
+          # skips itself green, which is the one failure mode the transform
+          # step exists to prevent. Refuse instead: the credential comes from
+          # the setup script, so a missing one means it has not been re-run.
+          if [ -z "$SNOWFLAKE_DBT_USER" ] || [ -z "$SNOWFLAKE_PRIVATE_KEY" ]; then
+            echo "::error::DEX_TEST_SNOWFLAKE_DBT_USER or DEX_TEST_SNOWFLAKE_PRIVATE_KEY is missing from the snowflake-integration environment; re-run scripts/setup_snowflake_ci.sh"
+            exit 1
+          fi
+          install -m 600 /dev/null "$RUNNER_TEMP/snowflake_ci_dbt_key.p8"
+          printf '%s' "$SNOWFLAKE_PRIVATE_KEY" > "$RUNNER_TEMP/snowflake_ci_dbt_key.p8"
+      # Emptying SNOWFLAKE_TOKEN and the WIF provider is what makes discovery
+      # pick the key pair rather than the token the job already minted.
       - name: Live Snowflake transform suite (dbt, key pair)
         env:
           SNOWFLAKE_USER: ${{ vars.DEX_TEST_SNOWFLAKE_DBT_USER }}
           SNOWFLAKE_AUTHENTICATOR: SNOWFLAKE_JWT
           SNOWFLAKE_WORKLOAD_IDENTITY_PROVIDER: ""
           SNOWFLAKE_TOKEN: ""
-          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.DEX_TEST_SNOWFLAKE_PRIVATE_KEY }}
-        run: |
-          # Without these the suite reads Snowflake as "not configured" and
-          # skips itself green, which is the one failure mode this step exists
-          # to prevent. Refuse instead: the credential comes from the setup
-          # script, so a missing one means it has not been re-run.
-          if [ -z "$SNOWFLAKE_USER" ] || [ -z "$SNOWFLAKE_PRIVATE_KEY" ]; then
-            echo "::error::DEX_TEST_SNOWFLAKE_DBT_USER or DEX_TEST_SNOWFLAKE_PRIVATE_KEY is missing from the snowflake-integration environment; re-run scripts/setup_snowflake_ci.sh"
-            exit 1
-          fi
-          key="${RUNNER_TEMP}/snowflake_ci_dbt_key.p8"
-          install -m 600 /dev/null "$key"
-          printf '%s' "$SNOWFLAKE_PRIVATE_KEY" > "$key"
-          trap 'rm -f "$key"' EXIT
-          SNOWFLAKE_PRIVATE_KEY_FILE="$key" \
-            uv run pytest tests/integration/test_snowflake_transform.py -q -m snowflake
+          SNOWFLAKE_PRIVATE_KEY_FILE: ${{ runner.temp }}/snowflake_ci_dbt_key.p8
+        run: uv run pytest tests/integration/test_snowflake_transform.py -q -m snowflake
+      - name: Remove the dbt key pair
+        if: always()
+        run: rm -f "$RUNNER_TEMP/snowflake_ci_dbt_key.p8"
 
   databricks:
     if: github.repository == 'exmergo/dex'
@@ -203,15 +236,22 @@ jobs:
         working-directory: packages/dex-core
     env:
       DATABRICKS_HOST: ${{ vars.DEX_TEST_DATABRICKS_HOST }}
+      # The exchanged token expires during longer suites. Explicitly select
+      # the SDK's renewable GitHub provider over its default PAT preference,
+      # including when dbt constructs Config(host=..., token=...).
+      DATABRICKS_AUTH_TYPE: github-oidc
+      DATABRICKS_CLIENT_ID: ${{ vars.DEX_TEST_DATABRICKS_CLIENT_ID }}
+      # setup_databricks_ci.sh pins the federation policy to this audience.
+      DATABRICKS_TOKEN_AUDIENCE: ${{ vars.DEX_TEST_DATABRICKS_HOST }}
       DEX_TEST_DATABRICKS_WAREHOUSE: ${{ vars.DEX_TEST_DATABRICKS_WAREHOUSE }}
       DEX_TEST_DATABRICKS_CATALOG: ${{ vars.DEX_TEST_DATABRICKS_CATALOG }}
       DEX_TEST_DATABRICKS_MAX_SECONDS: "60"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Exchange the GitHub OIDC token for a Databricks OAuth token through
-      # the service principal's federation policy, then hand it to the engine
-      # and dbt through the same DATABRICKS_TOKEN discovery path a PAT would
-      # use: no CI special-casing anywhere downstream.
+      # dbt needs a token to select its SDK-backed token branch instead of an
+      # interactive browser flow. Keep this bootstrap exchange; the explicit
+      # github-oidc auth type above makes both clients acquire fresh tokens
+      # through the SDK rather than keep sending this short-lived token.
       - name: Exchange GitHub OIDC token for a Databricks token
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
@@ -235,7 +275,7 @@ jobs:
             const token = (await response.json()).access_token
             core.setSecret(token)
             core.exportVariable('DATABRICKS_TOKEN', token)
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
       - name: Sync (databricks + duckdb + dev extras)
@@ -264,11 +304,6 @@ jobs:
       DEX_TEST_REDSHIFT_DATABASE: ${{ vars.DEX_TEST_REDSHIFT_DATABASE }}
       DEX_TEST_REDSHIFT_HOST: ${{ vars.DEX_TEST_REDSHIFT_HOST }}
       DEX_TEST_REDSHIFT_MAX_SECONDS: "60"
-      # The transform suite's password path only; the engine itself stays
-      # keyless (IAM temporary credentials through the assumed role). The
-      # secret is readable only by this environment, whose deployments are
-      # pinned to main, so a pull request cannot reach it.
-      DEX_TEST_REDSHIFT_DEV_PASSWORD: ${{ secrets.DEX_TEST_REDSHIFT_DEV_PASSWORD }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Assume the OIDC-trusted role, exporting AWS_* credentials into the
@@ -279,13 +314,32 @@ jobs:
         with:
           role-to-assume: ${{ vars.DEX_TEST_REDSHIFT_ROLE_ARN }}
           aws-region: ${{ vars.DEX_TEST_REDSHIFT_REGION }}
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-      - name: Sync (redshift + duckdb + dev extras)
-        run: uv sync --extra redshift --extra duckdb --extra dev
+      # [slayer] runs the governed SLayer query smoke (test_slayer_query.py),
+      # which skips itself without it.
+      - name: Sync (redshift + duckdb + slayer + dev extras)
+        run: uv sync --extra redshift --extra duckdb --extra slayer --extra dev
       - name: Live Redshift integration suite
-        run: uv run pytest tests/integration -q -m redshift
+        run: >-
+          uv run pytest tests/integration -q -m redshift
+          --ignore=tests/integration/test_redshift_transform.py
+      # The dbt_dev password is the transform suite's alone; the engine itself
+      # stays keyless (IAM temporary credentials through the assumed role). So
+      # it rides on this step and no other. The secret is readable only by this
+      # environment, whose deployments are pinned to main, so a pull request
+      # cannot reach it.
+      - name: Live Redshift transform suite (dbt, dbt_dev password)
+        env:
+          DEX_TEST_REDSHIFT_DEV_PASSWORD: ${{ secrets.DEX_TEST_REDSHIFT_DEV_PASSWORD }}
+        run: |
+          # Without it the transform tests skip themselves green; refuse.
+          if [ -z "$DEX_TEST_REDSHIFT_DEV_PASSWORD" ]; then
+            echo "::error::DEX_TEST_REDSHIFT_DEV_PASSWORD is missing from the redshift-integration environment; re-run scripts/setup_redshift_ci.sh"
+            exit 1
+          fi
+          uv run pytest tests/integration/test_redshift_transform.py -q -m redshift
 
   postgres:
     # No repository gate and no environment: the target is a job-local service
@@ -296,9 +350,16 @@ jobs:
     defaults:
       run:
         working-directory: packages/dex-core
+    # Same image digest as scripts/setup_postgres_dev.sh; bump both together.
+    # Hardened like that container, with one difference: the entrypoint starts
+    # as root here and needs SETUID and SETGID, the only capabilities added
+    # back, to drop to the postgres user (it ignores its own failed chmods, and
+    # the data directory the image ships is already postgres's). Once it has
+    # dropped, the server holds no capabilities at all. The first step below
+    # refuses the job if any of this is missing.
     services:
       postgres:
-        image: postgres:16
+        image: postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d # 16
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -308,11 +369,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+          --cap-drop ALL
+          --cap-add SETUID
+          --cap-add SETGID
+          --security-opt no-new-privileges:true
+          --pids-limit 256
+          --memory 1g
     env:
       DEX_TEST_PG_DSN: postgresql://dex_ro:dex_ro@localhost:5432/dex_dogfood
       DEX_TEST_PG_DEV_PASSWORD: dbt_dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Refuse an unhardened service container
+        working-directory: .
+        run: >-
+          scripts/check_container_hardening.sh "${{ job.services.postgres.id }}"
+          sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+          SETUID SETGID
       # The same seed the local dogfood container uses; psql ships on
       # ubuntu-latest runners.
       - name: Seed the service container
@@ -323,11 +396,11 @@ jobs:
             -c "CREATE DATABASE dex_dogfood"
           PGPASSWORD=postgres psql -h localhost -U postgres -d dex_dogfood \
             -v ON_ERROR_STOP=1 -f scripts/postgres_seed.sql
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-      - name: Sync (postgres + duckdb + dev extras)
-        run: uv sync --extra postgres --extra duckdb --extra dev
+      - name: Sync (postgres + duckdb + slayer + dev extras)
+        run: uv sync --extra postgres --extra duckdb --extra slayer --extra dev
       - name: Live Postgres integration suite
         run: uv run pytest tests/integration -q -m postgres
 
@@ -353,13 +426,94 @@ jobs:
       - name: Start and seed ClickHouse
         working-directory: .
         run: scripts/setup_clickhouse_dev.sh
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
       - name: Sync (clickhouse + duckdb + dev extras)
         run: uv sync --extra clickhouse --extra duckdb --extra dev
       - name: Live ClickHouse integration suite
         run: uv run pytest tests/integration -q -m clickhouse
+
+  trino:
+    # No repository gate and no environment: the targets are containers this
+    # job starts, so there is nothing to authenticate against and nothing a
+    # fork could spend. The Iceberg catalog is keyless too (Parquet on the
+    # Trino container's file system, table pointers in a Postgres sidecar), so
+    # this one job covers the lakehouse path as well.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: packages/dex-core
+    env:
+      DEX_TEST_TRINO_URL: http://dex_ro@127.0.0.1:8085
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Not a `services:` container, for the ClickHouse job's reason: the seed
+      # goes through the trino CLI inside the container, so the job needs a
+      # container it can `docker exec` by name, and the pair has to share a
+      # network. Calling the dogfood script keeps the seeding path single.
+      - name: Start and seed Trino
+        working-directory: .
+        run: scripts/setup_trino_dev.sh
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - name: Sync (trino + duckdb + dev extras)
+        run: uv sync --extra trino --extra duckdb --extra dev
+      - name: Live Trino integration suite
+        run: uv run pytest tests/integration -q -m trino
+
+  trino_iceberg:
+    # The narrow Glue and S3 suite. The same container pair as the job above,
+    # with the Glue catalog attached under a short-lived session from the OIDC
+    # role scripts/setup_trino_iceberg_ci.sh provisions: no key is stored, and
+    # the role can read the sources and write only the dbt dev database.
+    if: github.repository == 'exmergo/dex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Restricted to main by the environment's deployment branch policy, so a
+    # branch cannot assume the role.
+    environment: trino-iceberg-integration
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: packages/dex-core
+    env:
+      DEX_TEST_TRINO_URL: http://dex_ro@127.0.0.1:8085
+      DEX_TEST_TRINO_GLUE_SCHEMA: ${{ vars.DEX_TEST_TRINO_GLUE_SCHEMA }}
+    steps:
+      # Fails rather than skips: a missing variable means the environment was
+      # never provisioned, and a green skip would hide that.
+      - name: Require the provisioned environment
+        working-directory: .
+        env:
+          ROLE_ARN: ${{ vars.DEX_TEST_TRINO_ROLE_ARN }}
+          REGION: ${{ vars.DEX_TEST_TRINO_REGION }}
+        run: |
+          for name in ROLE_ARN REGION DEX_TEST_TRINO_GLUE_SCHEMA; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not set; run scripts/setup_trino_iceberg_ci.sh"
+              exit 1
+            fi
+          done
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.DEX_TEST_TRINO_ROLE_ARN }}
+          aws-region: ${{ vars.DEX_TEST_TRINO_REGION }}
+      - name: Start and seed Trino with the Glue catalog
+        working-directory: .
+        run: scripts/setup_trino_dev.sh --aws
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - name: Sync (trino + duckdb + dev extras)
+        run: uv sync --extra trino --extra duckdb --extra dev
+      - name: Live Trino Glue Iceberg suite
+        run: uv run pytest tests/integration -q -m trino_iceberg
 
   clickhouse_cloud:
     if: github.repository == 'exmergo/dex'
@@ -379,10 +533,10 @@ jobs:
       DEX_TEST_CH_CLOUD_COMPUTE_UNIT_PRICE_USD: ${{ vars.DEX_TEST_CH_CLOUD_COMPUTE_UNIT_PRICE_USD }}
       DEX_TEST_CH_CLOUD_MAX_SECONDS: ${{ vars.DEX_TEST_CH_CLOUD_MAX_SECONDS }}
       DEX_TEST_CH_CLOUD_MAX_DAILY_CHC: ${{ vars.DEX_TEST_CH_CLOUD_MAX_DAILY_CHC }}
-      DEX_TEST_CH_CLOUD_DSN: ${{ secrets.DEX_TEST_CH_CLOUD_DSN }}
-      DEX_TEST_CH_CLOUD_DEV_PASSWORD: ${{ secrets.DEX_TEST_CH_CLOUD_DEV_PASSWORD }}
-      DEX_TEST_CH_CLOUD_API_KEY: ${{ secrets.DEX_TEST_CH_CLOUD_API_KEY }}
-      DEX_TEST_CH_CLOUD_API_SECRET: ${{ secrets.DEX_TEST_CH_CLOUD_API_SECRET }}
+      # Where the scoped API key's two files live (scripts/clickhouse_cloud/
+      # secrets.sh reads them). tmpfs, so the bytes never reach the runner's
+      # disk. A path, not a secret: the values themselves are in no job env.
+      DEX_SECRETS_DIR: /dev/shm/dex-secrets
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require the protected Cloud configuration
@@ -392,11 +546,29 @@ jobs:
             DEX_TEST_CH_CLOUD_HOST DEX_TEST_CH_CLOUD_PORT \
             DEX_TEST_CH_CLOUD_DATABASE DEX_TEST_CH_CLOUD_DEV_DATABASE \
             DEX_TEST_CH_CLOUD_COMPUTE_UNIT_PRICE_USD \
-            DEX_TEST_CH_CLOUD_MAX_SECONDS DEX_TEST_CH_CLOUD_MAX_DAILY_CHC \
-            DEX_TEST_CH_CLOUD_DSN DEX_TEST_CH_CLOUD_DEV_PASSWORD \
-            DEX_TEST_CH_CLOUD_API_KEY DEX_TEST_CH_CLOUD_API_SECRET; do
+            DEX_TEST_CH_CLOUD_MAX_SECONDS DEX_TEST_CH_CLOUD_MAX_DAILY_CHC; do
             test -n "${!name}" || { echo "$name is missing" >&2; exit 1; }
           done
+      # The only step whose environment holds the Cloud API key. It writes the
+      # key and secret to owner-only files; from here on, preflight.sh hands
+      # them to its two clickhousectl calls and the Cloud test to its one, and
+      # nothing else in the job (uv, pytest, dbt, the engine) ever has them.
+      - name: Materialize the Cloud API key for the commands that read it
+        env:
+          API_KEY: ${{ secrets.DEX_TEST_CH_CLOUD_API_KEY }}
+          API_SECRET: ${{ secrets.DEX_TEST_CH_CLOUD_API_SECRET }}
+        run: |
+          if [ -z "$API_KEY" ] || [ -z "$API_SECRET" ]; then
+            echo "::error::DEX_TEST_CH_CLOUD_API_KEY or DEX_TEST_CH_CLOUD_API_SECRET is missing from the clickhouse-cloud-integration environment; re-run scripts/setup_clickhouse_cloud_ci.sh"
+            exit 1
+          fi
+          install -d -m 700 "$DEX_SECRETS_DIR"
+          (
+            umask 077
+            printf '%s' "$API_KEY" > "$DEX_SECRETS_DIR/clickhouse_api_key"
+            printf '%s' "$API_SECRET" > "$DEX_SECRETS_DIR/clickhouse_api_secret"
+          )
+          chmod 400 "$DEX_SECRETS_DIR/clickhouse_api_key" "$DEX_SECRETS_DIR/clickhouse_api_secret"
       - name: Install clickhousectl
         working-directory: .
         env:
@@ -420,14 +592,28 @@ jobs:
         id: preflight
         working-directory: .
         run: scripts/clickhouse_cloud/preflight.sh
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
       - name: Sync (clickhouse + duckdb + dev extras)
         run: uv sync --extra clickhouse --extra duckdb --extra dev
+      # The two database credentials are the suite's alone, so they ride on this
+      # step and no other.
       - name: Narrow ClickHouse Cloud integration suite
-        run: uv run pytest tests/integration/test_clickhouse_cloud.py -q --tb=line -m clickhouse_cloud
+        env:
+          DEX_TEST_CH_CLOUD_DSN: ${{ secrets.DEX_TEST_CH_CLOUD_DSN }}
+          DEX_TEST_CH_CLOUD_DEV_PASSWORD: ${{ secrets.DEX_TEST_CH_CLOUD_DEV_PASSWORD }}
+        run: |
+          # Without them the suite skips itself green; refuse instead.
+          if [ -z "$DEX_TEST_CH_CLOUD_DSN" ] || [ -z "$DEX_TEST_CH_CLOUD_DEV_PASSWORD" ]; then
+            echo "::error::DEX_TEST_CH_CLOUD_DSN or DEX_TEST_CH_CLOUD_DEV_PASSWORD is missing from the clickhouse-cloud-integration environment; re-run scripts/setup_clickhouse_cloud_ci.sh"
+            exit 1
+          fi
+          uv run pytest tests/integration/test_clickhouse_cloud.py -q --tb=line -m clickhouse_cloud
       - name: Provisional post-run usage report
         if: always() && steps.preflight.outcome != 'skipped'
         working-directory: .
         run: scripts/clickhouse_cloud/preflight.sh --report-only
+      - name: Remove the Cloud API key files
+        if: always()
+        run: rm -rf "$DEX_SECRETS_DIR"

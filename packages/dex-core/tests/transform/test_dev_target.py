@@ -192,6 +192,118 @@ def test_duckdb_path_drift_is_refused(dbt_project_dir: Path, tmp_path: Path):
     assert "duckdb.path: /elsewhere.duckdb" in str(exc.value)
 
 
+def test_env_var_in_duckdb_path_matching_resolves_and_passes(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    target_path = tmp_path / "dev.duckdb"
+    monkeypatch.setenv("THINGS_DUCKDB_PATH", str(target_path))
+    _write_profile(
+        dbt_project_dir,
+        "      type: duckdb\n      path: \"{{ env_var('THINGS_DUCKDB_PATH') }}\"\n",
+    )
+    config = DexConfig(
+        connector="duckdb",
+        duckdb=DuckDBTarget(path=str(target_path)),
+    )
+    warnings = dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    assert all("disagree" not in w for w in warnings)
+
+
+def test_env_var_in_duckdb_path_mismatch_refuses_naming_resolved_value(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("THINGS_DUCKDB_PATH", str(tmp_path / "other.duckdb"))
+    _write_profile(
+        dbt_project_dir,
+        "      type: duckdb\n      path: \"{{ env_var('THINGS_DUCKDB_PATH') }}\"\n",
+    )
+    config = DexConfig(
+        connector="duckdb",
+        duckdb=DuckDBTarget(path=str(tmp_path / "dev.duckdb")),
+    )
+    with pytest.raises(dev_target.DevTargetError) as exc:
+        dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    message = str(exc.value)
+    assert f"duckdb.path: {tmp_path / 'dev.duckdb'}" in message
+    assert f"profiles.yml dev.path: {tmp_path / 'other.duckdb'}" in message
+    assert "{{" not in message
+
+
+def test_env_var_with_default_in_snowflake_database(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    monkeypatch.delenv("DEV_DATABASE", raising=False)
+    _snowflake_profile(
+        dbt_project_dir, database="\"{{ env_var('DEV_DATABASE', 'DBT_DEV') }}\""
+    )
+    config = _snowflake_config(dev_database="DBT_DEV")
+    warnings = dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    assert all("disagree" not in w for w in warnings)
+
+    # When env var is explicitly set, it overrides the default:
+    monkeypatch.setenv("DEV_DATABASE", "OVERRIDDEN_DB")
+    config2 = _snowflake_config(dev_database="OVERRIDDEN_DB")
+    warnings2 = dev_target.check(dbt_project_dir, "dev", config2, tmp_path)
+    assert all("disagree" not in w for w in warnings2)
+
+
+def test_env_var_in_snowflake_database_mismatch_refuses_naming_resolved_value(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("DEV_DATABASE", "OTHER_DB")
+    _snowflake_profile(dbt_project_dir, database="\"{{ env_var('DEV_DATABASE') }}\"")
+    config = _snowflake_config(dev_database="DBT_DEV")
+    with pytest.raises(dev_target.DevTargetError) as exc:
+        dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    message = str(exc.value)
+    assert "snowflake.dev_database: DBT_DEV" in message
+    assert "profiles.yml dev.database: OTHER_DB" in message
+    assert "{{" not in message
+
+
+def test_unresolvable_template_in_profile_only_warns_and_does_not_refuse(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    monkeypatch.delenv("UNSET_DB_VAR", raising=False)
+    # Unset env_var with no default:
+    _snowflake_profile(dbt_project_dir, database="\"{{ env_var('UNSET_DB_VAR') }}\"")
+    config = _snowflake_config(dev_database="DBT_DEV")
+    warnings = dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    assert any("could not resolve" in w and "database" in w for w in warnings)
+
+    # Non-env_var Jinja expression:
+    _snowflake_profile(dbt_project_dir, database='"{{ custom_macro() }}"')
+    warnings2 = dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    assert any("could not resolve" in w and "database" in w for w in warnings2)
+
+
+def test_issue_577_reproduction_builds(tmp_path: Path, monkeypatch):
+    """The reproduction from #577: path templated through env_var builds cleanly
+    when the variable resolves to what config specifies."""
+    from exmergo_dex_core import DexEngine
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "dbt_project.yml").write_text(
+        'name: things\nversion: "1.0"\nprofile: things\n'
+    )
+    (repo / "models").mkdir()
+    (repo / "models" / "things.sql").write_text("select 1 as id\n")
+    (repo / "profiles.yml").write_text(
+        "things:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n"
+        "      path: \"{{ env_var('THINGS_DUCKDB_PATH') }}\"\n"
+    )
+    (repo / ".dex").mkdir()
+    target_db = repo / "dev.duckdb"
+    (repo / ".dex" / "config.yml").write_text(
+        f"connector: duckdb\nduckdb:\n  path: {target_db}\n"
+    )
+    monkeypatch.setenv("THINGS_DUCKDB_PATH", str(target_db))
+
+    engine = DexEngine.from_repo(repo)
+    engine.build()
+
+
 # --- existence: snowflake, through the fake ------------------------------------------
 
 
@@ -438,6 +550,7 @@ def test_a_databricks_dev_schema_the_principal_cannot_write_is_warned_about(
     which is exactly what Unity Catalog answered live.
     """
 
+    pytest.importorskip("databricks.sql")
     from fakes.databricks import FakeDatabricksTable
 
     fake, adapter, config = _databricks(
@@ -475,6 +588,7 @@ def test_a_databricks_dev_schema_grant_is_not_warned_about_without_a_matching_no
     a manifest proving no node resolves into dev_schema means the missing
     privilege on it is not this build's problem either (issue #110)."""
 
+    pytest.importorskip("databricks.sql")
     from fakes.databricks import FakeDatabricksTable
 
     fake, adapter, config = _databricks(
@@ -514,6 +628,7 @@ def test_a_granted_databricks_dev_schema_passes(
     """Grants, not just ownership: a principal explicitly granted what dbt needs
     must not be warned at."""
 
+    pytest.importorskip("databricks.sql")
     from fakes.databricks import FakeDatabricksTable
 
     fake, adapter, config = _databricks(
@@ -766,6 +881,7 @@ def _postgres(dbt_project_dir: Path, role, *, dev: str = "dbt_dev", profile_user
 def test_a_writable_postgres_dev_schema_passes(
     dbt_project_dir: Path, tmp_path: Path, monkeypatch
 ):
+    pytest.importorskip("psycopg")
     from fakes.postgres import FakeRole
 
     role = FakeRole(name="dbt_dev", schema_privileges={"dbt_dev": {"USAGE", "CREATE"}})
@@ -778,6 +894,7 @@ def test_a_writable_postgres_dev_schema_passes(
 def test_an_unwritable_postgres_dev_schema_refuses_with_the_grant(
     dbt_project_dir: Path, tmp_path: Path, monkeypatch
 ):
+    pytest.importorskip("psycopg")
     from fakes.postgres import FakeRole
 
     role = FakeRole(name="dbt_dev", schema_privileges={"dbt_dev": {"USAGE"}})
@@ -798,6 +915,7 @@ def test_an_absent_postgres_dev_schema_the_role_cannot_create_refuses(
     """dbt creates the schema, but only if the role may, so the privilege is what
     is checked. The first build otherwise dies on a bare permission error."""
 
+    pytest.importorskip("psycopg")
     from fakes.postgres import FakeRole
 
     role = FakeRole(name="dbt_dev", may_create_in_database=False)
@@ -818,6 +936,7 @@ def test_an_absent_postgres_dev_schema_is_not_refused_without_a_matching_node(
     that never resolves into dev_schema means neither its absence nor the
     role's privilege on it is this build's problem (issue #110)."""
 
+    pytest.importorskip("psycopg")
     from fakes.postgres import FakeRole
 
     role = FakeRole(name="dbt_dev", may_create_in_database=False)
@@ -844,6 +963,7 @@ def test_the_postgres_privilege_is_asked_of_the_profile_role(
     so the question has to be asked of the role the profile names. The refusal
     naming that role, and not the one dex connects as, is the proof it was."""
 
+    pytest.importorskip("psycopg")
     from fakes.postgres import FakeRole
 
     builder = FakeRole(name="ci_builder", schema_privileges={"dbt_dev": {"USAGE"}})
@@ -935,6 +1055,7 @@ def test_a_redshift_password_user_literally_named_iam_still_gets_the_preflight(
     """The IAM skip keys on the profile's method, not on the user's name, so a
     real database user that happens to be called iam keeps its privilege check."""
 
+    pytest.importorskip("redshift_connector")
     from fakes.redshift import FakeUser
 
     user = FakeUser(name="iam", schema_privileges={"dbt_dev": {"USAGE"}})
@@ -952,6 +1073,7 @@ def test_a_redshift_password_user_literally_named_iam_still_gets_the_preflight(
 def test_an_unwritable_redshift_dev_schema_refuses_with_the_grant(
     dbt_project_dir: Path, tmp_path: Path, monkeypatch
 ):
+    pytest.importorskip("redshift_connector")
     from fakes.redshift import FakeUser
 
     user = FakeUser(name="dbt_dev", schema_privileges={"dbt_dev": {"USAGE"}})
@@ -971,6 +1093,7 @@ def test_an_unwritable_redshift_dev_schema_is_not_refused_without_a_matching_nod
 ):
     """Same connector-parity extension as Postgres (issue #110)."""
 
+    pytest.importorskip("redshift_connector")
     from fakes.redshift import FakeUser
 
     user = FakeUser(name="dbt_dev", schema_privileges={"dbt_dev": {"USAGE"}})
@@ -1339,6 +1462,7 @@ def _clickhouse(
 def test_a_writable_clickhouse_dev_database_passes(
     dbt_project_dir: Path, tmp_path: Path, monkeypatch
 ):
+    pytest.importorskip("clickhouse_connect")
     from fakes.clickhouse import FakeGrant
 
     grants = [
@@ -1358,6 +1482,7 @@ def test_an_unwritable_clickhouse_dev_database_refuses_with_the_grant(
     failure; the privilege to create it is. The first build otherwise dies on a
     bare permission error naming neither the database nor the grant."""
 
+    pytest.importorskip("clickhouse_connect")
     from fakes.clickhouse import FakeGrant
 
     grants = [FakeGrant(user_name="dex_ro", access_type="SELECT", database="app")]
@@ -1396,6 +1521,7 @@ def test_a_partial_clickhouse_grant_read_may_clear_but_never_refuses(
     invisible role looks exactly like a missing one, so the partial read is only
     ever allowed to clear a target."""
 
+    pytest.importorskip("clickhouse_connect")
     from fakes.clickhouse import FakeGrant
 
     grants = [FakeGrant(user_name="dex_ro", access_type="SELECT", database="app")]
@@ -1423,6 +1549,7 @@ def test_a_dex_rendered_clickhouse_profile_can_be_capped(
     that makes the cap reachable at all.
     """
 
+    pytest.importorskip("clickhouse_connect")
     from fakes.clickhouse import FakeGrant
 
     grants = [
@@ -1442,6 +1569,7 @@ def test_a_hand_written_clickhouse_profile_warns_that_it_cannot_be_capped(
     statement that outruns it. That has to be said out loud: the alternative is
     a build that reports a cap it never had."""
 
+    pytest.importorskip("clickhouse_connect")
     from fakes.clickhouse import FakeGrant
 
     grants = [
@@ -1456,3 +1584,167 @@ def test_a_hand_written_clickhouse_profile_warns_that_it_cannot_be_capped(
     assert warnings
     assert "cannot wind the confirmed budget down" in warnings[0]
     assert "DEX_CLICKHOUSE_MAX_EXECUTION_TIME" in warnings[0]
+
+
+# --- trino --------------------------------------------------------------------
+
+
+def _trino(
+    dbt_project_dir: Path,
+    *,
+    dev_catalog: str = "lake",
+    dev_schema: str = "dbt_dev",
+    session_properties: bool = True,
+    deployment: str = "self_hosted",
+):
+    pytest.importorskip("trino")
+    from fakes.trino import FakeTrinoConnection, FakeTrinoTable
+
+    from exmergo_dex_core.adapters.trino import TrinoAdapter
+    from exmergo_dex_core.config import TrinoTarget
+    from exmergo_dex_core.envelope import Paradigm
+    from exmergo_dex_core.guards.cost_guard import CostGate
+    from exmergo_dex_core.transform.init import trino_session_properties
+
+    connection = FakeTrinoConnection(
+        tables=[
+            FakeTrinoTable(
+                catalog="memory",
+                schema="app",
+                name="orders",
+                columns=[("id", "bigint", True)],
+            )
+        ],
+        catalogs={
+            "memory": "memory",
+            "lake": "iceberg",
+            "tpch": "tpch",
+            "sink": "blackhole",
+            "system": "system",
+        },
+    )
+    adapter = TrinoAdapter(
+        connection=connection,
+        cost_gate=CostGate(
+            paradigm=Paradigm.DB_LOAD,
+            ceiling=None,
+            session_ceiling=None,
+            session_spent=0.0,
+            confirmed=False,
+            connector="trino",
+        ),
+        target=TrinoTarget(),
+        clock=connection.clock,
+    )
+    properties_block = ""
+    if session_properties:
+        properties_block = "      session_properties:\n" + "".join(
+            "        {}: '{}'\n".format(key, str(value).replace("'", "''"))
+            for key, value in trino_session_properties().items()
+        )
+    _write_profile(
+        dbt_project_dir,
+        "      type: trino\n"
+        "      method: none\n"
+        "      user: dbt_dev\n"
+        f"      database: {dev_catalog}\n"
+        f"      schema: {dev_schema}\n" + properties_block,
+    )
+    config = DexConfig(
+        connector="trino",
+        trino=TrinoTarget(
+            dev_catalog=dev_catalog, dev_schema=dev_schema, deployment=deployment
+        ),
+    )
+    return connection, adapter, config
+
+
+def test_a_writable_trino_dev_catalog_passes_with_a_missing_schema(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    """dbt-trino creates the schema, so only the catalog has to exist."""
+
+    connection, adapter, config = _trino(dbt_project_dir)
+    _fake_open(monkeypatch, adapter)
+    assert dev_target.check(dbt_project_dir, "dev", config, tmp_path) == []
+    assert connection.data_queries == []
+
+
+@pytest.mark.parametrize(
+    ("catalog", "fragment"),
+    [
+        ("tpch", "tpch catalog, which is read-only"),
+        ("nope", "dbt cannot create a catalog"),
+    ],
+)
+def test_an_unwritable_trino_dev_catalog_is_refused_before_dbt_runs(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch, catalog, fragment
+):
+    _connection, adapter, config = _trino(dbt_project_dir, dev_catalog=catalog)
+    _fake_open(monkeypatch, adapter)
+    with pytest.raises(dev_target.DevTargetError) as exc:
+        dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    assert fragment in str(exc.value)
+    assert "trino.dev_catalog" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("catalog", "fragment"), [("memory", "restart"), ("sink", "discards every row")]
+)
+def test_a_trino_dev_catalog_that_loses_writes_passes_with_a_warning(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch, catalog, fragment
+):
+    _connection, adapter, config = _trino(dbt_project_dir, dev_catalog=catalog)
+    _fake_open(monkeypatch, adapter)
+    warnings = dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    assert any(fragment in w for w in warnings)
+
+
+def test_a_galaxy_trino_target_is_refused_before_anything_opens(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    """A build whose pricing connection fails degrades to a note and runs dbt
+    anyway, so the refusal has to happen here too, and first."""
+
+    _connection, _adapter, config = _trino(dbt_project_dir, deployment="galaxy")
+
+    def unreachable(**_kwargs):
+        raise AssertionError("a refused deployment opened a connection")
+
+    monkeypatch.setattr("exmergo_dex_core.connect.open_adapter", unreachable)
+    with pytest.raises(dev_target.DevTargetError, match="Starburst Galaxy"):
+        dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+
+
+def test_a_dex_rendered_trino_profile_can_be_capped(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    _connection, adapter, config = _trino(dbt_project_dir)
+    _fake_open(monkeypatch, adapter)
+    warnings = dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    assert not any("cannot wind the confirmed budget down" in w for w in warnings)
+
+
+def test_a_hand_written_trino_profile_warns_that_it_cannot_be_capped(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    _connection, adapter, config = _trino(dbt_project_dir, session_properties=False)
+    _fake_open(monkeypatch, adapter)
+    warnings = dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+    (warning,) = [w for w in warnings if "cannot wind the confirmed budget down" in w]
+    assert "session_properties" in warning
+    assert "DEX_TRINO_QUERY_MAX_RUN_TIME" in warning
+
+
+def test_trino_drift_folds_case_and_reads_the_catalog_as_database(
+    dbt_project_dir: Path, tmp_path: Path, monkeypatch
+):
+    _connection, adapter, config = _trino(dbt_project_dir, dev_catalog="Lake")
+    _fake_open(monkeypatch, adapter)
+    # Profile database "Lake" against config "lake" is one catalog to Trino.
+    config.trino.dev_catalog = "lake"
+    dev_target.check(dbt_project_dir, "dev", config, tmp_path)
+
+    config.trino.dev_catalog = "other"
+    with pytest.raises(dev_target.DevTargetError, match=r"trino\.dev_catalog"):
+        dev_target.check(dbt_project_dir, "dev", config, tmp_path)

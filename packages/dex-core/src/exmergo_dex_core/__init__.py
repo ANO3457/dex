@@ -60,6 +60,7 @@ _EXPORTS = {
     "ClusterDependencyError": "explore.cluster",
     "ClusterError": "explore.cluster",
     "ColumnProfile": "cache",
+    "ConfigEditError": "config_document",
     "ConfigurationError": "errors",
     "ConfirmationRequest": "results",
     "ConfirmationRequiredError": "guards.cost_guard",
@@ -83,6 +84,7 @@ _EXPORTS = {
     "Document": "storage",
     "ExploreStore": "storage",
     "FilesystemStore": "storage",
+    "InvalidConfigError": "config_document",
     "LedgerUnreadableError": "guards.cost_guard",
     "MaintainStore": "storage",
     "MemoryStore": "storage",
@@ -107,6 +109,7 @@ _EXPORTS = {
     "ScaffoldError": "transform.scaffold",
     "ScaffoldPrerequisiteError": "transform.scaffold",
     "ScopeError": "connect",
+    "SlayerDependencyError": "slayer.dependency",
     "SemanticBackendError": "explore.semantic",
     "SemanticLayerError": "explore.semantic",
     "SemanticQueryRefusedError": "explore.semantic",
@@ -117,10 +120,14 @@ _EXPORTS = {
     "SpendHistory": "storage",
     "SpendLock": "storage",
     "SpendLockTimeoutError": "guards.cost_guard",
+    "StatementStage": "errors",
     "Store": "storage",
     "StoreContext": "storage",
     "StoreFactory": "storage",
     "StoreRequiredError": "errors",
+    "ResultMode": "values_free",
+    "ValuesFreeCode": "values_free",
+    "ValuesFreeError": "values_free",
     "WarehouseQueryError": "errors",
     "generate_demo_warehouse": "demo",
     "render_er_mermaid": "explore.diagram",
@@ -130,6 +137,7 @@ _EXPORTS = {
 if TYPE_CHECKING:  # what a type checker and an IDE see; never run
     from .cache import ColumnProfile, Dataset, DexCache, Relationship
     from .config import DexConfig
+    from .config_document import ConfigEditError, InvalidConfigError
     from .connect import (
         ConnectionSource,
         CredentialDiscoveryError,
@@ -155,6 +163,7 @@ if TYPE_CHECKING:  # what a type checker and an IDE see; never run
         ProjectError,
         RepoRootRequiredError,
         RequestError,
+        StatementStage,
         StoreRequiredError,
         WarehouseQueryError,
     )
@@ -186,6 +195,7 @@ if TYPE_CHECKING:  # what a type checker and an IDE see; never run
         Result,
         to_envelope,
     )
+    from .slayer.dependency import SlayerDependencyError
     from .storage import (
         CacheUnreadableError,
         Document,
@@ -207,6 +217,7 @@ if TYPE_CHECKING:  # what a type checker and an IDE see; never run
         ScaffoldPrerequisiteError,
         SourcesFileError,
     )
+    from .values_free import ResultMode, ValuesFreeCode, ValuesFreeError
 
 try:
     __version__ = version("exmergo-dex-core")
@@ -227,6 +238,7 @@ __all__ = [
     "ClusterDependencyError",
     "ClusterError",
     "ColumnProfile",
+    "ConfigEditError",
     "ConfigurationError",
     "ConfirmationRequest",
     "ConfirmationRequiredError",
@@ -249,6 +261,7 @@ __all__ = [
     "Document",
     "ExploreStore",
     "FilesystemStore",
+    "InvalidConfigError",
     "LedgerUnreadableError",
     "MaintainStore",
     "MemoryStore",
@@ -270,6 +283,7 @@ __all__ = [
     "RepoRootRequiredError",
     "RequestError",
     "Result",
+    "ResultMode",
     "ScaffoldError",
     "ScaffoldPrerequisiteError",
     "ScopeError",
@@ -278,15 +292,19 @@ __all__ = [
     "SemanticQueryRefusedError",
     "SemanticSource",
     "SessionCeilingDecisionRequiredError",
+    "SlayerDependencyError",
     "Snapshot",
     "SourcesFileError",
     "SpendHistory",
     "SpendLock",
     "SpendLockTimeoutError",
+    "StatementStage",
     "Store",
     "StoreContext",
     "StoreFactory",
     "StoreRequiredError",
+    "ValuesFreeCode",
+    "ValuesFreeError",
     "WarehouseQueryError",
     "__version__",
     "generate_demo_warehouse",

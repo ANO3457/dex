@@ -888,6 +888,10 @@ _COMPILE_TIMEOUT_SECONDS = 300.0
 # build statement.
 _PRICED_RESOURCE_TYPES = {"model", "snapshot", "test"}
 
+#: The breakdown line for what a warehouse bills a command as a whole rather
+#: than any statement in it: Snowflake's resume minimum and idle tail.
+UPTIME_LINE = "(warehouse uptime)"
+
 
 def compile_estimate(
     project_dir: Path | str,
@@ -899,6 +903,7 @@ def compile_estimate(
     env: dict[str, str] | None = None,
     timeout: float = _COMPILE_TIMEOUT_SECONDS,
     approved_functions: frozenset[str] | None = None,
+    overhead: float = 0.0,
 ) -> tuple[float, dict[str, float], list[str]]:
     """Price a ``dbt build`` upfront, for free, by dry-running its compiled SQL.
 
@@ -920,6 +925,12 @@ def compile_estimate(
     a cold dev target the total is an honest partial floor rather than a failure.
     ``query_estimate`` is a duck-typed convention, not part of the ``Adapter``
     protocol, so an adapter that does not expose it yields ``(0.0, {}, [note])``.
+
+    ``overhead`` is what the warehouse bills the build as a whole rather than
+    any node (Snowflake's resume minimum and idle tail), quoted by the caller
+    before anything is priced. It is a line of its own under
+    :data:`UPTIME_LINE`, so the breakdown says where it went and a build with
+    nothing to scan still quotes it.
 
     Raises :class:`DbtRunError` when ``dbt compile`` itself fails: that same
     failure would sink the build, and the caller degrades to no-estimate so dbt's
@@ -975,8 +986,11 @@ def compile_estimate(
             "estimate (their inputs may not exist in the dev target until an earlier "
             f"layer is built): {shown}{more}; the total is a partial floor"
         )
-    if not per_node and not skipped:
+    if not per_node and not skipped and overhead <= 0:
         notes.append("no scanning build nodes to price; the estimate is zero")
+    if overhead > 0:
+        per_node[UPTIME_LINE] = overhead
+        total += overhead
     return total, per_node, notes
 
 
@@ -1154,6 +1168,26 @@ def _clickhouse_cap_env(ceiling: int) -> dict[str, str]:
     }
 
 
+# Kept in step with adapters.trino._SCAN_BYTES_PER_SECOND, for the same reason
+# as ClickHouse's: the byte cap and the quote are two views of one number.
+_TRINO_SCAN_BYTES_PER_SECOND = 200 * 1024 * 1024
+
+
+def _trino_cap_env(ceiling: int) -> dict[str, str]:
+    """dbt-trino sends the profile's ``session_properties`` with every
+    statement, CTAS included; a dex-rendered profile references these two
+    variables so the value can be tightened per invocation. Rendered with the
+    units Trino's duration and data-size properties take."""
+
+    from . import init
+
+    scan_bytes = ceiling * _TRINO_SCAN_BYTES_PER_SECOND
+    return {
+        init.TRINO_QUERY_MAX_RUN_TIME_ENV: f"{ceiling}s",
+        init.TRINO_QUERY_MAX_SCAN_BYTES_ENV: f"{scan_bytes}B",
+    }
+
+
 # Which environment variable carries the server-side cap into the dbt
 # subprocess, per connector. Keyed by connector rather than by paradigm because
 # there is more than one db-load connector and they cap by different mechanisms;
@@ -1164,6 +1198,7 @@ def _clickhouse_cap_env(ceiling: int) -> dict[str, str]:
 _CAP_ENV_BUILDERS: dict[str, Callable[[int], dict[str, str]]] = {
     "postgres": _postgres_cap_env,
     "clickhouse": _clickhouse_cap_env,
+    "trino": _trino_cap_env,
 }
 
 
@@ -1250,7 +1285,7 @@ _RUN_RESULT_ERROR = "RunResultError"
 # whichever of these wrappers led; the #50 deprecation fix never caught it
 # because #50's own repro didn't spell one out in its test message (#76).
 _GENERIC_HEADER = re.compile(
-    r"^(?:Encountered an error:|"
+    r"^(?:\[[A-Z]+\]:\s*)?(?:Encountered an error:|"
     r"(?:Database|Runtime|Compilation|Validation|Internal) Error(?: in .+)?)$"
 )
 
@@ -1385,9 +1420,14 @@ def _summarize(
     counts: dict[str, int] = {}
     bytes_billed = 0.0
     saw_billing = False
+    elapsed_seconds: float | None = None
     run_results = project / "target" / "run_results.json"
     if run_results.is_file():
-        results = json.loads(run_results.read_text(encoding="utf-8")).get("results", [])
+        document = json.loads(run_results.read_text(encoding="utf-8"))
+        results = document.get("results", [])
+        # dbt writes this at the top of run_results, not inside `metadata`.
+        if isinstance(elapsed := document.get("elapsed_time"), (int, float)):
+            elapsed_seconds = float(elapsed)
         # The manifest names each node the way a reader knows it; without one
         # (a build that died before writing it) the label falls back to the id.
         manifest_nodes: dict[str, Any] = {}
@@ -1431,11 +1471,15 @@ def _summarize(
         "counts": counts,
         "messages": messages,
     }
-    # Internal hand-off, not envelope shape: `_shape_build_result` pops this to
+    # Internal hand-offs, not envelope shape: `_shape_build_result` pops these to
     # ledger the build and report it under `data.spend`, the one key every billed
-    # command reports spend under (issue #276). Present only when dbt actually
-    # reported a figure, so the shaper can tell "billed nothing" from "billed an
-    # amount dbt never told us".
+    # command reports spend under (issue #276). `bytes_billed` is present only
+    # when dbt actually reported a figure, so the shaper can tell "billed
+    # nothing" from "billed an amount dbt never told us". `elapsed_seconds` is
+    # the wall time the run's statements were spread over, which a warehouse
+    # that bills uptime rather than statement time charges for in full.
     if saw_billing:
         summary["bytes_billed"] = bytes_billed
+    if elapsed_seconds is not None:
+        summary["elapsed_seconds"] = elapsed_seconds
     return summary

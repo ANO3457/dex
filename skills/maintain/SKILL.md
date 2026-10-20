@@ -1,6 +1,7 @@
 ---
 name: maintain
-description: 'Use this to keep a dbt project and its semantic layer correct as the warehouse and the business change, including a semantic layer that is native Apache Ossie documents rather than dbt. It detects drift on four axes and proposes the fix: schema drift (source columns and tables added, dropped, retyped, or renamed), volume drift (a row count that collapsed, a table that emptied, a load that half-failed), grain drift (a key that lost uniqueness, a changed row-per-entity cardinality, an increased join fanout), and semantic drift (a metric, measure, dimension, or entity definition that no longer matches, new categorical values, dangling semantic references). Reach for this when something that used to work has started failing or producing different numbers and the cause is more likely upstream than in the code you just wrote: a test that began failing with no code change, a dashboard whose numbers moved, a model that is suddenly empty or duplicated. Trigger it for requests like "what changed in the warehouse", "did anything drift", "is my dbt project still in sync", "my primary key has duplicates now", "the row count dropped", "did the load run", "the data stopped flowing", "the revenue metric definition changed", "reconcile my models with the source schema", "which models are stale", "did my Ossie semantic layer drift", or "is this relationship still valid". It reads the .dex/ snapshot and proposes reviewable diffs; it never overwrites hand-written work. To author new models or metrics from scratch, use transform. To learn an unfamiliar warehouse for the first time, use explore.'
+description: 'Use this to find out whether an existing dbt project or semantic layer (dbt, Ossie or SLayer) is correct against its warehouse, and if not, why. `maintain verify` checks the project as it stands; against a .dex/ snapshot, `maintain check` finds schema, volume, grain, and semantic drift and `maintain reconcile` proposes the fix. Reach for it whenever an existing project is suspected wrong, whether or not anything is known to have changed: "this model is wrong, work out why", "the numbers look too high", "some rows are missing", "this column is empty", "duplicates in my fact table", "the project is broken", "diagnose why this test fails", "a test fails and nobody changed the model", "the dashboard moved but the code did not", "did anything drift", "the row count dropped", "the metric definition changed". Read-only; fixes come back as reviewable diffs and never overwrite hand-written work. Writing the fix, or repairing a model you just edited, is transform''s; a data question with no project is explore''s.'
+compatibility: 'Needs a local shell and uv. On first use, uv downloads the exmergo-dex-core engine from PyPI at the version scripts/run.py pins. Runs in Claude Code or another agent that loads Agent Skills and has a shell, not in claude.ai chat.'
 ---
 
 # Maintain
@@ -39,22 +40,37 @@ from that envelope.
    applied with `transform apply`. Take `maintain snapshot` after a known-good
    build.
 
-At every step: a `needs_confirmation` envelope waits on the user's spend
-decision, never on yours; only a human clears a PII flag; and you never edit the
-dbt project, `.dex/cache.json`, or `.dex/plans/` by hand in place of the command
-that guards them.
+At every step: a `needs_confirmation` envelope waits on the user's decision (a
+spend, or a `dex config` diff), never on yours; only a human clears a PII
+flag; and you never edit the dbt project, `.dex/config.yml`, `.dex/cache.json`,
+or `.dex/plans/` by hand in place of the command that guards them.
 <!-- dex:procedure:end -->
 
 ## Running the engine
+
+Run commands from the user's project directory, so dex finds that project's
+configuration and writes its cache there. The wrapper path is absolute:
+
+- In Claude Code, `${CLAUDE_SKILL_DIR}` is supplied by the host.
+- In Codex or another Agent Skills host, resolve the directory containing this
+  installed `SKILL.md` from the path the host provides. Substitute that absolute
+  directory for `${CLAUDE_SKILL_DIR}` in every command and reference below,
+  including paths in the bundled reference files. Do not assume that environment
+  variable exists, and do not change into the installed skill directory.
 
 ```bash
 uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [flags]
 ```
 
+Installed as a plugin or skill, `run.py` runs the `exmergo-dex-core` engine from
+PyPI at the exact version its `DEX_CORE_VERSION` line pins, built from
+https://github.com/exmergo/dex/tree/main/packages/dex-core.
+
 - `uv` is a prerequisite that Claude Code does not install. If the shell reports
   `uv: command not found`, stop and tell the user to install it
-  (`curl -LsSf https://astral.sh/uv/install.sh | sh`, `brew install uv`, or
-  `pipx install uv`), then re-run. Never diff the warehouse against the project
+  (`brew install uv` or `pipx install uv`, or the installer for their platform
+  from the uv docs), then re-run. Tell them the command; never run an installer
+  yourself. Never diff the warehouse against the project
   by hand instead: the drift axes and the baseline comparison live in the
   engine, so any other path is guesswork.
 - The first command in a fresh environment installs the engine and can take tens
@@ -115,6 +131,24 @@ is not described here.
 - On `maintain semantic`, read `unavailable` before hunting for an element kind.
   A native Ossie layer has no measures and no entities, so their absence is the
   format, not drift.
+- `semantic_format_changed` or `semantic_vendor_changed` means the definitions
+  were not compared by content, because the reader changed. Re-snapshot once the
+  upgrade is accepted, rather than reading the quiet definition diff as clean.
+- On a SLayer layer, a model file written in another format `version` is refused
+  by the reader and named in `warnings`, and every definition in it then comes
+  back as `definition_removed`. Nothing was removed: the file could not be read.
+  Never reconcile those as removals; the fix is the file rewritten in the
+  current `version` with `semantic slayer update` (transform skill).
+- `join_cardinality_exceeded` means a join's declared arity does not hold, so
+  measures across it are inflated. A join declaring no cardinality is in
+  `warnings` as unchecked, not passed: relay it as undetermined, and suggest
+  declaring the `cardinality` the user expects so the next run measures it.
+- SLayer's own schema findings (`declared_column_missing`,
+  `declared_type_conflict`, `declared_relation_missing`,
+  `declared_dependency_dropped`) are SLayer's `validate-models` rules run on
+  dex's metadata. Do not run `slayer validate-models` to confirm them: it reads
+  through SLayer's datasource credentials, and opening SLayer's storage can
+  migrate and rewrite the model files dex owns.
 - On `maintain verify`, read `data.suppressed` before reading an empty
   `data.findings` as a clean bill. A project that does not compile suppresses
   every other check. Row population is conservative by design, so a quiet answer
@@ -126,6 +160,18 @@ is not described here.
 
 ### Reconcile proposals
 
+- **On a large `check` report, read the ratio before the findings.** Run
+  `maintain reconcile` and read `mechanical_count` and `advisory_count` beside
+  the finding codes, before the findings list. Mechanical proposals exist only
+  where dex can author the fix itself (the two cases below), so zero of them
+  across hundreds of schema findings, with no `column_dropped`,
+  `column_retyped` or `table_dropped` among the codes, usually means the
+  baseline is behind the project rather than the warehouse having moved: every
+  finding is additive, and most of them are the project's own recent work.
+  Re-baseline with the discipline above (`explore map --full`, then
+  `maintain snapshot`) before triaging findings one by one. A type change is
+  advisory on every format, so read the codes for retypes rather than inferring
+  them from the count.
 - **`mechanical`** (schema drift): re-scaffolds a dex-scaffolded staging model,
   or edits the drifted columns into a declaration. Still a reviewable diff: read
   it for hand-written logic the scaffold cannot know about before applying.
@@ -137,8 +183,12 @@ is not described here.
   spellings, and the edit is the user's. On ClickHouse nullability is part of the
   type, so a column that starts accepting nulls is reported as a retype.
 - With no editable dbt project, every proposal is advisory and no plan is stored.
-  Authoring into a native semantic layer is `semantic ossie` in the transform
-  skill, never this command.
+  Authoring into a native semantic layer is `semantic ossie` or
+  `semantic slayer` in the transform skill, never this command. The exception
+  is a SLayer layer's own schema findings (`declared_*`): reconcile stores their
+  removals as a second plan, `data.semantic_plan_id`, through the
+  `semantic slayer update` route. Relay both plan ids; each applies with
+  `transform apply`.
 
 ### Cost
 
@@ -149,7 +199,7 @@ is not described here.
   explicit budget from the user, and re-issue with
   `--confirm --budget <magnitude>` in the estimate's unit: bytes on BigQuery, warehouse-seconds on
   Snowflake and Databricks, compute-seconds on Redshift, database-seconds on
-  Postgres and ClickHouse. On DuckDB nothing prompts.
+  Postgres and ClickHouse, cluster-seconds on Trino. On DuckDB nothing prompts.
 - `check`, `semantic`, and `verify` answer first and offer second: they return
   `ok` with final findings, and the price of the rest under `data.offer`
   (`data.axes_run` says what ran, `data.offer.axes` what the estimate adds).

@@ -1,0 +1,109 @@
+{
+  "name": "grounding-missing",
+  "contract": "grounding",
+  "description": "A reference to a model and a source that nothing defines, beside ones that exist. Named and looked up, then found nowhere: reported in `missing`, and the answer stays complete, the same way a name with two definitions is reported in `ambiguous`.",
+  "payload": {
+    "edits": [
+      {
+        "path": "models/staging/mart.sql",
+        "new_content": "select o.order_id\nfrom {{ ref('stg_orders') }} o\njoin {{ ref('no_such_model') }} n on n.order_id = o.order_id\njoin {{ source('raw', 'orders') }} r on r.order_id = o.order_id\njoin {{ source('raw', 'no_such_table') }} x on x.order_id = o.order_id\n",
+        "old_content_hash": null,
+        "op": "upsert",
+        "kind": "model_sql"
+      }
+    ],
+    "project": {
+      "dbt_project.yml": "name: dex_test\nversion: \"1.0.0\"\nprofile: dex_test\nmodel-paths: [\"models\"]\n",
+      "models/staging/schema.yml": "version: 2\nmodels:\n  - name: stg_customers\n    columns:\n      - name: id\n        tests: [not_null]\n",
+      "models/staging/sources.yml": "version: 2\nsources:\n  - name: raw\n    tables:\n      - name: orders\n",
+      "models/staging/stg_customers.sql": "select 1 as id, 'a@example.com' as email\n",
+      "models/staging/stg_orders.sql": "select 1 as order_id, 1 as customer_id\n"
+    }
+  },
+  "expect": {
+    "completeness": "complete",
+    "missing_count": 2,
+    "result": {
+      "completeness": "complete",
+      "limits": [],
+      "unresolved": [],
+      "ambiguous": [],
+      "missing": [
+        {
+          "kind": "model",
+          "name": "no_such_model",
+          "used_in": [
+            "models/staging/mart.sql"
+          ]
+        },
+        {
+          "kind": "source",
+          "name": "raw.no_such_table",
+          "used_in": [
+            "models/staging/mart.sql"
+          ]
+        }
+      ],
+      "freshness": {
+        "manifest_present": false,
+        "generated_at": null,
+        "newest_source_at": "2026-10-14T22:01:09.792094+00:00",
+        "stale": null
+      },
+      "binding": {
+        "plan_digest": null,
+        "source_digest": "sha256:c09fed63daa092fca806bb52dcc6eb125392740fa73ed7bfd304b3b9bee096b0",
+        "config_digest": null,
+        "packages_digest": null,
+        "engine_version": "1.13.2"
+      },
+      "relations": [],
+      "dependencies": [
+        {
+          "kind": "column",
+          "name": "order_id",
+          "origin": "source_scan",
+          "used_in": [
+            "models/staging/mart.sql"
+          ]
+        },
+        {
+          "kind": "model",
+          "name": "no_such_model",
+          "defined": "missing",
+          "origin": "source_scan",
+          "used_in": [
+            "models/staging/mart.sql"
+          ]
+        },
+        {
+          "kind": "model",
+          "name": "stg_orders",
+          "defined": "project",
+          "origin": "source_scan",
+          "used_in": [
+            "models/staging/mart.sql"
+          ]
+        },
+        {
+          "kind": "source",
+          "name": "raw.no_such_table",
+          "defined": "missing",
+          "origin": "source_scan",
+          "used_in": [
+            "models/staging/mart.sql"
+          ]
+        },
+        {
+          "kind": "source",
+          "name": "raw.orders",
+          "defined": "project",
+          "origin": "source_scan",
+          "used_in": [
+            "models/staging/mart.sql"
+          ]
+        }
+      ]
+    }
+  }
+}

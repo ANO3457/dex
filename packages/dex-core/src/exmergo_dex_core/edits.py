@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
@@ -49,6 +50,11 @@ class ApplyResult(BaseModel):
     written: list[str] = Field(default_factory=list)
     diffs: list[dict[str, Any]] = Field(default_factory=list)
     conflicts: list[Conflict] = Field(default_factory=list)
+    #: What the writer knows about why its files could have changed since
+    #: planning, said where the conflict is reported. ``None`` leaves the
+    #: generic "human edits are authoritative" reading, which is right for a
+    #: file only people edit and wrong for one a vendor's own tooling rewrites.
+    conflict_hint: str | None = None
 
 
 def content_hash(text: str) -> str:
@@ -65,6 +71,42 @@ class EditView(Protocol):
     files: Mapping[str, SourceFileView]
 
 
+@dataclass(frozen=True)
+class SemanticSourceFile:
+    """One configured semantic document as bytes to be pinned."""
+
+    path: str
+    content: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class SemanticDocumentView:
+    """A semantic layer's configured documents, keyed as its surface names them.
+
+    ``root`` is the directory the keys are relative to, which is what a plan
+    records as its project directory.
+    """
+
+    root: str
+    files: dict[str, SemanticSourceFile]
+
+
+class SemanticEditValidation(BaseModel):
+    """What a semantic layer's own validator says about a proposed plan.
+
+    ``defined`` and ``updated`` classify the names the edits touch, which is how
+    ``define`` and ``update`` hold to their promise. ``notes`` and ``warnings``
+    ride the plan's envelope as they are. A plan the validator refuses never
+    reaches this value: the validator raises, naming why, and nothing is stored.
+    """
+
+    defined: list[str] = Field(default_factory=list)
+    updated: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 @runtime_checkable
 class SemanticEditTarget(Protocol):
     """A file-backed semantic layer that can receive reviewable edits."""
@@ -76,3 +118,17 @@ class SemanticEditTarget(Protocol):
     def write_semantic_edits(
         self, edits: Any, *, confirmed: bool = False
     ) -> ApplyResult: ...
+
+    def validate_semantic_edits(
+        self, edits: Any, mode: str, *, cache: Any = None
+    ) -> SemanticEditValidation:
+        """Validate the layer these edits would leave, in its own format.
+
+        The layer validates rather than the authoring route, because only the
+        layer knows what its documents mean: a route that called one vendor's
+        validator would check every other vendor's files against the wrong
+        format. ``mode`` is ``define``, ``update`` or ``plan``. ``cache`` is the
+        exploration cache, or None when there is none to read.
+        """
+
+        ...

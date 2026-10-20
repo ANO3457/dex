@@ -20,7 +20,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .errors import DexError
+from .errors import DexError, StatementStage, WarehouseQueryError
+from .values_free import ValuesFreeError, error_code
 
 
 class Status(str, Enum):
@@ -217,11 +218,23 @@ class SanitizationError(DexError):
     """
 
 
+def secret_like(key: str) -> bool:
+    """Whether ``key`` reads as the name of a credential.
+
+    The one rule for it: the boundary scan below refuses such a key in ``data``,
+    and the config editor refuses to write one and withholds its value, so a name
+    that trips one trips the other.
+    """
+
+    lowered = str(key).lower()
+    return any(pat in lowered for pat in _SECRET_KEY_PATTERNS)
+
+
 def _scan(value: Any, path: str = "data") -> None:
     if isinstance(value, dict):
         for key, sub in value.items():
             key_l = str(key).lower()
-            if any(pat in key_l for pat in _SECRET_KEY_PATTERNS):
+            if secret_like(key):
                 raise SanitizationError(
                     f"secret-like key '{key}' at {path}: credentials never cross "
                     "the stdout boundary"
@@ -317,7 +330,9 @@ def _reason_overrides() -> list[tuple[type[BaseException], Reason]]:
 
     # Always safe: no imports of their own (`errors.py`) or explicitly
     # designed to import without the dialect engine (`guards/dialect.py` is
-    # the module that checks whether sqlglot is even installed).
+    # the module that checks whether sqlglot is even installed, and
+    # `slayer/dependency.py` reads distribution metadata rather than importing
+    # SLayer).
     from .demo.warehouse import (
         DemoDependencyError,
         DemoPathError,
@@ -332,12 +347,14 @@ def _reason_overrides() -> list[tuple[type[BaseException], Reason]]:
         WarehouseQueryError,
     )
     from .guards.dialect import DialectDependencyError
+    from .slayer.dependency import SlayerDependencyError
 
     overrides: list[tuple[type[BaseException], Reason]] = [
         (DemoTargetExistsError, Reason.GUARD),
         (DemoDependencyError, Reason.PREREQUISITE),
         (DemoPathError, Reason.REQUEST),
         (DialectDependencyError, Reason.PREREQUISITE),
+        (SlayerDependencyError, Reason.PREREQUISITE),
         (PrerequisiteError, Reason.PREREQUISITE),  # CacheRequiredError, NoBaselineError
         (ConnectorError, Reason.CONNECTION),  # every *ConnectionError subclass
         (ConfigurationError, Reason.CONFIGURATION),
@@ -386,6 +403,7 @@ def _reason_overrides() -> list[tuple[type[BaseException], Reason]]:
         (SemanticQueryRefusedError, Reason.GUARD),  # policy, not backend failure
         (ClusterDependencyError, Reason.PREREQUISITE),  # install the extra, retry
         (DialectDependencyError, Reason.PREREQUISITE),
+        (SlayerDependencyError, Reason.PREREQUISITE),
         (PrerequisiteError, Reason.PREREQUISITE),
         (CostGuardError, Reason.GUARD),  # OverCeilingError, CeilingRequiredError
         (BudgetExhaustedError, Reason.GUARD),
@@ -425,12 +443,46 @@ def reason_for(exc: BaseException) -> Reason:
     bare ``ValueError`` still reads as ``REQUEST`` (a deliberate refusal, bad
     input assumed) rather than ``INTERNAL``, which is reserved for exceptions
     that are not a deliberate dex refusal at all.
+
+    This is the ``reason`` every CLI error envelope carries, because
+    :func:`error_for` calls it, and :mod:`exmergo_dex_core.host` exports it for a
+    host that calls the engine in process and so holds the exception rather than
+    an envelope. Two things such a host needs to know:
+
+    - ``ConfirmationRequiredError`` reads ``GUARD`` here, but it is not a
+      refusal. The CLI answers it with a ``needs_confirmation`` envelope that
+      carries no ``reason`` at all, so check for it before classifying.
+    - The answer can depend on the install. The table's second tier imports
+      modules that need the ``sql`` extra, and loads only when every one of
+      those imports succeeds. On an install without the extra, a class listed
+      only in that tier reads its nearest listed ancestor instead:
+      ``CostGuardError`` reads ``REQUEST`` rather than ``GUARD``. Every
+      warehouse connector extra brings ``sql``.
     """
 
+    if isinstance(exc, ValuesFreeError):
+        # The one family that carries its bucket rather than deriving it: a
+        # withheld error keeps the reason the error it replaced would have read.
+        return Reason(exc.reason)
     for exc_type, reason in _reason_overrides():
         if isinstance(exc, exc_type):
             return reason
     return Reason.INTERNAL
+
+
+def stage_for(exc: BaseException) -> StatementStage | None:
+    """Which door a warehouse refusal came through, where the adapter said.
+
+    ``None`` for anything that is not a :class:`WarehouseQueryError`, and for one
+    raised by an adapter that cannot tell its doors apart. The two places an
+    exception becomes a ``reason`` a host reads (:func:`error_for`, and a batch
+    statement's own verdict in ``explore query``) both read the stage here, so
+    neither can carry one the other drops.
+    """
+
+    if isinstance(exc, (WarehouseQueryError, ValuesFreeError)):
+        return exc.stage
+    return None
 
 
 def error_for(
@@ -439,8 +491,21 @@ def error_for(
     """Build an error envelope from a caught exception: ``errors`` defaults to
     ``str(exc)`` (override via ``message`` for call sites that add context or
     redact), and ``reason`` is derived automatically via :func:`reason_for`.
+
+    ``data.stage`` is derived the same way, via :func:`stage_for`, and merged
+    into whatever ``data`` the call site passes. Doing it here rather than at
+    the call sites is what puts it on every error envelope a warehouse refusal
+    can reach, the CLI's catch-all included, and absent from every other one.
     """
 
+    stage = stage_for(exc)
+    if stage is not None:
+        kwargs["data"] = {**(kwargs.get("data") or {}), "stage": stage.value}
+    # The stable code an error carries in values-free mode (#591), which is the
+    # part of it guaranteed to quote no value; absent outside the mode.
+    code = error_code(exc)
+    if code is not None:
+        kwargs["data"] = {**(kwargs.get("data") or {}), "code": code}
     return Envelope(
         status=Status.ERROR,
         errors=[message if message is not None else str(exc)],

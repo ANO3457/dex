@@ -10,13 +10,11 @@ from __future__ import annotations
 
 import fnmatch
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
-from .diffs import file_diff
-from .envelope import Paradigm
 from .errors import ConfigurationError
 from .storage import DEX_DIR
 
@@ -44,7 +42,6 @@ class Budget(BaseModel):
     should see in a diff.
     """
 
-    paradigm: Paradigm = Paradigm.FREE_LOCAL
     ceiling: float | None = None
     session_ceiling: float | None = None
     session_ceiling_declined: bool = False
@@ -261,6 +258,85 @@ class ClickHouseTarget(BaseModel):
                 "database-seconds and would never spend this number. Remove "
                 "it, or set deployment: cloud"
             )
+        return self
+
+
+#: The host suffix every Starburst Galaxy cluster is reached under. Matched only
+#: to refuse a ``self_hosted`` declaration that points at one; the deployment
+#: itself is always declared, never sniffed from the host.
+GALAXY_HOST_SUFFIX = ".galaxy.starburst.io"
+
+
+class TrinoTarget(BaseModel):
+    """Non-secret Trino connection target. Credentials are never here: auth is
+    discovered at runtime by connect.py (TRINO_URL, the TRINO_* environment,
+    this committed target plus TRINO_PASSWORD or TRINO_JWT_TOKEN, or a dbt
+    profile), and passwords and tokens are never written or logged.
+
+    Trino relations are three-part, ``catalog.schema.table``, and one cluster
+    serves many catalogs of different kinds (memory, iceberg, a federated
+    postgresql), so ``catalogs`` is the source allowlist with entries
+    ``catalog`` or ``catalog.schema``; empty means every catalog the identity
+    can see except ``system``. dex never sets a session catalog or schema.
+    ``dev_catalog``/``dev_schema`` are where dbt dev builds write, refused as a
+    source so reads and writes never share a schema. dbt creates the schema but
+    never the catalog, so ``dev_catalog`` must already exist and be writable.
+
+    ``deployment`` declares which Trino this is, and is a cost decision rather
+    than a connection one. ``self_hosted`` (Trino, Starburst Enterprise, Trino
+    on EMR) bills no currency, so dex guards it as cluster-seconds
+    (``db_load``). ``galaxy`` is Starburst Galaxy, which bills credits per
+    worker-hour of cluster uptime; it is accepted here so the configuration is
+    already in its final shape, and refused by name until its uptime model
+    exists. ``credit_price_usd`` is Galaxy's optional dollar translation and is
+    refused under ``self_hosted``, where it would otherwise be accepted and
+    ignored.
+
+    ``max_full_profile_bytes`` opts large tables into sampled profiling
+    (``TABLESAMPLE BERNOULLI``), measured against the plan's own byte estimate.
+    BERNOULLI still reads every split, so it saves CPU rather than the scan.
+    """
+
+    host: str | None = None
+    port: int | None = None
+    user: str | None = None
+    http_scheme: str | None = None
+    catalogs: list[str] = Field(default_factory=list)
+    dev_catalog: str | None = None
+    dev_schema: str | None = None
+    deployment: str = "self_hosted"
+    credit_price_usd: float | None = None
+    max_full_profile_bytes: int | None = None
+
+    @model_validator(mode="after")
+    def _check_deployment(self) -> TrinoTarget:
+        allowed = ("self_hosted", "galaxy")
+        if self.deployment not in allowed:
+            raise ValueError(
+                f"trino.deployment must be one of {', '.join(allowed)}, "
+                f"got '{self.deployment}'"
+            )
+        if self.http_scheme is not None and self.http_scheme not in ("http", "https"):
+            raise ValueError(
+                f"trino.http_scheme must be http or https, got '{self.http_scheme}'"
+            )
+        if self.deployment == "self_hosted":
+            if self.credit_price_usd is not None:
+                raise ValueError(
+                    "trino.credit_price_usd applies to deployment: galaxy, which "
+                    "bills credits. A self-hosted cluster bills no currency, so "
+                    "dex guards it in cluster-seconds and would never spend this "
+                    "number. Remove it, or set deployment: galaxy"
+                )
+            if self.host and self.host.strip().lower().rstrip(".").endswith(
+                GALAXY_HOST_SUFFIX
+            ):
+                raise ValueError(
+                    f"trino.host '{self.host}' is a Starburst Galaxy cluster, but "
+                    "trino.deployment is 'self_hosted'. Galaxy bills cluster "
+                    "uptime, which a self-hosted declaration would never count; "
+                    "set deployment: galaxy"
+                )
         return self
 
 
@@ -503,6 +579,11 @@ SEMANTIC_DEPLOYMENTS: dict[str, tuple[str, ...]] = {
     # speaking its own protocol, which is a different vendor rather than a second
     # deployment of this one.
     "ossie": ("local",),
+    # SLayer can also run as a server, and that server is deliberately not a
+    # deployment here: dex reads and authors the model files committed to this
+    # repository, and a server is a second copy of them that nobody reviews in a
+    # pull request. `local` is those files and nothing else.
+    "slayer": ("local",),
 }
 
 #: The factory that builds a vendor's own semantic source, for the vendors whose
@@ -524,13 +605,34 @@ SEMANTIC_DEPLOYMENTS: dict[str, tuple[str, ...]] = {
 #: as the source's options verbatim. That convention is what keeps the engine
 #: from growing a per-vendor coordinate reader.
 SEMANTIC_SOURCE_FACTORIES: dict[str, str] = {
-    "ossie": "exmergo_dex_core.ossie.project:build_semantic_layer"
+    "ossie": "exmergo_dex_core.ossie.project:build_semantic_layer",
+    "slayer": "exmergo_dex_core.slayer.project:build_semantic_layer",
 }
+
+#: The vendors whose native documents `semantic <vendor> define|update|plan`
+#: authors, each as a subcommand of its own name. A subset of
+#: `SEMANTIC_SOURCE_FACTORIES` rather than all of it, because a vendor's reader
+#: can land before it can be authored: the route validates through the layer's
+#: own `SemanticEditTarget.validate_semantic_edits`, and a subcommand registered
+#: before the layer implements it would exist only to refuse. The route takes
+#: no vendor name of its own; it reads the vendor off the subcommand, and refuses
+#: one that is not the configured `semantic.vendor`.
+SEMANTIC_DOCUMENT_AUTHORING: tuple[str, ...] = ("ossie", "slayer")
 _SEMANTIC_DEPLOYMENT_SPELLINGS: dict[str, str] = {
     "local": "local",
     "dbt_cloud": "dbt_cloud",
     "api": "dbt_cloud",
     "cloud": "dbt_cloud",
+}
+
+
+#: The environment variables that beat a ``semantic:`` coordinate at run time,
+#: keyed by the field they override. Declared once so the connection that reads
+#: them and ``dex config get``, which reports a setting the environment is
+#: overriding, cannot disagree about which variable wins.
+SEMANTIC_ENVIRONMENT: dict[str, str] = {
+    "host": "DBT_SL_HOST",
+    "environment_id": "DBT_SL_ENV_ID",
 }
 
 
@@ -550,6 +652,14 @@ class OssieSemanticConfig(BaseModel):
     written rather than several frames into a command. They are checked once
     more by the reader itself for callers that construct it directly.
     """
+
+    #: The key holding the allowlist the vendor reads, and what it lists. Read by
+    #: the per-vendor loop in `SemanticConfig`, so each vendor names its own
+    #: coordinates without the loop learning a vendor name.
+    LISTING: ClassVar[str] = "files"
+    LISTING_MEANS: ClassVar[str] = (
+        "the native documents to read, named relative to the repository root"
+    )
 
     files: list[str] = Field(default_factory=list)
 
@@ -578,11 +688,119 @@ class OssieSemanticConfig(BaseModel):
         return self
 
 
+#: Characters that make a path a pattern. Refused rather than expanded: an
+#: allowlist is exact, and a model dex was not told to read is a model nobody
+#: reviewed.
+_GLOB_CHARACTERS = frozenset("*?[]{}")
+
+#: What SLayer keeps under its storage root besides models. Named so a listing
+#: that points at one is refused with the reason rather than with a shape error.
+_SLAYER_NEVER_READ = ("datasources", "priority.yaml")
+
+
+def _repository_relative(
+    setting: str, name: str, within: str = "the repository"
+) -> PurePosixPath:
+    """``name`` as a path inside ``within``, or a refusal naming ``setting``.
+
+    Written exactly as it normalizes, so two spellings of one file cannot both
+    pass a duplicate check, and free of glob characters, absolute roots and
+    ``..``, because each of those makes the path something other than one
+    reviewed file in this repository.
+    """
+
+    if not name or not name.strip():
+        raise ValueError(f"{setting}: an empty path names nothing")
+    if glob := sorted(set(name) & _GLOB_CHARACTERS):
+        raise ValueError(
+            f"{setting}: '{name}' is a pattern ({' '.join(glob)}); list each file "
+            "exactly, because a file dex was not told to read is a file nobody "
+            "reviewed"
+        )
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts or "\\" in name:
+        raise ValueError(
+            f"{setting}: '{name}' has to name a path inside {within}, written "
+            "relative to it with forward slashes"
+        )
+    if str(path) != name:
+        raise ValueError(f"{setting}: write '{name}' as '{path}'")
+    return path
+
+
+class SlayerSemanticConfig(BaseModel):
+    """The repository-confined SLayer model files behind ``vendor: slayer``.
+
+    ``base_dir`` is SLayer's storage root inside the repository. SLayer keeps a
+    model at ``<base_dir>/models/<data_source>/<name>.yaml``, so every entry in
+    ``models`` is written relative to ``base_dir`` in that shape, and the shape
+    is checked here: a path dex reads is a path SLayer would read.
+
+    ``models`` is an exact allowlist with the rules ``semantic.ossie.files``
+    follows: no globs, no absolute paths, no ``..``, no duplicates. Nothing under
+    the storage root but a model file can be listed. SLayer's datasource files
+    and ``priority.yaml`` live there too, and a datasource carries passwords,
+    connection strings and service-account JSON, so dex neither reads nor writes
+    them, and naming one here is refused rather than ignored.
+
+    Validated where it is written, so a bad path is refused at its line rather
+    than several frames into a command. The reader checks again for callers that
+    build it directly.
+    """
+
+    LISTING: ClassVar[str] = "models"
+    LISTING_MEANS: ClassVar[str] = (
+        "the SLayer model files to read, named relative to semantic.slayer.base_dir"
+    )
+
+    base_dir: str | None = None
+    models: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_paths(self) -> SlayerSemanticConfig:
+        if self.base_dir is not None:
+            _repository_relative("semantic.slayer.base_dir", self.base_dir)
+        if self.models and self.base_dir is None:
+            raise ValueError(
+                "semantic.slayer.models are named relative to "
+                "semantic.slayer.base_dir, which is not set: name SLayer's storage "
+                "root inside the repository"
+            )
+        for name in self.models:
+            path = _repository_relative(
+                "semantic.slayer.models", name, within="semantic.slayer.base_dir"
+            )
+            parts = path.parts
+            if parts and parts[0] in _SLAYER_NEVER_READ:
+                raise ValueError(
+                    f"semantic.slayer.models: '{name}' is not a model. SLayer "
+                    "datasource files and priority.yaml carry connection "
+                    "credentials and settings, and dex neither reads nor writes them"
+                )
+            if (
+                len(parts) != 3
+                or parts[0] != "models"
+                or not parts[2].endswith((".yaml", ".yml"))
+            ):
+                raise ValueError(
+                    f"semantic.slayer.models: '{name}' is not where SLayer keeps a "
+                    "model; write it as models/<data_source>/<name>.yaml, relative "
+                    "to semantic.slayer.base_dir"
+                )
+        if duplicated := sorted({n for n in self.models if self.models.count(n) > 1}):
+            raise ValueError(
+                "semantic.slayer.models names the same model twice: "
+                f"{', '.join(duplicated)}"
+            )
+        return self
+
+
 class SemanticConfig(BaseModel):
     """How ``explore semantic`` reaches the semantic layer, on two axes.
 
-    ``vendor`` is which semantic-layer format answers: ``dbt``/MetricFlow, or
-    ``ossie`` for native Apache Ossie documents in the repository. It is
+    ``vendor`` is which semantic-layer format answers: ``dbt``/MetricFlow,
+    ``ossie`` for native Apache Ossie documents in the repository, or ``slayer``
+    for SLayer model files in the repository. It is
     ambient per repo, chosen once, the same rule ``connector:`` follows: a repo
     has one semantic layer, so there is no more reason to retype the vendor per
     command than to retype the warehouse.
@@ -593,7 +811,9 @@ class SemanticConfig(BaseModel):
     DuckDB needs a local file); ``dbt_cloud`` sends the query to a hosted dbt Cloud
     Semantic Layer over GraphQL and needs no local project (like BigQuery needs no
     local DuckDB). For Ossie there is one deployment, ``local``, because Ossie
-    specifies an interchange document rather than a service to reach.
+    specifies an interchange document rather than a service to reach. SLayer has
+    one too, ``local``, the model files committed here; a SLayer server is not a
+    deployment dex authors against.
 
     ``ossie.files`` names those documents, relative to the repository root, and
     is required with ``vendor: ossie`` and refused without it. It is the whole
@@ -601,6 +821,12 @@ class SemanticConfig(BaseModel):
     a document dex was not told to read is a document nobody reviewed. This
     remains true for a repository with no dbt project: Ossie is configured on
     the semantic axis and supplies the semantic catalog only.
+
+    ``slayer.base_dir`` and ``slayer.models`` are SLayer's equivalent, with the
+    same rules (see :class:`SlayerSemanticConfig`). Under ``vendor: slayer`` the
+    SLayer files are the repository's one semantic layer: a dbt project beside
+    them keeps the transformation tiers, and its MetricFlow semantic models are
+    not read.
 
     A third property, **who executes**, is derived from those two and never
     configured, because it is what decides whether the cost guard can apply at
@@ -625,6 +851,7 @@ class SemanticConfig(BaseModel):
     host: str | None = None
     environment_id: str | None = None
     ossie: OssieSemanticConfig = Field(default_factory=OssieSemanticConfig)
+    slayer: SlayerSemanticConfig = Field(default_factory=SlayerSemanticConfig)
 
     @model_validator(mode="after")
     def _check_axes(self) -> SemanticConfig:
@@ -678,15 +905,17 @@ class SemanticConfig(BaseModel):
         # written per vendor, so the next one is a row rather than three more
         # conditions here.
         for named, section in _vendor_sections(self):
-            if named == vendor and not section.files:
+            listing = section.LISTING
+            if named == vendor and not getattr(section, listing):
                 raise ValueError(
-                    f"semantic.vendor: {named} needs semantic.{named}.files: "
-                    "the native documents to read, named relative to the "
-                    "repository root"
+                    f"semantic.vendor: {named} needs semantic.{named}.{listing}: "
+                    f"{section.LISTING_MEANS}"
                 )
-            if named != vendor and section.files:
+            if named != vendor and (written := _written_keys(section)):
+                keys = " and ".join(f"semantic.{named}.{key}" for key in written)
+                verb = "is" if len(written) == 1 else "are"
                 raise ValueError(
-                    f"semantic.{named}.files is only valid for semantic.vendor: {named}"
+                    f"{keys} {verb} only valid for semantic.vendor: {named}"
                 )
         # `host` and `environment_id` reach a hosted service, so they are
         # meaningless for a vendor with no hosted deployment. Read off the
@@ -698,6 +927,23 @@ class SemanticConfig(BaseModel):
                 f"hosted deployment (it offers {', '.join(allowed)})"
             )
         return self
+
+
+def _written_keys(section: BaseModel) -> list[str]:
+    """The keys of a vendor section that say something, in declaration order.
+
+    A key written with its default value (``files: []``) says nothing and is not
+    counted, which keeps a config that spells out an empty section valid under
+    any vendor, as it always has been.
+    """
+
+    fields = type(section).model_fields
+    return [
+        key
+        for key in fields
+        if key in section.model_fields_set
+        and getattr(section, key) != fields[key].get_default(call_default_factory=True)
+    ]
 
 
 def _vendor_sections(semantic: SemanticConfig) -> list[tuple[str, Any]]:
@@ -824,12 +1070,23 @@ class DexConfig(BaseModel):
     # settings are not the ones in play would record a decision about the wrong
     # project's budget. See `session_ceiling_undecided`.
     _source_path: Path | None = PrivateAttr(default=None)
+    # What the file says that does not stop a command (a key the schema does not
+    # know, a key written twice), phrased for an envelope. Stamped by
+    # `load_config` beside the path, since only a config read from a file can
+    # have said anything wrong.
+    _load_warnings: list[str] = PrivateAttr(default_factory=list)
 
     @property
     def source_path(self) -> Path | None:
         """The file this config was loaded from, or None if it was not loaded."""
 
         return self._source_path
+
+    @property
+    def load_warnings(self) -> list[str]:
+        """Problems the file has that every command reports and none refuses."""
+
+        return list(self._load_warnings)
 
     # The DuckDB on-ramp: a config that omits `connector:` (or a bare `--path`
     # read with no config) means the free local connector. This default only
@@ -845,6 +1102,7 @@ class DexConfig(BaseModel):
     postgres: PostgresTarget | None = None
     redshift: RedshiftTarget | None = None
     clickhouse: ClickHouseTarget | None = None
+    trino: TrinoTarget | None = None
     dbt_target: str | None = None
     # Which format owns the source of truth. Defaults to dbt, so a repo that
     # selects nothing behaves exactly as it did before this setting existed.
@@ -943,8 +1201,12 @@ def record_session_ceiling_decision(
     Re-read from disk rather than amended in memory on purpose. The config the
     engine is holding may have been overridden for this run (``--connector``, an
     injected object), and writing that back would commit a one-run override as a
-    project setting. Only the budget field the decision names is touched.
+    project setting. Only the budget lines the decision names are touched: the
+    file is edited in place, so its comments, key order, and any key this release
+    does not read all survive the answer.
     """
+
+    from .config_document import ConfigDocument
 
     if (session_ceiling is None) == (not declined):
         raise ConfigurationError(
@@ -968,38 +1230,39 @@ def record_session_ceiling_decision(
             "first (`dex transform init` writes one), or pass --budget alone "
             "for an ad-hoc read"
         )
-    old = path.read_text(encoding="utf-8")
-    config = DexConfig.model_validate(yaml.safe_load(old) or {})
+    before = ConfigDocument.read(path)
+    # Set before the other key is removed, so the block is never left empty
+    # in between (an emptied block goes with its last key, and re-adding it
+    # would move it to the end of the file).
     if declined:
-        config.budget.session_ceiling = None
-        config.budget.session_ceiling_declined = True
-        config.budget.model_fields_set.discard("session_ceiling")
+        after = before.with_value("budget.session_ceiling_declined", True).without(
+            "budget.session_ceiling"
+        )
     else:
-        config.budget.session_ceiling = session_ceiling
         # A ceiling supersedes an earlier decline, and once it does, the flag is
-        # noise in a committed file: dropped rather than written as an explicit
+        # noise in a committed file: removed rather than written as an explicit
         # `false` that reads like a second setting.
-        config.budget.session_ceiling_declined = False
-        config.budget.model_fields_set.discard("session_ceiling_declined")
-    # `budget` itself has to join `model_fields_set`, or `save_config`'s
-    # `exclude_unset` dump drops the whole block a nested assignment landed in.
-    config.budget = config.budget
-    save_config(config, root)
-    return config, file_diff(
-        f"{DEX_DIR}/{CONFIG_FILE}", old, path.read_text(encoding="utf-8")
-    )
+        after = before.with_value("budget.session_ceiling", session_ceiling).without(
+            "budget.session_ceiling_declined"
+        )
+    config = after.config()
+    after.write(path)
+    return config, after.diff_from(before)
 
 
 def load_config(repo_root: Path | str = ".") -> DexConfig | None:
+    from .config_document import ConfigDocument
+
     path = Path(repo_root) / DEX_DIR / CONFIG_FILE
     if not path.is_file():
         return None
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    config = DexConfig.model_validate(raw)
+    document = ConfigDocument.read(path)
+    config = document.config()
     # Stamped here and nowhere else: this is the only function that turns a file
     # into a config, so it is the only one that can honestly say a config came
     # from one. See `DexConfig.source_path`.
     config._source_path = path
+    config._load_warnings = document.warnings()
     return config
 
 
