@@ -882,3 +882,110 @@ def test_a_yaml_file_that_does_not_parse_is_unread_not_a_global_limit(project):
 
     assert index.unread == ["models/broken.yml"]
     assert not any("broken.yml" in limit for limit in index.limits)
+
+
+def test_snapshot_and_python_relation_reads_preserve_seed_and_snapshot_kinds(tmp_path):
+    """A YAML snapshot reading a seed and a Python model reading a YAML snapshot
+    keep their targets' actual kinds rather than defaulting to `model`.
+    """
+
+    root = tmp_path / "analytics"
+    _write(
+        root / "dbt_project.yml",
+        'name: analytics\nversion: "1.0.0"\nprofile: analytics\n',
+    )
+    _write(root / "seeds" / "codes.csv", "code\nIT\n")
+    _write(
+        root / "models" / "py_orders.py",
+        'def model(dbt, session):\n    return dbt.ref("history")\n',
+    )
+    _write(
+        root / "snapshots" / "snapshots.yml",
+        "snapshots:\n  - name: history\n    relation: ref('codes')\n",
+    )
+    view = load(root)
+    index = ReferenceIndex(view)
+
+    seed_hits, _limits = index.references_to("codes", "seed")
+    assert [
+        (hit.path, hit.line, hit.form, hit.kind)
+        for hit in seed_hits
+        if hit.form == "yaml_snapshot_relation"
+    ] == [("snapshots/snapshots.yml", 3, "yaml_snapshot_relation", "seed")]
+    assert [
+        hit
+        for hit in index.references_to("codes", "model")[0]
+        if hit.form == "yaml_snapshot_relation"
+    ] == []
+
+    snapshot_hits, _limits = index.references_to("history", "snapshot")
+    assert [
+        (hit.path, hit.line, hit.form, hit.kind)
+        for hit in snapshot_hits
+        if hit.form == "python_ref"
+    ] == [("models/py_orders.py", 2, "python_ref", "snapshot")]
+    assert [
+        hit
+        for hit in index.references_to("history", "model")[0]
+        if hit.form == "python_ref"
+    ] == []
+
+    seed_report = find_references(view, ["codes"], kind="seed")
+    assert seed_report.completeness == "complete"
+    assert {f["path"] for f in seed_report.targets[0]["files"]} == {
+        "seeds/codes.csv",
+        "snapshots/snapshots.yml",
+    }
+
+    snapshot_report = find_references(view, ["history"], kind="snapshot")
+    assert snapshot_report.completeness == "complete"
+    assert "models/py_orders.py" in {
+        f["path"] for f in snapshot_report.targets[0]["files"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("decl_file", "reader_file"),
+    [("a_decl.yml", "z_reader.yml"), ("z_decl.yml", "a_reader.yml")],
+)
+def test_yaml_declared_snapshot_kind_is_independent_of_traversal_order(
+    tmp_path, decl_file, reader_file
+):
+    """Reference kind resolution does not depend on file traversal order."""
+
+    root = tmp_path / "analytics"
+    _write(
+        root / "dbt_project.yml",
+        'name: analytics\nversion: "1.0.0"\nprofile: analytics\n',
+    )
+    _write(root / "seeds" / "codes.csv", "code\nIT\n")
+    _write(
+        root / "models" / "a_model.sql",
+        "select * from {{ ref('history') }}\n",
+    )
+    _write(
+        root / "models" / "a_py.py",
+        'def model(dbt, session):\n    return dbt.ref("history")\n',
+    )
+    _write(
+        root / "snapshots" / decl_file,
+        "snapshots:\n  - name: history\n    relation: ref('codes')\n",
+    )
+    _write(
+        root / "snapshots" / reader_file,
+        "snapshots:\n  - name: downstream_history\n    relation: ref('history')\n",
+    )
+    view = load(root)
+    index = ReferenceIndex(view)
+
+    hits, _limits = index.references_to("history", "snapshot")
+    assert {
+        (hit.path, hit.form, hit.kind)
+        for hit in hits
+        if hit.form in ("ref_call", "python_ref", "yaml_snapshot_relation")
+    } == {
+        ("models/a_model.sql", "ref_call", "snapshot"),
+        ("models/a_py.py", "python_ref", "snapshot"),
+        (f"snapshots/{reader_file}", "yaml_snapshot_relation", "snapshot"),
+    }
+    assert index.references_to("history", "model")[0] == []
