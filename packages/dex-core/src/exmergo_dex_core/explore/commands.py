@@ -347,13 +347,34 @@ def inventory(
         # ranked inventory would silently ignore the user's bias.
         scores = rank_mod.rank(metas, None, engine.config.ranking_hints)
         metas = sorted(metas, key=lambda m: scores.get(m.identifier, 0.0), reverse=True)
-        notes.append(
-            "ranked by size (row count), naming convention (fct/dim/stg-style "
-            "prefixes score higher, tmp/scratch-style lower), and shape (column "
-            "count); connectivity (how many objects it joins to) is not part of "
-            "this score, because inventory runs no relationship pass. `explore "
-            "map` ranks with connectivity included"
-        )
+        # Size only orders what reported a count (#717): on Trino no
+        # `information_schema` carries one, so every object ties on that signal
+        # and the order is the catalog's, which a note claiming a size order
+        # would describe wrongly.
+        counted = sum(1 for m in metas if m.row_count is not None)
+        if counted:
+            notes.append(
+                "ranked by size (row count), naming convention (fct/dim/stg-style "
+                "prefixes score higher, tmp/scratch-style lower), and shape (column "
+                "count); connectivity (how many objects it joins to) is not part of "
+                "this score, because inventory runs no relationship pass. `explore "
+                "map` ranks with connectivity included"
+            )
+        else:
+            notes.append(
+                "ranked by naming convention (fct/dim/stg-style prefixes score "
+                "higher, tmp/scratch-style lower) and shape (column count); size "
+                "(row count) contributed nothing, because no object reported a "
+                "count, and objects that tie keep the order the catalog returned. "
+                "Connectivity (how many objects it joins to) is not part of this "
+                "score, because inventory runs no relationship pass. `explore map` "
+                "ranks with connectivity included"
+            )
+        if counted and counted < len(metas):
+            notes.append(
+                f"{len(metas) - counted} of {len(metas)} object(s) reported no row "
+                "count, so size ranked only the rest"
+            )
         if not show_all:
             cap = limit if limit is not None else _INVENTORY_RANK_DEFAULT_LIMIT
             elided = max(0, len(metas) - cap)
