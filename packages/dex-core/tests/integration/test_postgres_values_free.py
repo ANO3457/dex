@@ -48,6 +48,23 @@ def _surfaced_values(envelope: dict) -> set[str]:
     return {value for value in found if len(value) >= 4}
 
 
+def _counts(value) -> set[str]:
+    """Every integer the envelope reports under a ``*_count`` key, as text. The
+    mode keeps counts, so a source value that equals one (the orders row count
+    and maximum id are both 2000) is not a leak when the count carries it."""
+
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.endswith("count") and isinstance(item, int):
+                found.add(str(item))
+            found |= _counts(item)
+    elif isinstance(value, list):
+        for item in value:
+            found |= _counts(item)
+    return found
+
+
 def test_values_free_profile_and_query_withhold_values_but_keep_counts(
     tmp_path: Path, capsys
 ):
@@ -101,7 +118,9 @@ def test_values_free_profile_and_query_withhold_values_but_keep_counts(
         for column in dataset["columns"]:
             assert not value_fields.intersection(column)
     text = json.dumps(moded)
-    assert not [value for value in surfaced if value in text]
+    searched = surfaced - _counts(moded["data"])
+    assert searched, "every surfaced value coincides with a count; nothing to search"
+    assert not [value for value in searched if value in text]
 
     rc, counted = run_cli(
         [
