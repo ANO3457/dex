@@ -2639,7 +2639,7 @@ def build(
     if dependencies is DependencyPolicy.REFUSE:
         assert_packages_installed(project)
 
-    estimate, per_node, price_notes, adapter = _price_build(
+    estimate, per_node, price_notes, upper_bounds, adapter = _price_build(
         engine, project, target, select, verify=verify
     )
     if estimate is not None:
@@ -2649,6 +2649,7 @@ def build(
             estimate,
             per_table=per_node or None,
             notes=price_notes or None,
+            upper_bounds=upper_bounds or None,
         )
     try:
         summary, cost = run_build(
@@ -2715,7 +2716,11 @@ def build(
         paradigm,
         connector,
         store,
-        extra_notes=[*price_notes, *dev_warnings],
+        extra_notes=[
+            *price_notes,
+            *command_args.upper_bound_notes(upper_bounds, per_node),
+            *dev_warnings,
+        ],
         session_ceiling=config.budget.session_ceiling,
         session_ceiling_declined=config.budget.session_ceiling_declined,
         gate=command_args.cost_gate(adapter) if adapter is not None else None,
@@ -3265,7 +3270,10 @@ def _price_build(
 ):
     """Price a billed build upfront with a free ``dbt compile`` dry-run.
 
-    Returns ``(estimate, per_node, notes, adapter)``. ``estimate`` is ``None``
+    Returns ``(estimate, per_node, notes, upper_bounds, adapter)``.
+    ``upper_bounds`` maps the per-node lines the connector priced unpruned (an
+    incremental watermark a dry run cannot prune on) to why; it is empty unless
+    the connector says its estimator has that blind spot. ``estimate`` is ``None``
     when pricing could not be produced (no reachable dex connection, a compile
     failure): the build normally still runs, gated by the ceiling and the
     server-side cap, with a note saying why no number was shown. ClickHouse
@@ -3345,7 +3353,18 @@ def _price_build(
             if scan:
                 estimate += scan
                 per_node = {**per_node, "(row counts)": scan}
-        return estimate, per_node, notes, adapter
+        upper_bounds: dict[str, str] = {}
+        if getattr(adapter, "prunes_dynamic_bounds_at_run_time", False):
+            from .build import dynamic_bound_nodes
+
+            upper_bounds = {
+                label: reason
+                for label, reason in dynamic_bound_nodes(
+                    project, dialect=adapter.dialect
+                ).items()
+                if label in per_node
+            }
+        return estimate, per_node, notes, upper_bounds, adapter
     except Exception as exc:
         if engine.config.guards.approved_functions:
             # An enabled execution check cannot degrade to an unchecked build.
@@ -3356,7 +3375,7 @@ def _price_build(
             f"could not price this build upfront ({type(exc).__name__}: {exc}); "
             "the budget and the server-side per-statement cap still bind"
         )
-        return None, {}, [env.redact(note)], adapter
+        return None, {}, [env.redact(note)], {}, adapter
 
 
 def _build_confirmation(target: str, cost, notes=()):

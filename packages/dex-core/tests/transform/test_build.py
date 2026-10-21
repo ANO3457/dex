@@ -924,6 +924,162 @@ def test_billed_build_unconfirmed_needs_confirmation_with_estimate(
     assert envelope["data"]["per_table_bytes"]["stg_customers"] == 5_000_000.0
 
 
+_WATERMARKED_EVENTS = (
+    "select * from `p`.`raw`.`events`\n"
+    "where event_date >= (select date_sub(max(event_date), interval 3 day) "
+    "from `p`.`dev`.`stg_events`)"
+)
+
+
+def _write_incremental_artifacts(project: Path) -> None:
+    """The compile artifacts of a build with one watermarked incremental model
+    beside a plain table, as `dbt compile` leaves them once the incremental
+    relation exists (so its `is_incremental()` branch is rendered)."""
+
+    nodes = {
+        "model.p.stg_events": {
+            "resource_type": "model",
+            "name": "stg_events",
+            "compiled_code": _WATERMARKED_EVENTS,
+            "config": {"materialized": "incremental"},
+        },
+        "model.p.dim_customers": {
+            "resource_type": "model",
+            "name": "dim_customers",
+            "compiled_code": "select * from `p`.`raw`.`customers`",
+            "config": {"materialized": "table"},
+        },
+    }
+    _write_manifest(project, nodes)
+    (project / "target" / "run_results.json").write_text(
+        json.dumps({"results": [{"unique_id": uid} for uid in nodes]}),
+        encoding="utf-8",
+    )
+
+
+def test_billed_build_marks_a_watermarked_incremental_line_an_upper_bound(
+    bigquery_project_dir: Path, tmp_path: Path, capsys, monkeypatch
+):
+    """Issue #323: a dry run cannot prune on a watermark computed by a subquery,
+    so the incremental line prices the whole history while the job bills the
+    window. The ask keeps the number and says which lines are upper bounds."""
+
+    from exmergo_dex_core.envelope import Paradigm
+
+    adapter = _install_fake_pricing(
+        monkeypatch,
+        connector="bigquery",
+        paradigm=Paradigm.BYTES_SCANNED,
+        estimate=7_000_000_000.0,
+        per_node={"stg_events": 6_000_000_000.0, "dim_customers": 1_000_000_000.0},
+        confirmed=False,
+        ceiling=10_000_000_000,
+    )
+    adapter.prunes_dynamic_bounds_at_run_time = True
+    _write_incremental_artifacts(bigquery_project_dir)
+    rc, envelope = _run(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--connector",
+            "bigquery",
+            "transform",
+            "build",
+            "--target",
+            "dev",
+            "--budget",
+            "10000000000",
+        ],
+        capsys,
+    )
+    assert rc == 0
+    assert envelope["status"] == "needs_confirmation"
+    # The breakdown is unchanged: an upper bound is still what to reserve.
+    assert envelope["data"]["per_table_bytes"]["stg_events"] == 6_000_000_000.0
+    assert set(envelope["data"]["upper_bounds"]) == {"stg_events"}
+    assert "event_date" in envelope["data"]["upper_bounds"]["stg_events"]
+    note = next(n for n in envelope["data"]["notes"] if "upper bounds" in n)
+    assert "stg_events" in note and "6,000,000,000" in note
+    assert "dim_customers" not in note
+
+
+def test_over_ceiling_build_refusal_names_its_upper_bound_lines(
+    bigquery_project_dir: Path, tmp_path: Path, capsys, monkeypatch
+):
+    """The refusal is what an operator acts on, so it has to tell an
+    over-estimate from a genuinely expensive build (#323)."""
+
+    from exmergo_dex_core.envelope import Paradigm
+
+    adapter = _install_fake_pricing(
+        monkeypatch,
+        connector="bigquery",
+        paradigm=Paradigm.BYTES_SCANNED,
+        estimate=7_000_000_000.0,
+        per_node={"stg_events": 6_000_000_000.0, "dim_customers": 1_000_000_000.0},
+        confirmed=True,
+        ceiling=5_000_000_000,
+    )
+    adapter.prunes_dynamic_bounds_at_run_time = True
+    _write_incremental_artifacts(bigquery_project_dir)
+    _rc, envelope = _run(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--connector",
+            "bigquery",
+            "transform",
+            "build",
+            "--target",
+            "dev",
+            "--confirm",
+            "--budget",
+            "5000000000",
+        ],
+        capsys,
+    )
+    assert envelope["status"] == "error"
+    message = " ".join(str(e) for e in envelope["errors"])
+    assert "upper bounds" in message and "stg_events" in message
+
+
+def test_build_marks_no_upper_bound_where_the_estimator_prunes_dynamically(
+    bigquery_project_dir: Path, tmp_path: Path, capsys, monkeypatch
+):
+    """Only a connector that says its estimate cannot prune a dynamic bound gets
+    the label; elsewhere the same SQL carries no claim about its line."""
+
+    from exmergo_dex_core.envelope import Paradigm
+
+    _install_fake_pricing(
+        monkeypatch,
+        connector="bigquery",
+        paradigm=Paradigm.BYTES_SCANNED,
+        estimate=7_000_000_000.0,
+        per_node={"stg_events": 6_000_000_000.0, "dim_customers": 1_000_000_000.0},
+        confirmed=False,
+        ceiling=10_000_000_000,
+    )
+    _write_incremental_artifacts(bigquery_project_dir)
+    _rc, envelope = _run(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--connector",
+            "bigquery",
+            "transform",
+            "build",
+            "--target",
+            "dev",
+            "--budget",
+            "10000000000",
+        ],
+        capsys,
+    )
+    assert envelope["status"] == "needs_confirmation"
+    assert "upper_bounds" not in envelope["data"]
+
+
 def test_billed_build_surfaces_estimate_quality_on_compute_time(
     bigquery_project_dir: Path, tmp_path: Path, capsys, monkeypatch
 ):
@@ -2064,6 +2220,60 @@ def test_compile_estimate_prices_each_version_of_a_model_separately(
     assert per_node == {"dim_customers.v1": 10.0, "dim_customers.v2": 10.0}
     assert total == sum(per_node.values())
     assert build_mod.compiled_model_ids(dbt_project_dir) == set(nodes)
+
+
+def test_dynamic_bound_nodes_finds_an_incremental_watermark_and_nothing_else(
+    dbt_project_dir: Path,
+):
+    """Only an incremental model whose batch filter is bounded by a subquery is
+    an upper bound: a constant bound is pruned by the dry run itself, and a
+    subquery bound on a full rebuild prunes nothing either way."""
+
+    build_mod = importlib.import_module("exmergo_dex_core.transform.build")
+
+    def model(name, code, materialized):
+        return {
+            "resource_type": "model",
+            "name": name,
+            "compiled_code": code,
+            "config": {"materialized": materialized},
+        }
+
+    nodes = {
+        "model.p.watermarked": model("watermarked", _WATERMARKED_EVENTS, "incremental"),
+        # The watermark inside a CTE, as a staging model often writes it.
+        "model.p.cte_watermark": model(
+            "cte_watermark",
+            "with batch as (select * from `p`.`raw`.`events` e where e.loaded_at"
+            " > (select max(loaded_at) from `p`.`dev`.`cte_watermark`))"
+            " select * from batch",
+            "incremental",
+        ),
+        "model.p.constant_window": model(
+            "constant_window",
+            "select * from `p`.`raw`.`events` "
+            "where event_date >= date_sub(current_date(), interval 3 day)",
+            "incremental",
+        ),
+        "model.p.semi_join": model(
+            "semi_join",
+            "select * from `p`.`raw`.`events` where id in (select id from x)",
+            "incremental",
+        ),
+        "model.p.full_table": model("full_table", _WATERMARKED_EVENTS, "table"),
+        "model.p.unparseable": model(
+            "unparseable", "select from where (", "incremental"
+        ),
+    }
+    _write_manifest(dbt_project_dir, nodes)
+    (dbt_project_dir / "target" / "run_results.json").write_text(
+        json.dumps({"results": [{"unique_id": uid} for uid in nodes]}),
+        encoding="utf-8",
+    )
+    bounded = build_mod.dynamic_bound_nodes(dbt_project_dir, dialect="bigquery")
+    assert set(bounded) == {"watermarked", "cte_watermark"}
+    assert "event_date" in bounded["watermarked"]
+    assert "loaded_at" in bounded["cte_watermark"]
 
 
 def test_compile_estimate_skips_and_notes_unpriceable_nodes(

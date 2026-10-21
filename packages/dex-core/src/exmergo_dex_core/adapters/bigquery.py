@@ -175,6 +175,11 @@ class BigQueryAdapter:
     # A dry run is what the job will bill, not a model of it, so this is the
     # one connector whose estimate is exact.
     estimate_quality = EstimateQuality.EXACT
+    # Exact, except where a predicate's bound is computed by a subquery: a dry
+    # run prunes partitions only on constant predicates, and the job prunes on
+    # the subquery's result when it runs. An incremental model's watermark is
+    # that shape, so `transform build` marks its line an upper bound (#323).
+    prunes_dynamic_bounds_at_run_time = True
 
     def __init__(
         self,
