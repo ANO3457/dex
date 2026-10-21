@@ -138,20 +138,26 @@ class DeclarationEdits:
                 "this project format has nowhere for a declaration of "
                 f"'{table}' to land",
             )
-        model = PurePosixPath(path).stem
+        # The model's own file names it. The YAML's name only does when the format
+        # keeps one file per model, and a shared `_staging.yml` would otherwise
+        # name every model in it after the file.
+        model = PurePosixPath(self._placed(EditKind.MODEL_SQL, table) or path).stem
+        # Checked before the placed file is trusted: a format that places by
+        # content answers with the first file declaring the model, so a second
+        # declaration would otherwise go unseen and one of the two be edited.
+        elsewhere = self._declaring(model)
+        if len(elsewhere) > 1:
+            return Declined(
+                path,
+                f"'{model}' is declared in more than one file "
+                f"({', '.join(elsewhere)}), which dbt refuses at parse",
+            )
         content = self.content_for(path)
         if content is None:
             # The placed file is the convention, not a fact about this project: a
             # model documented in a shared `models/schema.yml` has no
             # `stg_<table>.yml`, and writing one beside it is a second patch for
             # the same model, which dbt refuses at parse.
-            elsewhere = self._declaring(model)
-            if len(elsewhere) > 1:
-                return Declined(
-                    path,
-                    f"'{model}' is declared in more than one file "
-                    f"({', '.join(elsewhere)}), which dbt refuses at parse",
-                )
             if not elsewhere:
                 return Declined(
                     path,
@@ -169,10 +175,6 @@ class DeclarationEdits:
             return Declined(path, f"{path} did not parse as YAML")
         if not isinstance(parsed, dict):
             return Declined(path, f"{path} did not parse as YAML")
-        # The model's own file names it. The YAML's name only does when the format
-        # keeps one file per model, and a shared `_staging.yml` would otherwise
-        # name every model in it after the file.
-        model = PurePosixPath(self._placed(EditKind.MODEL_SQL, table) or path).stem
         named = [
             entry
             for entry in parsed.get("models") or []
