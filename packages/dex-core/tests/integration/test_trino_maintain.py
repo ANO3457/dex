@@ -104,6 +104,17 @@ def test_drift_behind_dex_is_detected_and_reconciled(
     )
     _dex(tmp_path, capsys, "transform", "apply", planned["data"]["plan_id"])
 
+    # A hand edit since scaffolding, which reconcile has to leave alone (#713).
+    staging = next((tmp_path / "trshop" / "models").rglob("stg_*.sql"))
+    scaffolded = staging.read_text(encoding="utf-8")
+    assert "        amount,\n" in scaffolded, scaffolded
+    staging.write_text(
+        scaffolded.replace(
+            "        amount,\n", "        cast(amount as decimal(12,2)) as amount,\n"
+        ),
+        encoding="utf-8",
+    )
+
     snapshot = _dex(tmp_path, capsys, "maintain", "snapshot")
     assert snapshot["connection"]["connector"] == "trino"
 
@@ -133,5 +144,16 @@ def test_drift_behind_dex_is_detected_and_reconciled(
     # The drop is mechanical against the scaffolded model, so a plan is stored
     # and nothing is applied: the staging model still selects the column.
     assert reconciled["data"]["plan_id"], reconciled["data"]
-    staging = next((tmp_path / "trshop" / "models").rglob("stg_*.sql"))
     assert "status" in staging.read_text(encoding="utf-8")
+
+    # The edit is the dropped column's line and the comma it leaves behind,
+    # never a regenerated model reverting the cast.
+    relative = staging.relative_to(tmp_path / "trshop").as_posix()
+    diff = next(d for d in reconciled["diffs"] if d["path"] == relative)
+    # status is the last column, so the comma after amount goes with it: two
+    # lines out, the cast back in without its comma, and nothing else.
+    assert (diff["additions"], diff["deletions"]) == (1, 2), diff["unified"]
+    _dex(tmp_path, capsys, "transform", "apply", reconciled["data"]["plan_id"])
+    applied = staging.read_text(encoding="utf-8")
+    assert "cast(amount as decimal(12,2)) as amount" in applied
+    assert "status" not in applied

@@ -100,6 +100,11 @@ Runs `dbt build` against a dev target, with a cost preflight first.
   with `estimated_bytes` and a `per_table_bytes` breakdown; each statement is then
   capped server-side by the profile's `maximum_bytes_billed`, and billed bytes are
   reported afterward.
+- `data.upper_bounds` names the `per_table_bytes` lines that are upper bounds:
+  incremental models whose batch filter is a watermark subquery, which a dry run
+  cannot prune on and the job does. They will likely bill less. An over-ceiling
+  refusal names them too, so tell the user how much of the estimate they are
+  before they choose a budget.
 - A refusal over the ceiling carries a calibration line from `.dex/spend.jsonl`.
   Builds over-estimate most on a partitioned or clustered warehouse.
 - dbt runs with its working directory pinned to the project dir, so relative

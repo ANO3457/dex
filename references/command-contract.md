@@ -756,7 +756,14 @@ replace) inlines a literal credential, so no secret ever reaches the diff.
   `needs_confirmation` estimate. It is a partial floor when a cold dev target has
   not built a node's inputs yet, and degrades to no estimate (with a note) when
   dex cannot open its own connection; the ceiling and the server-side
-  per-statement cap bind regardless. dbt runs with cwd pinned to the project dir
+  per-statement cap bind regardless. On BigQuery, an incremental node whose
+  batch filter is bounded by a subquery (the usual watermark over
+  `{{ this }}`) is an upper bound rather than a measurement: a dry run prunes
+  partitions only on a constant bound, and the job prunes on the subquery's
+  result when it runs. Its `per_table_bytes` line is kept, since it is still
+  what the job can bill at most, and `data.upper_bounds` maps each such line to
+  the column it bounds; a note, and the over-ceiling refusal, say how much of
+  the estimate those lines are. dbt runs with cwd pinned to the project dir
   (relative `profiles.yml` paths resolve there, never against the caller's
   shell). When
   `packages.yml` (or a `dependencies.yml` with packages) is declared and
