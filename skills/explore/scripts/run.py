@@ -414,18 +414,25 @@ def _envelope(
     The wrapper prints an envelope for the few things that happen before the engine
     exists to print its own: the missing-uv refusal and the warm-up. It cannot
     import `exmergo_dex_core.envelope` for precisely that reason, so the keys are
-    mirrored here and have to stay in step with Envelope and Cost. `cost.paradigm`
-    stays null throughout, because nothing here opens a connection and `free_local`
-    is a positive claim that the connector in play bills nothing rather than a
-    stand-in for "no connector was involved". `reason` is populated only on an
-    error, the same rule the engine's Reason enum follows.
+    mirrored here and have to stay in step with Envelope, Connection, and Cost.
+    `cost.paradigm` stays null throughout, because nothing here opens a connection
+    and `free_local` is a positive claim that the connector in play bills nothing
+    rather than a stand-in for "no connector was involved". `reason` is populated
+    only on an error, the same rule the engine's Reason enum follows.
     """
 
     return json.dumps(
         {
             "status": status,
             "data": data or {},
-            "cost": {"paradigm": None, "estimate": None, "ceiling": None},
+            "connection": {"connector": None, "target": {}, "source": None},
+            "cost": {
+                "paradigm": None,
+                "estimate": None,
+                "ceiling": None,
+                "estimate_quality": None,
+                "unit": None,
+            },
             "warnings": [],
             "diffs": [],
             "errors": errors or [],
