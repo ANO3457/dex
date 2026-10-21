@@ -43,9 +43,11 @@ logic.
   resolved connector, its non-secret target coordinates, and the source of that
   resolution (`flag`, `.dex/config.yml`, `environment variable`,
   `dbt profiles.yml`, or `directory-local inference`). Commands that resolve no
-  warehouse keep the same shape with null/empty fields. The block is assembled
-  from facts already resolved by the command and never opens a connection or
-  spends merely to describe one.
+  warehouse keep the same shape with null/empty fields. This includes the
+  wrapper's missing-uv refusal and warm-up responses: their connection fields are
+  null/empty and all cost fields are null, because no warehouse was contacted or
+  query priced. The block is assembled from facts already resolved by the command
+  and never opens a connection or spends merely to describe one.
 - `DBT_PROFILES_DIR` locates `profiles.yml` for dbt operations and the
   last-resort credential fallback. It does **not** select dex's connector or
   override `--connector`/`--path` or `.dex/config.yml`; help and no-connector
