@@ -21,6 +21,55 @@ maintenance.
 [![X](https://img.shields.io/badge/Follow-%40exmergo-165dfc?logo=x&logoColor=white)](https://x.com/exmergo)
 [![Star the repo!](https://img.shields.io/github/stars/exmergo/dex?style=flat&label=Star%20the%20repo!%20%E2%AD%90&labelColor=555&logo=github&logoColor=white&color=165dfc)](https://github.com/exmergo/dex)
 
+## Install
+
+**Any agent** (run in your terminal):
+
+```bash
+npx skills add exmergo/dex
+```
+
+**Claude Code** (run these inside Claude Code, one at a time):
+
+```
+/plugin marketplace add exmergo/exmergo-agent-plugins
+```
+
+```
+/plugin install dex@exmergo
+```
+
+**Codex**:
+
+```bash
+npx skills add exmergo/dex --agent codex
+```
+
+> [!IMPORTANT]
+> **dex needs [`uv`](https://docs.astral.sh/uv/) on your `PATH`.** No agent installs
+> it for you. Run `brew install uv` or `pipx install uv`, or see the
+> [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/)
+> for other platforms. `uv` supplies Python and the engine.
+
+In Claude Code the skills appear as `/dex:explore`, `/dex:transform`, and
+`/dex:maintain` and trigger on matching intent. Update later with
+`/plugin marketplace update exmergo`. Codex also gets a native plugin, with no MCP
+server needed. Any other agent can be pointed at [`AGENTS.md`](AGENTS.md).
+
+Run dex from your project directory, so it finds your `.dex/config.yml` and keeps
+its cache next to your project. dex needs an agent with a local shell, so it does
+not run in claude.ai chat.
+
+> [!TIP]
+> **Skip the first-run wait.** The first command installs the engine, which takes
+> tens of seconds on a cold `uv` cache. Ask your agent to warm dex once after
+> installing, or run the command below in a CI or container build step. Add
+> `--connector snowflake` (or any connector) to warm one before a project exists.
+
+```bash
+uv run --no-project --script skills/<skill>/scripts/run.py --warm
+```
+
 What you get:
 
 - **Explore** a warehouse you have never seen. Ranked inventory, column profiles built from aggregates, PII flags, verified joins, and an ER diagram.
@@ -31,6 +80,10 @@ Read-only against your data. Cost quoted before any spend. Every change is a dif
 you review. Works in Claude Code, Codex, or any agent that loads Agent Skills.
 
 ## Why
+
+> *Most deadly errors arise from obsolete assumptions.*
+>
+> Frank Herbert, *Children of Dune*
 
 A general coding agent is a good SQL author and a poor analytics engineer. It:
 
@@ -96,45 +149,6 @@ type contradicts their content, and two designed PII false positives. See the
 > DuckDB is free and local, so nothing here asks you to confirm a spend. On a
 > metered warehouse the same commands return an estimate first and run only once
 > you agree to it.
-
-## Install in your agent
-
-**1. Install `uv`.** dex installs and runs its engine through
-[`uv`](https://docs.astral.sh/uv/), and no agent installs it for you:
-
-```bash
-brew install uv        # or: pipx install uv
-```
-
-Other platforms are in the [uv installation docs](https://docs.astral.sh/uv/getting-started/installation/).
-`uv` supplies Python and the engine, with the right connector extra chosen at runtime.
-
-**2. Add the skills to your agent.**
-
-| Agent | Install |
-|---|---|
-| **Claude Code** | Inside Claude Code, run `/plugin marketplace add exmergo/exmergo-agent-plugins`, then `/plugin install dex@exmergo` |
-| **Codex** | `npx skills add exmergo/dex --agent codex` (also packaged as a native Codex plugin, no MCP server needed) |
-| **Any other agent** | `npx skills add exmergo/dex`, and point the agent at [`AGENTS.md`](AGENTS.md) |
-
-In Claude Code the skills appear as `/dex:explore`, `/dex:transform`, and
-`/dex:maintain` and trigger on matching intent. Update later with
-`/plugin marketplace update exmergo`.
-
-**3. Run it from your project directory**, so dex finds your `.dex/config.yml` and
-keeps its cache next to your project.
-
-> [!TIP]
-> **Skip the first-run wait.** The first command installs the engine, which takes
-> tens of seconds on a cold `uv` cache. Ask your agent to warm dex once after
-> installing, or run the command below in a CI or container build step. Add
-> `--connector snowflake` (or any connector) to warm one before a project exists.
-
-```bash
-uv run --no-project --script skills/<skill>/scripts/run.py --warm
-```
-
-dex needs an agent with a local shell. It does not run in claude.ai chat.
 
 ## How it works
 
