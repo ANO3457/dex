@@ -75,6 +75,20 @@ class Declined:
     reason: str
 
 
+@dataclass(frozen=True)
+class Covered:
+    """The declaration already says what the drift asks of it.
+
+    Distinct from a refusal: nothing stops the edit, there is just no edit to
+    make. A drift the project has already absorbed (an applied plan that added
+    the column, a hand edit that removed it) arrives here, and a caller reading a
+    refusal into it would tell the reader dex could not do something it never
+    needed to.
+    """
+
+    reason: str
+
+
 @dataclass
 class _Staged:
     """One path's pending change: a whole replacement, spans, or both."""
@@ -124,12 +138,28 @@ class DeclarationEdits:
                 "this project format has nowhere for a declaration of "
                 f"'{table}' to land",
             )
+        model = PurePosixPath(path).stem
         content = self.content_for(path)
         if content is None:
-            return Declined(
-                path,
-                f"{path} is not among the files this project format's view returned",
-            )
+            # The placed file is the convention, not a fact about this project: a
+            # model documented in a shared `models/schema.yml` has no
+            # `stg_<table>.yml`, and writing one beside it is a second patch for
+            # the same model, which dbt refuses at parse.
+            elsewhere = self._declaring(model)
+            if len(elsewhere) > 1:
+                return Declined(
+                    path,
+                    f"'{model}' is declared in more than one file "
+                    f"({', '.join(elsewhere)}), which dbt refuses at parse",
+                )
+            if not elsewhere:
+                return Declined(
+                    path,
+                    f"{path} is not among the files this project format's view "
+                    f"returned, and no other file declares '{model}'",
+                )
+            path = elsewhere[0]
+            content = self.content_for(path) or ""
         for pattern, complaint in _UNSPANNABLE:
             if pattern.search(content):
                 return Declined(path, f"{path} {complaint}")
@@ -139,7 +169,6 @@ class DeclarationEdits:
             return Declined(path, f"{path} did not parse as YAML")
         if not isinstance(parsed, dict):
             return Declined(path, f"{path} did not parse as YAML")
-        model = PurePosixPath(path).stem
         named = [
             entry
             for entry in parsed.get("models") or []
@@ -148,6 +177,28 @@ class DeclarationEdits:
         if len(named) != 1:
             return Declined(path, f"{path} declares no model named '{model}'")
         return Placed(path, model)
+
+    def _declaring(self, model: str) -> list[str]:
+        """Every YAML file in the view with a ``models:`` entry named ``model``."""
+
+        if self._view is None:
+            return []
+        found = []
+        for path, source in sorted(self._view.files.items()):
+            if not path.endswith((".yml", ".yaml")):
+                continue
+            try:
+                parsed = yaml.safe_load(source.content)
+            except yaml.YAMLError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            if any(
+                isinstance(entry, dict) and entry.get("name") == model
+                for entry in parsed.get("models") or []
+            ):
+                found.append(path)
+        return found
 
     def _placed(self, kind: EditKind, table: str) -> str | None:
         if self._placement is None:
@@ -179,23 +230,42 @@ class DeclarationEdits:
         entry.whole = content
         entry.kind = kind
 
+    def stage_sql(self, path: str, content: str) -> None:
+        """Stage a model's spliced SQL, which the splice already verified.
+
+        Each column's splice is computed against :meth:`content_for`, so several
+        of them on one model compose into the one edit this path gets.
+        """
+
+        self.stage_whole(path, EditKind.MODEL_SQL, content)
+
     def dropping(self, path: str, column: str) -> bool:
         """Whether this run is removing ``column`` from ``path``."""
 
         staged = self._staged.get(path)
-        return staged is not None and column in staged.dropped
+        return staged is not None and column.lower() in staged.dropped
 
-    def add_column(self, placed: Placed, profile: ColumnProfile) -> str | None:
+    def add_column(
+        self, placed: Placed, profile: ColumnProfile
+    ) -> str | Covered | None:
         """Declare a column that appeared upstream. A reason back, or ``None``.
 
         Mirrors what the scaffold writes for one column and nothing further. A
         `column_added` finding carries the type and no nullability, so the profile
-        behind it is nullable by default and neither format proposes a test for it.
+        behind it is nullable by default and neither format proposes a test for it,
+        `unique` least of all: one profile's distinct count is not a grain.
+
+        :class:`Covered` when the model already declares the column.
         """
 
         content = self.content_for(placed.path)
         if content is None:
             return f"{placed.path} is no longer readable"
+        # Case-blind, because a warehouse folds identifiers and a person need not:
+        # Snowflake reports `CHECKSUM` for the `checksum` a schema.yml declares.
+        declared = {name.lower() for name in self._declared(content, placed.model)}
+        if profile.name.lower() in declared:
+            return Covered(f"{placed.path} already declares '{profile.name}'")
         anchored = column_anchor(content, placed.model)
         if anchored is None:
             return (
@@ -218,8 +288,11 @@ class DeclarationEdits:
         entry.columns[placed.model].append(profile.name)
         return None
 
-    def drop_column(self, placed: Placed, column: str) -> str | None:
-        """Undeclare a column that is gone from the warehouse."""
+    def drop_column(self, placed: Placed, column: str) -> str | Covered | None:
+        """Undeclare a column that is gone from the warehouse.
+
+        :class:`Covered` when the model no longer declares it.
+        """
 
         content = self.content_for(placed.path)
         if content is None:
@@ -230,13 +303,16 @@ class DeclarationEdits:
                 for b in yaml_blocks(content)
                 if b.form == "yaml_column"
                 and b.owner == placed.model
-                and b.name == column
+                and (b.name or "").lower() == column.lower()
             ),
             None,
         )
         if block is None:
-            return f"{placed.path} declares no column '{column}' under '{placed.model}'"
+            return Covered(
+                f"{placed.path} declares no column '{column}' under '{placed.model}'"
+            )
         declared = self._declared(content, placed.model)
+        column = block.name or column
         if declared == [column]:
             return (
                 f"removing '{column}' would leave '{placed.model}' in "
@@ -246,7 +322,7 @@ class DeclarationEdits:
         entry.spans.append(
             (block.span[0], before_trailing_blanks(content, block.span[1]), "")
         )
-        entry.dropped.add(column)
+        entry.dropped.add(column.lower())
         entry.columns.setdefault(placed.model, list(declared))
         if column in entry.columns[placed.model]:
             entry.columns[placed.model].remove(column)
