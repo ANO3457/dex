@@ -167,14 +167,31 @@ The skills are thin. All the logic, and every guardrail, lives in one engine
 Your repository is the source of truth on two independent axes: the transformation
 project (dbt) and the semantic layer. The `.dex/` directory is only a cache.
 
-| Step | What it does |
-|---|---|
-| [**Explore**](skills/explore/SKILL.md) | Rank what matters, profile selectively, infer and verify joins, answer ad-hoc questions through a PII-aware query firewall, read and query the semantic layer, and draw the map as a Mermaid ER diagram. ([methodology](https://docs.exmergo.com/dex/concepts/methodology), [commands](https://docs.exmergo.com/dex/cli/explore)) |
-| [**Transform**](skills/transform/SKILL.md) | Author and refactor dbt models from staging to marts, with tests and docs, plus the semantic layer on top. Every change is a stored plan you review, then apply. Builds run against a dev target only. ([what dex writes](https://docs.exmergo.com/dex/concepts/dbt-project), [commands](https://docs.exmergo.com/dex/cli/transform)) |
-| [**Maintain**](skills/maintain/SKILL.md) | Diff the warehouse, the project, and the semantic layer against the last snapshot, rank the drift by blast radius, and propose the reconciling edits. `maintain verify` checks a project as it stands, no baseline needed. ([commands](https://docs.exmergo.com/dex/cli/maintain)) |
+### Explore
+
+Rank what matters, profile selectively, infer and verify joins, answer ad-hoc
+questions through a PII-aware query firewall, read and query the semantic layer,
+and draw the map as a Mermaid ER diagram. Fully read-only.
+[Skill](skills/explore/SKILL.md) · [methodology](https://docs.exmergo.com/dex/concepts/methodology) · [commands](https://docs.exmergo.com/dex/cli/explore)
 
 <img width="522" height="343" alt="Explore" src="https://github.com/user-attachments/assets/7f16b370-66ed-4596-ae01-041cf3db3525" />
+
+### Transform
+
+Author and refactor dbt models from staging to marts, with tests and docs, plus the
+semantic layer on top. Every change is a stored plan you review, then apply. Builds
+run against a dev target only.
+[Skill](skills/transform/SKILL.md) · [what dex writes](https://docs.exmergo.com/dex/concepts/dbt-project) · [commands](https://docs.exmergo.com/dex/cli/transform)
+
 <img width="504" height="271" alt="Transform" src="https://github.com/user-attachments/assets/fda40e48-b481-424c-adc7-d79c0ede346b" />
+
+### Maintain
+
+Diff the warehouse, the project, and the semantic layer against the last snapshot,
+rank the drift by blast radius, and propose the reconciling edits. `maintain verify`
+checks a project as it stands, with no baseline needed.
+[Skill](skills/maintain/SKILL.md) · [commands](https://docs.exmergo.com/dex/cli/maintain)
+
 <img width="484" height="344" alt="Maintain" src="https://github.com/user-attachments/assets/ff714eaf-f0b2-46d6-8a4b-c69791740f18" />
 
 ### What dex will never do
