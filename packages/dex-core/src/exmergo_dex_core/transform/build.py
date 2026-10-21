@@ -1084,8 +1084,69 @@ def _assert_compiled_functions(
         raise DbtRunError(f"cannot enforce guards.approved_functions: {exc}") from exc
 
 
+def dynamic_bound_nodes(project_dir: Path | str, *, dialect: str) -> dict[str, str]:
+    """The incremental nodes whose batch filter a dry run prices unpruned.
+
+    An incremental model's batch filter is usually a watermark computed by a
+    subquery over the model's own relation (``where d >= (select max(d) ...
+    from {{ this }})``). ``dbt compile`` renders that branch once the dev
+    relation exists, so the batch ``SELECT`` is what gets priced, but its bound
+    is not a constant: a warehouse that prunes partitions only on constant
+    predicates in a dry run prices the scan as though the filter pruned nothing,
+    and prunes it only when the job runs. Billed then tracks the incremental
+    window while the estimate tracks the accumulated history (issue #323).
+
+    Returns each such node's label (the key :func:`compile_estimate` priced it
+    under) mapped to the reason, naming the bounded column, so the caller can
+    mark that line of the breakdown an upper bound rather than a measurement.
+    Read from the same compile artifacts the estimate was built from, after it;
+    a node whose SQL does not parse is left out rather than guessed at.
+    """
+
+    import sqlglot
+    from sqlglot import expressions as exp
+
+    bounded: dict[str, str] = {}
+    for label, node, code in _priced_manifest_nodes(Path(project_dir).resolve()):
+        if (node.get("config") or {}).get("materialized") != "incremental":
+            continue
+        try:
+            statements = sqlglot.parse(code, dialect=dialect)
+        except sqlglot.errors.SqlglotError:
+            continue
+        columns: set[str] = set()
+        for statement in statements:
+            if statement is None:
+                continue
+            for where in statement.find_all(exp.Where):
+                for predicate in where.find_all(
+                    exp.EQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Between
+                ):
+                    if predicate.find(exp.Subquery) is None:
+                        continue
+                    columns.update(
+                        column.name
+                        for column in predicate.find_all(exp.Column)
+                        if column.find_ancestor(exp.Subquery) is None
+                    )
+        if columns:
+            named = ", ".join(sorted(columns))
+            bounded[label] = (
+                f"incremental batch filter bounds {named} by a subquery, which "
+                "the dry run cannot prune on; the warehouse prunes it when the "
+                "job runs, so this line is an upper bound"
+            )
+    return bounded
+
+
 def _compiled_nodes(project: Path) -> list[tuple[str, str]]:
-    """The (label, compiled SQL) of each priced node dbt just compiled.
+    """The (label, compiled SQL) of each priced node dbt just compiled."""
+
+    return [(label, code) for label, _node, code in _priced_manifest_nodes(project)]
+
+
+def _priced_manifest_nodes(project: Path) -> list[tuple[str, dict[str, Any], str]]:
+    """The (label, manifest node, compiled SQL) of each priced node.
 
     The selected set comes from compile's ``run_results.json`` (which honors the
     same ``--select`` a build would), joined to ``manifest.json`` for each node's
@@ -1103,7 +1164,7 @@ def _compiled_nodes(project: Path) -> list[tuple[str, str]]:
         if r.get("unique_id")
     ]
     nodes = json.loads(manifest.read_text(encoding="utf-8")).get("nodes", {})
-    priced: list[tuple[str, str]] = []
+    priced: list[tuple[str, dict[str, Any], str]] = []
     for uid in compiled_ids:
         node = nodes.get(uid)
         if not node or node.get("resource_type") not in _PRICED_RESOURCE_TYPES:
@@ -1113,7 +1174,7 @@ def _compiled_nodes(project: Path) -> list[tuple[str, str]]:
         code = node.get("compiled_code")
         if not code or not str(code).strip():
             continue
-        priced.append((manifest_node_label(uid, node), str(code)))
+        priced.append((manifest_node_label(uid, node), node, str(code)))
     return priced
 
 

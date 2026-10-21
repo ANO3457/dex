@@ -241,7 +241,8 @@ a field, flag, or macro you need is not described here.
   `profiles.yml`), or give the user the `CREATE` or `GRANT` statement to run.
   dex will not create a database itself.
 - On a billed connector the first call returns `needs_confirmation` with an
-  estimate (`per_table_bytes` names which node drives it). Surface it, get an
+  estimate (`per_table_bytes` names which node drives it, and `upper_bounds`
+  names the incremental lines that will likely bill less). Surface it, get an
   explicit budget from the user, and re-issue with
   `--confirm --budget <magnitude>` grounded in that number. Never invent a budget, and never retry
   with a raised one after an over-ceiling refusal without asking. Relay the
