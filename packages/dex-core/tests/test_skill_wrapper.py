@@ -17,6 +17,7 @@ path rather than imported.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -429,3 +430,18 @@ def test_both_ways_into_uv_carry_the_child_env(argv, monkeypatch):
     assert len(envs) == 1 and envs[0] is not None
     assert "GITHUB_TOKEN" not in envs[0]
     assert envs[0]["DATABASE_URL"] == "postgresql://dex_ro@localhost/app"
+
+
+@pytest.mark.parametrize("status", ["ok", "error"])
+def test_wrapper_envelope_matches_engine(wrapper, status):
+    """Bootstrap responses obey the same contract as installed-engine responses."""
+    from exmergo_dex_core.envelope import Envelope
+
+    fields = {
+        "data": {"connector": "duckdb"} if status == "ok" else {},
+        "errors": ["uv is required"] if status == "error" else [],
+        "reason": "prerequisite" if status == "error" else None,
+    }
+    actual = json.loads(wrapper._envelope(status, **fields))
+    expected = Envelope(status=status, **fields).model_dump(mode="json")
+    assert actual == expected

@@ -43,9 +43,11 @@ logic.
   resolved connector, its non-secret target coordinates, and the source of that
   resolution (`flag`, `.dex/config.yml`, `environment variable`,
   `dbt profiles.yml`, or `directory-local inference`). Commands that resolve no
-  warehouse keep the same shape with null/empty fields. The block is assembled
-  from facts already resolved by the command and never opens a connection or
-  spends merely to describe one.
+  warehouse keep the same shape with null/empty fields. This includes the
+  wrapper's missing-uv refusal and warm-up responses: their connection fields are
+  null/empty and all cost fields are null, because no warehouse was contacted or
+  query priced. The block is assembled from facts already resolved by the command
+  and never opens a connection or spends merely to describe one.
 - `DBT_PROFILES_DIR` locates `profiles.yml` for dbt operations and the
   last-resort credential fallback. It does **not** select dex's connector or
   override `--connector`/`--path` or `.dex/config.yml`; help and no-connector
@@ -387,6 +389,17 @@ hands it over via `--edits-file <path>` (or `-` for stdin), a JSON payload:
   {"path": "models/marts/dim_orders.sql", "kind": "model_sql", "op": "delete"}
 ]}
 ```
+
+Beside `edits`, `transform plan` and `semantic define|update|plan` accept a
+`declarations` list: per model, what one row is, which rows are in, what each column
+is, and the assumptions the model rests on with their evidence. Each is rendered
+into the model's existing YAML entry as a `schema_yml` edit in the same plan, and
+`edits` may be omitted when the payload only declares models that exist. The plan,
+apply and build envelopes then carry `data.decisions`, every assumption declared on
+the models the command touched. A command that takes no declarations refuses a
+payload carrying them rather than dropping them. The full shape, the refusals and
+what each field renders into:
+[`skills/transform/references/declarations.md`](../skills/transform/references/declarations.md).
 
 `kind` is one of `model_sql`, `schema_yml`, `semantic_yml` (optional on
 `semantic define|update`, which imply `semantic_yml`), `packages_yml`,
