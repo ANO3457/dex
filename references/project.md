@@ -413,7 +413,10 @@ takes its indent from the entries already there rather than from a convention, a
 model declaring no columns is declined instead of being given a `columns:` block it
 never had. A `tests` list stays flow if it was flow and block if it was block, the
 file's own choice between `tests` and `data_tests` is kept, and removing the last
-test removes the key rather than leaving an empty list. A test written as a mapping
+test removes the key rather than leaving an empty list. A dropped column takes the
+comment lines written directly above it at its own indent, since those describe
+it; a comment set apart by a blank line is a header for what follows and stays.
+A blank line between two entries stays wherever the edit happens beside it. A test written as a mapping
 is counted and never rewritten, so a configured `accepted_values` survives an edit to
 the plain names beside it. A file dex cannot span safely, one indented with tabs, one
 holding several YAML documents, or one using anchors and aliases, is declined by name

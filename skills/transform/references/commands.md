@@ -74,7 +74,8 @@ a seed header) and stores them as one plan. Kinds: `column`, `var`, `model`,
 Removes the definition and refuses while any read survives, naming each with a
 file and a line. Same kinds and refusals as `rename`. Hand-authored read edits
 passed with `--edits-file` are validated and stored in the same plan, so the
-removal stays atomic.
+removal stays atomic. A YAML entry is removed with the comment lines written
+directly above it at its own indent; a comment set apart by a blank line stays.
 
 ## `transform place <column> --targets <a,b> --expr "<sql>" [--explain]`
 
