@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 from ..dbt_project import DbtProjectView, EditOp, node_files, node_name, path_family
 from ..errors import RequestError
 from ..references import KINDS, ReferenceIndex
+from ..yaml_spans import with_leading_comments
 from .plans import EditKind, PlanEdit
 from .rewrite import (
     RewriteError,
@@ -473,7 +474,8 @@ class _Builder:
             if block.kind == "column" and not self._owned(block.owner, defining=True):
                 continue
             self.sites[block.form] += 1
-            self._spans[path].append((block.span[0], block.span[1], ""))
+            start = with_leading_comments(content, block.span[0])
+            self._spans[path].append((start, block.span[1], ""))
 
     def _seed_file(self, path: str, content: str) -> None:
         """A seed's header row, and never a row below it.

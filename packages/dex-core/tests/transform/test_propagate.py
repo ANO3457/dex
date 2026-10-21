@@ -462,6 +462,43 @@ class TestRemoval:
         assert "order_id" not in sql.new_content
         assert "customer_id" in sql.new_content
 
+    def test_a_removed_yml_entry_takes_its_own_comment_and_not_a_header(
+        self, project: Path
+    ):
+        """The comment directly above an entry is about it; one set apart is not."""
+
+        _write(
+            project / "models/staging/schema.yml",
+            "version: 2\n"
+            "models:\n"
+            "  - name: stg_orders\n"
+            "    columns:\n"
+            "      # keys\n"
+            "\n"
+            "      # the natural key, reused by the legacy system\n"
+            "      - name: order_id\n"
+            "        tests:\n          - unique\n"
+            "      - name: amount\n",
+        )
+        for name in ("int_orders", "mart_a", "mart_b"):
+            _write(
+                project / f"models/marts/{name}.sql",
+                "select\n    amount\nfrom {{ ref('stg_orders') }}\n",
+            )
+
+        result = _propagate(project, "column", "stg_orders.order_id")
+
+        schema = next(e for e in result.edits if e.path.endswith("schema.yml"))
+        assert schema.new_content == (
+            "version: 2\n"
+            "models:\n"
+            "  - name: stg_orders\n"
+            "    columns:\n"
+            "      # keys\n"
+            "\n"
+            "      - name: amount\n"
+        ), schema.new_content
+
 
 class TestCommandSurface:
     def test_the_command_stores_a_plan_and_reports_the_sites(

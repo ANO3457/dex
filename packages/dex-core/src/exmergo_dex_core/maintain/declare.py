@@ -38,6 +38,7 @@ from ..transform.rewrite import (
     splice,
     yaml_blocks,
 )
+from ..yaml_spans import with_leading_comments
 
 #: Structures a span splice cannot be trusted through. Tabs make indentation
 #: ambiguous, a second document makes "which one" unanswerable, and an alias
@@ -326,7 +327,11 @@ class DeclarationEdits:
             )
         entry = self._staged.setdefault(placed.path, _Staged())
         entry.spans.append(
-            (block.span[0], before_trailing_blanks(content, block.span[1]), "")
+            (
+                with_leading_comments(content, block.span[0]),
+                before_trailing_blanks(content, block.span[1]),
+                "",
+            )
         )
         entry.dropped.add(column.lower())
         entry.columns.setdefault(placed.model, list(declared))

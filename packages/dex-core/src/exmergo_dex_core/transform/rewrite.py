@@ -1286,7 +1286,8 @@ def column_tests_span(
                 return (current.items[index - 1][1], span[1], "")
             return (span[0], current.items[index + 1][0], "")
         start = content.rfind("\n", 0, span[0]) + 1
-        return (start, block_end(content, start, indent_of(content, start)), "")
+        end = block_end(content, start, indent_of(content, start))
+        return (start, before_trailing_blanks(content, end), "")
 
     name = added[0]
     if current.key is None:

@@ -302,6 +302,30 @@ class TestColumnDeclarations:
         assert "          - not_null\n" not in out
         assert "          - accepted_values:\n              values: [1, 2]\n" in out
 
+    def test_a_block_list_item_removed_keeps_the_blank_line_after_it(self):
+        content = (
+            "version: 2\nmodels:\n  - name: orders\n    columns:\n"
+            "      - name: order_id\n"
+            "        tests:\n"
+            "          - unique\n"
+            "          - not_null\n"
+            "\n"
+            "      - name: status\n"
+        )
+
+        out = self._spliced(content, "order_id", ["unique"])
+
+        # The blank line is the separator a human put between two columns, and
+        # it belongs to what follows, the same as it does when an entry is removed.
+        assert out == (
+            "version: 2\nmodels:\n  - name: orders\n    columns:\n"
+            "      - name: order_id\n"
+            "        tests:\n"
+            "          - unique\n"
+            "\n"
+            "      - name: status\n"
+        ), out
+
     def test_a_new_column_takes_the_indent_the_file_already_uses(self):
         content = (
             "version: 2\nmodels:\n  - name: orders\n    columns:\n"
