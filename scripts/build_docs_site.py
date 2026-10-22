@@ -1079,6 +1079,7 @@ def _minor(release: str) -> str:
 
     return ".".join(release.split(".")[:2])
 
+
 #: A link to a route of this section, in Markdown or in a component's `href`.
 #: An archived page's links are moved into its own version, so a reader who
 #: picked v1.14 stays in v1.14 as they follow them.
