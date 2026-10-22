@@ -29,6 +29,10 @@ fingerprints of the dbt project and of the semantic layer.
 - Past 50 objects, `explore map` profiles the top 25 by rank and enters the rest
   as metadata alone. The snapshot envelope reports `column_detail_count` against
   `dataset_count` plus a warning naming what it could not cover.
+- The baseline records the engine release that wrote it (`tool_version`). Every
+  axis that reads it warns when that release is not the running one, because
+  drift measured across an engine change can reflect the engine as well as the
+  warehouse. Re-running `maintain snapshot` re-pins it at the running release.
 - `--project-only` refreshes the transform and semantic fingerprints without
   opening the warehouse, carrying the existing `warehouse` block,
   `warehouse_from`, and `cache_updated_at` forward. It requires an existing

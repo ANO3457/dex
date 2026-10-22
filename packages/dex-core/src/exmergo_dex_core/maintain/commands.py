@@ -37,6 +37,7 @@ from .. import command_args
 from .. import envelope as env
 from ..adapters.base import name_list
 from ..config import pii_override_paths
+from ..engine_version import state_version_warning
 from ..errors import (
     DexError,
     PrerequisiteError,
@@ -2164,4 +2165,17 @@ def _baseline_warnings(
     warnings.extend(
         _cache_age_warnings(snap, freshness_hours, datetime.now(UTC)),
     )
+    # A baseline pinned by another release was measured by that release's
+    # profiler and fingerprinted by its project reader, so some of what this run
+    # reports as drift may be the engine changing rather than the warehouse
+    # (#731). Not a refusal: the baseline still parses, and the operator decides
+    # whether the current state is the one to re-pin.
+    version_warning = state_version_warning(
+        "the drift baseline",
+        snap.tool_version,
+        "drift reported against it may reflect the engine change as well as the "
+        "warehouse; re-run `maintain snapshot` once the current state is known-good",
+    )
+    if version_warning:
+        warnings.append(version_warning)
     return warnings

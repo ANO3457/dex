@@ -24,6 +24,7 @@ import argparse
 import contextlib
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from . import command_args
@@ -1719,6 +1720,18 @@ def main(argv: list[str] | None = None) -> int:
     # nothing. The config verbs carry their own copy and build no engine.
     if engine is not None and engine.config is not None:
         envelope.warnings = list(engine.config.load_warnings) + list(envelope.warnings)
+
+    # A project that pins its own dex-core beside the one running here shares
+    # `.dex/` with it, and nothing else would say so (#731). Read from the
+    # project's own files with no connection, so it rides every envelope, the
+    # config verbs included; best-effort, since a pin dex cannot read is not a
+    # reason to lose the command's answer.
+    with contextlib.suppress(Exception):
+        from .engine_version import pin_warning
+
+        pin = pin_warning(Path(repo_root(args)))
+        if pin is not None:
+            envelope.warnings = [pin, *envelope.warnings]
 
     # A config amendment dex performed on the caller's behalf (the answer to the
     # cumulative-ceiling ask, issue #283) rides out the same way, as a diff:

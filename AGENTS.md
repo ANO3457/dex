@@ -264,6 +264,13 @@ probably meant to be, so a typo in a setting is never a setting that silently
 does nothing. `dex config unset <key>` removes it, and `dex config set` writes the
 key it was meant to be.
 
+Two engines can share one `.dex/`: the one the skills run, and one the project
+itself pins in `uv.lock` or `pyproject.toml`. When those are different releases,
+every envelope's `warnings` names both versions and the file that pins the
+project's one. `cache.json` and `snapshot.json` record the engine that wrote
+them (`tool_version`, `null` where unknown), and a command that reads either one
+written by another release warns so.
+
 Cost is a preflight estimate surfaced **before** any spend. Any command that
 would spend requires an explicit `--confirm` and a session budget: on a metered
 connector the first call returns `needs_confirmation` with a free estimate, and
