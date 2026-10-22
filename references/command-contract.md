@@ -669,11 +669,14 @@ replace) inlines a literal credential, so no secret ever reaches the diff.
   the query firewall like any agent-authored SQL, so the model's parents must be
   profiled and the PII policy applies (a count projects no column, so a filter
   over a flagged column is still attributable and no value crosses the envelope).
-  Nothing is materialized and no relation is created. A change dex cannot isolate
-  or measure reports `attributed: false` and names why: macro-generated SQL, a
-  jinja statement block, a renamed or added CTE that cannot be paired with a
-  prior scope, a relation absent from the cache, or a counterfactual that is not
-  valid on its own because it depends on something else in the same edit.
+  Nothing is materialized and no relation is created. Static `{{ var() }}` calls
+  with a scalar value in `dbt_project.yml` (or a scalar default argument) are
+  resolved in place; a change dex cannot isolate or measure reports
+  `attributed: false` and names why: macro-generated SQL, a jinja statement
+  block, an unresolved or non-scalar `var()`, a renamed or added CTE that cannot
+  be paired with a prior scope, a relation absent from the cache, or a
+  counterfactual that is not valid on its own because it depends on something
+  else in the same edit.
   Authoring a model that does not exist yet produces no findings and opens
   nothing.
 - `transform plan` raises two **advisory warnings about the shape of what was

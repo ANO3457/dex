@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from .dbt_project import (
     DbtProjectView,
     JinjaCall,
+    _project_vars,
     jinja_calls,
     jinja_regions,
     metric_inputs,
@@ -1451,6 +1452,31 @@ def _column_names(key: str, value: Any) -> list[str]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, str)]
     return []
+
+
+def project_vars(view: DbtProjectView) -> dict[str, Any]:
+    """Static ``vars:`` declared in ``dbt_project.yml`` for ``view``.
+
+    Uses the mapping :func:`~..dbt_project.load` already parsed when present,
+    falling back to ``view.files['dbt_project.yml']`` only for hand-built views.
+    """
+
+    if view.vars:
+        return dict(view.vars)
+    source = view.files.get("dbt_project.yml")
+    if source is None:
+        return {}
+    try:
+        parsed = yaml.safe_load(source.content)
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    project_name = parsed.get("name")
+    return _project_vars(
+        parsed,
+        project_name if isinstance(project_name, str) else view.project_name,
+    )
 
 
 def _var_names(parsed: dict[str, Any]) -> list[str]:
