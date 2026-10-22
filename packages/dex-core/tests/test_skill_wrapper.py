@@ -51,6 +51,21 @@ def test_the_three_wrappers_stay_byte_identical():
     assert len(contents) == 1, [path.as_posix() for path in WRAPPERS]
 
 
+def test_the_bundled_engine_builds_at_the_pinned_version(wrapper):
+    """The installed plugin builds `packages/dex-core` from a directory with no
+    .git, so hatch-vcs reports its fallback_version, and that is the version every
+    `.dex/` stamp the plugin writes carries. A fallback that drifted from the pin
+    is #731's `tool_version: 0.0.0`, or a wrong release, in every cache."""
+
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    options = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["hatch"][
+        "version"
+    ]["raw-options"]
+    assert options["fallback_version"] == wrapper.DEX_CORE_VERSION
+
+
 def test_the_wrapper_knows_every_engine_connector(wrapper):
     """An engine connector the wrapper does not name falls back to the DuckDB
     extra, so the installed engine lacks the client and refuses every command for

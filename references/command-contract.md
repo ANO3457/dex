@@ -1507,6 +1507,18 @@ Rules the envelope enforces, all of them Tier-2 eval targets:
   each rides the envelope's `warnings`, so a typo in a setting is never a setting
   that silently does nothing. `dex config validate` reports all of them at once,
   and `dex config unset <key>` removes one.
+- **Two engines on one `.dex/` are named, not refused.** The project's own pin of
+  `exmergo-dex-core` is read from the nearest `uv.lock` (a registry entry) or
+  `pyproject.toml` (an exact `==` requirement) at or above the dex root, up to the
+  enclosing git repository. When it names a different release than the running
+  engine, every envelope, the `config` verbs included, carries one warning naming
+  both versions and the file. A dev segment and a local label are ignored, so two
+  commits of one unreleased version agree. `cache.json` (`provenance.tool_version`)
+  and `snapshot.json` (`tool_version`) record the release that wrote them, `null`
+  where it is unknown, and never the `0.0.0` a build without `.git` used to stamp.
+  The explore commands that fold a prior cache into their own, and every drift
+  axis that reads the baseline, warn when that document came from another
+  release. A stamp of `null` or `0.0.0` records no claim and is never compared.
 - **No secrets, no uncleared values.** `data` is scanned before printing
   (`envelope.sanitize`): a secret-like key or a record-shaped raw-row payload is
   a hard failure, never a silent scrub. Result values appear only in `explore
