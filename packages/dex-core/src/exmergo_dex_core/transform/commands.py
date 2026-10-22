@@ -3515,8 +3515,10 @@ def _shape_build_result(
         and _execution_seconds(summary) > 0
     ):
         uptime_notes = [_UNMODELED_UPTIME_NOTES[connector]]
+    informational: list[str] = []
     if verification is not None:
         notes = [*notes, *verification.warnings]
+        informational = list(verification.notes)
         if verification.findings:
             notes = [
                 *notes,
@@ -3561,6 +3563,7 @@ def _shape_build_result(
             evidence=evidence,
             cost=cost,
             spend=spend,
+            notes=informational,
             warnings=[*notes, *messages],
             decisions=decisions,
         )
@@ -3590,6 +3593,7 @@ def _shape_build_result(
         evidence=evidence,
         cost=cost,
         spend=spend,
+        notes=informational,
         warnings=[*notes, *(messages[1:] if messages else [])],
         decisions=decisions,
     )
