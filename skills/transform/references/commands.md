@@ -104,7 +104,9 @@ Runs `dbt build` against a dev target, with a cost preflight first.
   incremental models whose batch filter is a watermark subquery, which a dry run
   cannot prune on and the job does. They will likely bill less. An over-ceiling
   refusal names them too, so tell the user how much of the estimate they are
-  before they choose a budget.
+  before they choose a budget. Inside committed `budget.ceiling` and
+  `budget.session_ceiling`, a build is confirmed with `--confirm` alone and needs
+  no number from anyone.
 - A refusal over the ceiling carries a calibration line from `.dex/spend.jsonl`.
   Builds over-estimate most on a partitioned or clustered warehouse.
 - dbt runs with its working directory pinned to the project dir, so relative
