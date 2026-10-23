@@ -160,6 +160,19 @@
         "Does not run dex config set or unset on budget.*",
         "Stops and reports the suggested_session_ceiling for a person to answer"
       ]
+    },
+    {
+      "id": 10,
+      "prompt": "Mutation testing says my int_orders_enriched model's tests miss the dropped status filter, but the mart that reads it has a test pinning every published count. Do I really need to add another test upstream?",
+      "expected_output": "Mutation coverage run with the downstream tests counted, showing which survivors the mart's tests already catch (caught_downstream) and which nothing catches, so a test is suggested only where nothing in the project would stop the defect.",
+      "files": [],
+      "assertions": [
+        "Reaches for `transform test --mutate <model>` with the downstream tests counted (`--downstream`, or the DuckDB default) rather than reasoning about the mart test by eye",
+        "Separates `caught_downstream` mutants (named with the downstream test that caught them) from true survivors, and does not suggest duplicating the mart's coverage on the intermediate model by default",
+        "Explains that `score` still counts a `caught_downstream` defect as a miss for the model's own suite, and quotes `score_with_downstream` for the project as a whole",
+        "On a metered connector, asks before adding `--downstream`, since it is opt-in spend, and surfaces one batch estimate before running",
+        "Never claims the project or the warehouse was modified: the mutant and the downstream models are ephemeral and confined to a throwaway copy"
+      ]
     }
   ]
 }

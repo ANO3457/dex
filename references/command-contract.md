@@ -321,7 +321,11 @@ dex transform test --mutate <m>   -> measure the tests <m> already has: plant st
                                      connector the whole batch is priced and confirmed as one number.
                                      Each survivor is compared with the model on the dev data and
                                      labelled equivalent or distinguishable: free and automatic on
-                                     DuckDB, --check-equivalence on BigQuery and Snowflake
+                                     DuckDB, --check-equivalence on BigQuery and Snowflake.
+                                     --downstream also runs the tests of the models that read <m>,
+                                     routed through them as ephemeral models, and reports a defect
+                                     only those caught as caught_downstream: on by default on
+                                     DuckDB, opt-in and priced into the same batch elsewhere
 dex semantic define|update|plan   -> dbt semantic model edits as diffs (fronted by transform);
                                      validated up to and including dbt's own parser; applied with
                                      transform apply like any other plan
@@ -574,6 +578,45 @@ than the budget being exceeded. Spend settles per run under
 ordered round robin across the defect classes, so a capped run on a model with
 forty comparisons and one join still tests the join; what the cap cut is reported
 in `data.cap.elided`, per class.
+
+**Downstream tests.** A defect ships only if every test in the project misses it,
+and the tests that pin what an intermediate model feeds are often on the mart that
+reads it. `--downstream` runs those too. Each model downstream of the mutated one
+that can carry the mutant is made ephemeral in the same throwaway copy, so dbt
+inlines the whole chain into each of its tests, mutant at the bottom, and still
+nothing is materialized. The walk is breadth first through the manifest, nearest
+models first, capped at 50; it stops on each branch at a node that cannot be made
+ephemeral (a snapshot, a Python model, a package's model, a model with a
+`sql_header`), since below it every relation still holds the unmutated rows.
+`data.downstream.cut` names each such node and why, and `elided` counts what the
+cap left out.
+
+Which downstream tests run: the generic and singular tests on the routed models,
+listed in `data.downstream.tests`. Two kinds are excluded, each named in
+`data.downstream.excluded` with its reason: a unit test on a downstream model,
+which reads its fixtures and never the mutant, and a test that also reads a
+downstream relation the mutant cannot reach, which would compare the mutant with
+the unmutated model and report a catch that a real change would not produce. The
+model's own tests are never excluded.
+
+A defect only downstream tests caught is `caught_downstream`, with the tests in
+`caught_downstream_by`; `caught_by` stays the model's own tests, and a `killed`
+mutant also carries `caught_downstream_by` when a downstream test caught it too.
+`score` counts a `caught_downstream` defect as a miss, because it answers for the
+model's own suite and means exactly what it meant before downstream tests ran.
+`score_with_downstream` counts it as caught, and is null when the downstream tests
+did not run. `data.counts.caught_downstream` is always present, zero when off.
+Equivalence checks run only for true survivors.
+
+On by default on DuckDB, where it is free. Elsewhere each downstream test
+recomputes the chain beneath it, so it is opt-in with `--downstream`, priced into
+the same single estimate (each mutant's line grows by the downstream tests it
+will run) and confirmed once; `--no-downstream` turns it off anywhere. When it is
+off, `data.downstream.reason` says why: not asked for on a metered connector, no
+model reads this one, the models that read it have no data test that can see the
+mutant, or the routed models would not compile as ephemeral, in which case every
+file is put back and only the model's own tests run. A model with no tests of its
+own is measurable when downstream tests read it.
 
 `seed_csv` is the first kind that puts **values**, not logic, into a reviewable
 diff, and a diff goes into git and stays there. So a seed's header is checked
@@ -920,9 +963,12 @@ replace) inlines a literal credential, so no secret ever reaches the diff.
   `{"definitions": [{"kind", "path", "content"}, ...]}`, `kind` being
   `semantic_model` or `metric`, `content` that definition's YAML body (a mapping,
   written without the leading `- `). The name is read from the content, so the
-  two cannot disagree. `path` is required for a name the project does not have
-  and optional for one it does, defaulting to the file that declares it; an
-  explicit path that would relocate an existing definition is refused, because
+  two cannot disagree. `path` is optional for a name the project has,
+  defaulting to the file that declares it. For a new name it defaults to the one
+  file that declares every existing definition of that kind or, when none of
+  that kind exists yet, the project's only semantic file, with a warning naming
+  the file, and is required when there is no such file or more than one.
+  An explicit path that would relocate an existing definition is refused, because
   writing it to a second file duplicates the name. The engine writes each
   definition in place and preserves every other byte, comments included, then
   re-parses the result and compares it against what was sent. A file whose

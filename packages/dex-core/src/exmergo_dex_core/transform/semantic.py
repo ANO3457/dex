@@ -2,9 +2,12 @@
 
 ``define`` and ``update`` are plan producers into the same store as model SQL;
 ``transform apply`` writes them into the project. The engine validates the YAML
-the agent authored; MetricFlow's own schemas (via ``dbt-semantic-interfaces``,
-pulled in by dbt-duckdb) are the validator of record, with a structural fallback
-when that package is absent so validation degrades to a warning, never to silence.
+the agent authored; MetricFlow's own schemas are the validator of record, with a
+structural fallback when they are absent so validation degrades to a warning,
+never to silence. MetricFlow ships those schemas as
+``metricflow_semantic_interfaces``; the older ``dbt-semantic-interfaces`` package
+is the same schemas under the name dbt used before the split, and is still what
+older pins carry. Both are tried, newest first.
 
 A payload arrives in one of two units. A **whole file** is the original: the
 caller sends the complete new content for a path. A **definition** names one
@@ -41,6 +44,36 @@ from ..dbt_project import (
 from .validate import EditValidationError
 
 
+def _metricflow_validators() -> tuple[Any, Any] | None:
+    """The MetricFlow schema validators, or None where they are not installed.
+
+    MetricFlow ships its schemas as ``metricflow_semantic_interfaces``; the
+    older ``dbt-semantic-interfaces`` package is the same schemas under the name
+    dbt used before the split, and is still what an older pin carries. Both are
+    tried, newest first, because the package name alone used to decide whether
+    the validator ran at all: a pin that shipped the other name imported
+    nothing, the ``ImportError`` was caught, and the YAML was checked
+    structurally with a warning that read like routine news.
+
+    Returns None rather than raising, so the caller can degrade to the
+    structural check and say which package is missing.
+    """
+    try:
+        from metricflow_semantic_interfaces.parsing.schemas import (
+            metric_validator,
+            semantic_model_validator,
+        )
+    except ImportError:
+        try:
+            from dbt_semantic_interfaces.parsing.schemas import (
+                metric_validator,
+                semantic_model_validator,
+            )
+        except ImportError:
+            return None
+    return metric_validator, semantic_model_validator
+
+
 def validate_semantic_yaml(path: str, parsed: dict[str, Any]) -> list[str]:
     """Validate one semantic YAML document. Returns warnings; raises on failure."""
 
@@ -51,17 +84,16 @@ def validate_semantic_yaml(path: str, parsed: dict[str, Any]) -> list[str]:
             f"{path}: semantic YAML must declare semantic_models or metrics"
         )
 
-    try:
-        from dbt_semantic_interfaces.parsing.schemas import (
-            metric_validator,
-            semantic_model_validator,
-        )
-    except ImportError:
+    validators = _metricflow_validators()
+    if validators is None:
         _structural_check(path, semantic_models, metrics)
         return [
-            "dbt-semantic-interfaces is not installed; semantic YAML got a "
-            "structural check only"
+            "metricflow is not installed (neither metricflow_semantic_interfaces "
+            "nor dbt_semantic_interfaces could be imported); semantic YAML got a "
+            "structural check only. Install the 'semantic' extra "
+            "(exmergo-dex-core[semantic]) to validate against MetricFlow's schemas."
         ]
+    metric_validator, semantic_model_validator = validators
 
     for entry in semantic_models:
         if not isinstance(entry, dict) or not entry.get("name"):
@@ -401,6 +433,45 @@ def check_references(parsed_edits: list[dict[str, Any]], view: DbtProjectView) -
         raise EditValidationError("; ".join(problems))
 
 
+def cumulative_period_agg_warnings(parsed_edits: list[dict[str, Any]]) -> list[str]:
+    """Warn when a cumulative metric omits ``period_agg``.
+
+    MetricFlow fills ``first`` when ``cumulative_type_params.period_agg`` is
+    absent. At week or month grain the metric then reports that period's first
+    day, and the schema still accepts the metric, so plan time is the signal.
+    """
+
+    warnings: list[str] = []
+    for parsed in parsed_edits:
+        if not isinstance(parsed, dict):
+            continue
+        for entry in parsed.get("metrics") or []:
+            if not isinstance(entry, dict) or not entry.get("name"):
+                continue
+            if str(entry.get("type", "")).lower() != "cumulative":
+                continue
+            params = entry.get("type_params")
+            cumulative = (
+                params.get("cumulative_type_params")
+                if isinstance(params, dict)
+                else None
+            )
+            if isinstance(cumulative, dict) and "period_agg" in cumulative:
+                value = cumulative.get("period_agg")
+                if value is not None and not (
+                    isinstance(value, str) and value.strip() == ""
+                ):
+                    continue
+            name = entry["name"]
+            warnings.append(
+                f"metric '{name}' is cumulative with no period_agg; MetricFlow "
+                "defaults to 'first', so at week or month grain it reports each "
+                "period's first day, not its last. Set period_agg: last for a "
+                "running total."
+            )
+    return warnings
+
+
 def check_removals(
     removed: Sequence[DefinitionEdit],
     edits: Sequence[tuple[str, str]],
@@ -693,8 +764,14 @@ def parse_definition_payload(entries: Iterable[Any]) -> list[DefinitionEdit]:
     return parsed_entries
 
 
+_KIND_PLURAL = {"semantic_model": "semantic models", "metric": "metrics"}
+
+
 def splice_definitions(
-    definitions: Sequence[DefinitionEdit], view: DbtProjectView
+    definitions: Sequence[DefinitionEdit],
+    view: DbtProjectView,
+    *,
+    notes: list[str],
 ) -> list[tuple[str, str]]:
     """Lower per-definition edits into whole-file content, one entry per path.
 
@@ -712,6 +789,12 @@ def splice_definitions(
     span safely is reported with ``--edits-file`` named as the way to edit it,
     and the spliced result is re-parsed and compared against the incoming body
     so a splice that landed in the wrong place cannot reach the plan store.
+
+    A new definition with no path goes to the one file that declares every
+    existing definition of its kind or, when none of that kind exists yet, the
+    project's only semantic file, and ``notes`` is told where it went. With no
+    such file, or more than one, it is refused: there is nothing unambiguous to
+    pick.
     """
 
     on_disk = project_definitions(view)
@@ -734,6 +817,26 @@ def splice_definitions(
             continue
         if definition.path is None:
             if current is None:
+                homes = {
+                    p for (k, _n), (p, _b) in on_disk.items() if k == definition.kind
+                }
+                where = (
+                    "the project's only file that declares "
+                    + _KIND_PLURAL[definition.kind]
+                )
+                if not homes:
+                    # No definition of this kind yet: the first one goes to the
+                    # project's only semantic file, if there is exactly one.
+                    homes = {p for p, _b in on_disk.values()}
+                    where = "the project's only semantic file"
+                if len(homes) == 1:
+                    (home,) = homes
+                    notes.append(
+                        f"{definition.kind} '{definition.name}' placed in "
+                        f"{home}, {where}"
+                    )
+                    targets.append((home, definition))
+                    continue
                 raise EditValidationError(
                     f"{definition.kind} '{definition.name}' is not in the project, "
                     "so there is no file to rewrite: give it a path"

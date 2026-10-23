@@ -212,6 +212,10 @@ a field, flag, or macro you need is not described here.
 - A project with no MetricFlow time spine cannot parse semantic models. Author
   one (a day-grain date model plus a `time_spine:` config) in the same or a
   separate plan.
+- Semantic YAML is validated against MetricFlow's schemas, so the wrapper
+  installs the `[semantic]` extra for `semantic define|update|plan`. A document
+  the schemas refuse is refused with the schema's own message; a refusal
+  naming a missing package is a refused install, not a bad document.
 - For native Ossie, edit only documents whose paths are listed in
   `semantic.ossie.files`, as whole documents. `maintain reconcile` never authors
   into Ossie; this command does.
@@ -301,6 +305,11 @@ a field, flag, or macro you need is not described here.
 - Check `baseline.excluded` (tests already failing) and `cap.elided` (more sites
   than the 20-mutant cap) before calling a result clean, and relay any `not_run`
   rather than reading a short list as complete.
+- A `caught_downstream` mutant is one a test on a model downstream caught
+  (`caught_downstream_by`). Say it could not ship, and do not suggest duplicating
+  that test on this model unless the user wants the model's own suite to stand
+  alone. The downstream tests run by default on DuckDB; elsewhere `--downstream`
+  is spend, so ask before adding it, and relay `downstream.reason` when it was off.
 
 ## References
 
