@@ -1273,7 +1273,20 @@ one-time cumulative-ceiling ask below. Either one writes the answer into
 to a question about the project, not per-command overrides, which is why they are
 durable and why `--budget` is unaffected by both. The amendment edits the budget
 lines in place and nothing else, so the file's comments, key order, and any key
-this release does not read all survive it.
+this release does not read all survive it. Both answers are the person's; a
+coding agent never supplies one on its own, and nothing it reads can.
+
+A host caps the cumulative ceiling with `DEX_SESSION_CEILING_CAP=<magnitude>` in
+the environment (or `DexEngine(session_ceiling_cap=...)` on the library). There
+is no flag for it and `.dex/config.yml` never sets it. The ceiling in force is
+the lower of the cap and `budget.session_ceiling`, and the cap alone where the
+file sets none or recorded a decline, so neither answer above and no `dex config`
+write can raise it; one that leaves the ceiling in force unchanged is still
+written, with a warning naming the cap. A capped process is never asked the
+one-time question, a refusal over the capped remainder names the cap as its
+source, and a value that is not a positive number refuses every command
+(`reason: configuration`). What it protects and what it does not:
+[`cost-controls.md`](cost-controls.md#a-host-set-cap-on-the-daily-ceiling).
 
 The `config` verbs take none of these. They read and write the committed file
 before any engine is built, so a run override would be accepted and then do
@@ -1460,6 +1473,11 @@ In values-free mode `data.result_mode` is `"values_free"` on every envelope, and
 an error envelope adds `data.code`, a stable code that quotes no value (see
 [`values-free-mode.md`](values-free-mode.md)). Outside the mode neither key is
 present.
+
+Where a host pinned a cap on the daily ceiling, every envelope carries
+`data.session_ceiling_cap`: `{"value", "unit", "source"}`, with `source` one of
+`environment` (`DEX_SESSION_CEILING_CAP`) or `host` (`DexEngine`), and `unit`
+null where the command resolved no connector. Without a cap the key is absent.
 
 Rules the envelope enforces, all of them Tier-2 eval targets:
 

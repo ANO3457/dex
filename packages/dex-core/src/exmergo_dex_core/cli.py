@@ -35,6 +35,11 @@ from .guards.cost_guard import ConfirmationRequiredError, CostGuardError
 from .guards.dialect import DialectDependencyError
 from .guards.dialect import ensure_available as ensure_dialect_available
 from .results import BudgetExhaustedError
+from .session_cap import (
+    SESSION_CEILING_CAP_ENV,
+    SessionCeilingCap,
+    parse_session_ceiling_cap,
+)
 from .values_free import (
     ResultMode,
     call_withholding,
@@ -188,7 +193,10 @@ _CONNECTION_OPTION_HELP: dict[str, str] = {
     "--repo-root": "directory to resolve .dex/config.yml from, walking up (default: .)",
     "--confirm": "run a billed command after its cost was quoted",
     "--budget": "spend this command may use, in the connector's cost unit",
-    "--session-ceiling": "answer the one-time ask: commit this daily spend ceiling",
+    "--session-ceiling": (
+        "answer the one-time ask: commit a daily ceiling "
+        f"({SESSION_CEILING_CAP_ENV} caps)"
+    ),
     "--no-session-ceiling": "answer the one-time ask: record that no ceiling applies",
     "--values-free": f"return no table value in any result ({RESULT_MODE_ENV} pins it)",
 }
@@ -1648,6 +1656,10 @@ def main(argv: list[str] | None = None) -> int:
     # Resolved before anything can refuse, so even a refusal states the mode. An
     # unknown DEX_RESULT_MODE is itself a refusal, rendered below like any other.
     result_mode: ResultMode | None = None
+    # The host's cap on the daily ceiling (#787), resolved alongside the mode for
+    # the same reason: a refusal should still say it, and a malformed one is
+    # itself a refusal.
+    session_cap: SessionCeilingCap | None = None
     # Building the engine is inside the handler, not before it: it reads the
     # config file and constructs the configured storage backend, and both can
     # refuse. Every agent wrapper expects exactly one envelope on stdout, so a
@@ -1655,6 +1667,9 @@ def main(argv: list[str] | None = None) -> int:
     # traceback the wrapper cannot parse.
     try:
         result_mode = _result_mode(args)
+        session_cap = parse_session_ceiling_cap(
+            os.environ.get(SESSION_CEILING_CAP_ENV), source="environment"
+        )
         if args.group == "config":
             # No engine, on purpose: see `config_commands`. With none, nothing
             # below has a paradigm, a spend, or a connection to stamp, which is
@@ -1683,6 +1698,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_ceiling=getattr(args, "session_ceiling", None),
                 decline_session_ceiling=getattr(args, "no_session_ceiling", False),
                 result_mode=result_mode,
+                session_ceiling_cap=session_cap,
             )
             try:
                 envelope = dispatch(args, engine)
@@ -1757,6 +1773,9 @@ def main(argv: list[str] | None = None) -> int:
     # afterwards has to report it or the file changed with nothing saying so.
     if engine is not None and engine.config_diffs:
         envelope.diffs = list(engine.config_diffs) + list(envelope.diffs)
+    # And what a host's cap made of that amendment (#787): written, but moot.
+    if engine is not None and engine.budget_warnings:
+        envelope.warnings = list(engine.budget_warnings) + list(envelope.warnings)
 
     # Every command runs against a connector or against none, so every envelope
     # can name the paradigm a later billed command would spend in. Filled only
@@ -1775,6 +1794,10 @@ def main(argv: list[str] | None = None) -> int:
     # included, so a host can assert the mode on whatever comes back (#591).
     if result_mode is ResultMode.VALUES_FREE:
         envelope.data["result_mode"] = result_mode.value
+    # And every envelope a capped process prints names the cap (#787), for the
+    # same reason: a host asserts the bound on whatever comes back.
+    if session_cap is not None:
+        envelope.data["session_ceiling_cap"] = session_cap.payload(envelope.cost.unit)
 
     env.emit(envelope)
     return 0 if envelope.status != env.Status.ERROR else 1

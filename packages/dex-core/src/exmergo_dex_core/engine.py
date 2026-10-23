@@ -53,7 +53,13 @@ from .config import (
 from .connect import ConnectionSource, SemanticSource
 from .envelope import Connection, Paradigm
 from .errors import RepoRootRequiredError, StoreRequiredError
-from .results import ConnectResult
+from .results import ConnectResult, Result
+from .session_cap import (
+    SessionCeilingCap,
+    format_magnitude,
+    moot_write_warning,
+    parse_session_ceiling_cap,
+)
 from .storage import ExploreStore, MemoryStore, Store, StoreContext, build_store
 from .values_free import (
     ResultMode,
@@ -178,6 +184,14 @@ class DexEngine:
     ``result_mode="full"`` is refused, and a method that was not reviewed for the
     mode refuses before it opens anything. A full engine lets one call opt in
     with ``result_mode="values_free"``. It is never read from ``config``.
+
+    ``session_ceiling_cap`` is a host's bound on the day's cumulative spend
+    (#787; see :mod:`.session_cap`), in the connector paradigm's unit. The
+    ceiling in force becomes the lower of it and ``budget.session_ceiling``, so
+    nothing the repository says, no ``session_ceiling`` or
+    ``decline_session_ceiling`` answer, and no config write lifts spend above
+    it. Like ``result_mode`` it is never read from ``config``, and every result
+    reports it as ``session_ceiling_cap``.
     """
 
     def __init__(
@@ -199,6 +213,7 @@ class DexEngine:
         semantic_source: SemanticSource | None = None,
         project_format: ExploreProject | None = None,
         result_mode: ResultMode | str = ResultMode.FULL,
+        session_ceiling_cap: float | SessionCeilingCap | None = None,
     ) -> None:
         # Two config attributes, deliberately. `config` is what commands read and
         # is always a real object; `_declared` records whether one was actually
@@ -245,6 +260,15 @@ class DexEngine:
         # `connection_warnings` is: a write must never be something a caller
         # discovers later in `git status`.
         self.config_diffs: list[dict[str, Any]] = []
+        # The host's cap on the daily ceiling (#787), parsed before the budget
+        # decision below so a moot answer can be warned about, and applied after
+        # it, because that decision replaces `config.budget` wholesale.
+        self.session_ceiling_cap: SessionCeilingCap | None = parse_session_ceiling_cap(
+            session_ceiling_cap, source="host"
+        )
+        # What the cap made of a write this engine performed, phrased for an
+        # envelope; read back into every one, as `config_diffs` is.
+        self.budget_warnings: list[str] = []
         self._adapter_instance: Adapter | None = None
         # The dev namespace the last command's adapter was told to read, kept
         # only so provenance can show it; `_adapter` is what sets and clears it.
@@ -262,6 +286,8 @@ class DexEngine:
         # Last, so it amends a config that is fully assembled. It is the one
         # thing here that writes: see `_record_budget_decision`.
         self._record_budget_decision(session_ceiling, decline_session_ceiling)
+        if self.session_ceiling_cap is not None:
+            self.config = self.config.with_session_ceiling_cap(self.session_ceiling_cap)
 
     @classmethod
     def from_repo(
@@ -476,8 +502,21 @@ class DexEngine:
         if session_ceiling is None and not declined:
             return
         root = self.require_repo_root("recording a cumulative spend ceiling")
+        before = self.config.budget.session_ceiling
         config, diff = record_session_ceiling_decision(
             root, session_ceiling=session_ceiling, declined=declined
+        )
+        self.budget_warnings.extend(
+            moot_write_warning(
+                self.session_ceiling_cap,
+                before=before,
+                after=config.budget.session_ceiling,
+                what=(
+                    "--no-session-ceiling"
+                    if declined
+                    else f"--session-ceiling {format_magnitude(session_ceiling)}"
+                ),
+            )
         )
         # The budget alone, not the whole re-read config: this run may hold
         # overrides (an injected config, `--connector`) that the file does not,
@@ -1745,6 +1784,32 @@ def _refused_in_values_free(name: str, method: Any) -> Any:
 
     return guarded
 
+
+def _reports_session_cap(method: Any) -> Any:
+    """Stamp a host's cap onto every result a public method returns (#787), so
+    a host can assert it on the library the way it asserts ``result_mode``."""
+
+    @functools.wraps(method)
+    def stamped(self: DexEngine, *args: Any, **kwargs: Any) -> Any:
+        result = method(self, *args, **kwargs)
+        if self.session_ceiling_cap is not None and isinstance(result, Result):
+            result.session_ceiling_cap = self.session_ceiling_cap.payload(
+                result.cost.unit
+            )
+        return result
+
+    return stamped
+
+
+for _name, _member in list(vars(DexEngine).items()):
+    if (
+        _name.startswith("_")
+        or not callable(_member)
+        or isinstance(_member, (classmethod, staticmethod, property))
+    ):
+        continue
+    setattr(DexEngine, _name, _reports_session_cap(_member))
+del _name, _member
 
 for _name, _member in list(vars(DexEngine).items()):
     if (
