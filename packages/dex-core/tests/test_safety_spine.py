@@ -6878,6 +6878,7 @@ def test_maintain_grain_findings_carry_no_example_values(tmp_path: Path, capsys)
     grain = [f for f in payload["data"]["findings"] if f["axis"] == "grain"]
     # `severity_floor_applied`/`grain_min_rows` (#280) are config-derived flags,
     # not row-derived values, so they belong on this allowlist same as the rest.
+    # `joins` (#779) names relations and columns, never their values.
     assert grain and all(
         set(f["data"])
         <= {
@@ -6886,6 +6887,7 @@ def test_maintain_grain_findings_carry_no_example_values(tmp_path: Path, capsys)
             "was_grain",
             "severity_floor_applied",
             "grain_min_rows",
+            "joins",
         }
         or f["code"] != "key_lost_uniqueness"
         for f in grain
