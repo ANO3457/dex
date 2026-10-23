@@ -381,8 +381,9 @@ _SUBCOMMAND_HELP: dict[tuple[str, str], tuple[str, str]] = {
     ("transform", "test"): (
         "scaffold a unit test, or mutation-test existing tests",
         "--scaffold plans a unit_tests skeleton for a model. --mutate plants "
-        "one defect at a time and reports which ones no test caught. Mutation "
-        "runs dbt on the dev target and is billed on metered connectors.",
+        "one defect at a time and reports which ones no test caught; "
+        "--downstream also counts the tests of the models that read it. "
+        "Mutation runs dbt on the dev target and is billed on metered connectors.",
     ),
     ("transform", "export"): (
         "export a stored plan as a portable, digested document",
@@ -1243,6 +1244,23 @@ def _build_parser() -> argparse.ArgumentParser:
                         dest="check_equivalence",
                         action="store_false",
                         help="report survivors without comparing them",
+                    )
+                    # Tri-state for the same reason: routing each mutant
+                    # through the models that read it recomputes the chain in
+                    # every one of their tests, which is free only on DuckDB.
+                    reach = sp.add_mutually_exclusive_group()
+                    reach.add_argument(
+                        "--downstream",
+                        dest="downstream",
+                        action="store_true",
+                        default=None,
+                        help="also run the tests of the models downstream of it",
+                    )
+                    reach.add_argument(
+                        "--no-downstream",
+                        dest="downstream",
+                        action="store_false",
+                        help="run only the model's own tests",
                     )
                 if group == "semantic" and name in {"define", "update", "plan"}:
                     sp.add_argument(

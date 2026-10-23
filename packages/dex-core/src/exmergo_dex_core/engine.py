@@ -1539,6 +1539,7 @@ class DexEngine:
         max_mutants: int | None = None,
         target: str | None = None,
         check_equivalence: bool | None = None,
+        downstream: bool | None = None,
     ) -> MutationCoverageResult:
         """Measure a model's tests by planting defects and seeing what they catch.
 
@@ -1555,6 +1556,12 @@ class DexEngine:
         reaches the case, one that does needs an assertion. ``None`` checks where
         it is free (DuckDB), ``True`` checks and prices the comparisons into the
         same batch on a billed connector, ``False`` never checks.
+
+        ``downstream`` also runs the tests on the models downstream of this one
+        against each mutant, routed through them without materializing
+        anything, and reports a defect only those caught as
+        ``caught_downstream`` rather than ``killed``, so ``score`` still answers
+        for the model's own tests. Tri-state like ``check_equivalence``.
         """
 
         from .transform import commands as transform
@@ -1565,6 +1572,7 @@ class DexEngine:
             max_mutants=max_mutants,
             target=target,
             check_equivalence=check_equivalence,
+            downstream=downstream,
         )
 
     def deps(self) -> DepsResult:
