@@ -1070,6 +1070,12 @@ def test_mutations(
                     "mutation coverage invokes dbt once per mutant, and a hook "
                     "that grants or audits would otherwise fire once per run"
                 )
+            if shadow.strip_semantic_models(model):
+                warnings.append(
+                    f"semantic models referencing '{model}' were omitted from the "
+                    "shadow project: mutation coverage runs with an ephemeral mutant, "
+                    "which the semantic layer cannot anchor"
+                )
             node, model_path = _mutable_model(engine, shadow, model, mutation_mod)
             below = _DownstreamTests.prepare(
                 shadow,
@@ -1279,6 +1285,8 @@ def _mutable_model(engine, shadow, model: str, mutation_mod):
     view = load_project(shadow.project)
     path = model_file(view, model)
     content = view.files[path].content
+    if hasattr(shadow, "strip_semantic_models"):
+        shadow.strip_semantic_models(model)
     # The header is appended rather than prepended: dbt gives a scalar config key
     # to the last `config()` call in a file, so a model declaring its own
     # `materialized` would otherwise win and the mutant would build a relation.
