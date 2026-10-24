@@ -128,6 +128,7 @@ def draft(
     cumulative: Mapping[str, set[str]] | None = None,
     cache_note: str | None = None,
     index: Callable[[], ReferenceIndex] | None = None,
+    prior: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Each model's ``drafted``/``declared``/``missing``, and the warnings.
 
@@ -137,6 +138,9 @@ def draft(
     why the cache is absent, where it is. ``index`` builds the reference index
     of that same project state, called at most once and only when a model uses
     a column precedent can be read for; without it no precedent is drafted.
+    ``prior`` is the project as it reads before the plan; with it, a model that
+    already exists also carries ``contradictions`` (see :mod:`.contradictions`),
+    whose warnings the caller renders once row attribution has run.
     """
 
     model_paths = list(model_paths)
@@ -174,15 +178,85 @@ def draft(
             if precedent:
                 drafted["precedent"] = precedent
         missing = _missing(declared, reading)
-        model_warnings = _warnings(model, declared, drafted, reading, missing)
+        found = _contradictions(
+            model,
+            reading,
+            declared,
+            files,
+            prior,
+            model_paths,
+            cache,
+            dialect=dialect,
+            vars=vars,
+            cumulative=cumulative,
+            warnings=warnings,
+        )
+        model_warnings = _warnings(
+            model,
+            declared,
+            drafted,
+            reading,
+            missing,
+            grain_judged=any(c["check"] == "grain" for c in found or []),
+        )
         model_warnings.extend(_literal_warnings(model, reading, cache))
         out[model] = {
             "drafted": _untoken(drafted, reading.tokens),
             "declared": declared,
             "missing": _untoken(missing, reading.tokens),
         }
+        if found is not None:
+            out[model]["contradictions"] = found
         warnings.extend(_untoken(model_warnings, reading.tokens))
     return out, warnings
+
+
+def _contradictions(
+    model: str,
+    reading: _Reading,
+    declared: dict[str, Any],
+    files: Mapping[str, str],
+    prior: Mapping[str, str] | None,
+    model_paths: list[str],
+    cache: DexCache | None,
+    *,
+    dialect: str,
+    vars: Mapping[str, Any] | None,
+    cumulative: Mapping[str, set[str]],
+    warnings: list[str],
+) -> list[dict[str, Any]] | None:
+    """What this edit contradicts in the model's declaration, or None where
+    there is nothing to compare: a model the plan creates has no prior."""
+
+    if prior is None:
+        return None
+    prior_path = model_sql_path(prior, model_paths, model)
+    if prior_path is None:
+        return None
+    from .contradictions import check
+
+    # Commentary on the plan, like the draft around it: a defect here is a
+    # warning naming the exception, never a draft or a plan that fails to exist.
+    try:
+        found = check(
+            model,
+            prior_reading=read(prior[prior_path], cache, dialect=dialect, vars=vars),
+            reading=reading,
+            prior_declared=read_declared(prior, model),
+            declared=declared,
+            prior_files=prior,
+            files=files,
+            model_paths=model_paths,
+            cache=cache,
+            cumulative=cumulative,
+        )
+    except Exception as exc:
+        warnings.append(
+            f"could not check '{model}' against its declaration "
+            f"({type(exc).__name__}: {exc}); the plan itself is unaffected"
+        )
+        return None
+    return [item.as_dict() for item in found]
 
 
 def _untoken(value: Any, tokens: Mapping[str, str]) -> Any:
@@ -1320,6 +1394,8 @@ def _warnings(
     drafted: dict[str, Any],
     reading: _Reading,
     missing: list[str],
+    *,
+    grain_judged: bool = False,
 ) -> list[str]:
     out = []
     for name in INTENT_FIELDS:
@@ -1382,7 +1458,9 @@ def _warnings(
             "profiled, so nothing was drafted from it; run "
             + ", ".join(f"`explore profile {r}`" for r in unprofiled)
         )
-    if grain_declared := declared.get("grain"):
+    # A contradiction already says the same thing about this edit, with the side
+    # that looks stale, so the generic disagreement would only repeat it.
+    if (grain_declared := declared.get("grain")) and not grain_judged:
         grain = (drafted.get("grain") or {}).get("value")
         if grain and sorted(c.lower() for c in grain_declared) != sorted(grain):
             out.append(

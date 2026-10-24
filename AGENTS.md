@@ -258,8 +258,19 @@ column's domain is never drafted. `drafted.precedent` lists what the project's
 other models do with each column the model filters, branches on or aggregates,
 grouped and counted with a `completeness` verdict, as evidence rather than a rule.
 A literal compared to a column whose cached domain is complete and does not hold
-it is a warning, naming any case- or whitespace-insensitive match. Every field:
-`skills/transform/references/declarations.md`.
+it is a warning, naming any case- or whitespace-insensitive match. On a model that
+already exists, `data.declarations.<model>.contradictions` lists every declared
+rule the edit and the post-change declaration disagree on: a population filter
+whose predicate is removed or changed, a changed `GROUP BY` or a dropped grain
+column, a dropped declared column, and a `SUM` (or a ratio's `AVG`) of a column the
+upstream model declares `semi_additive` or `non_additive`. Each is also a warning
+naming the rule, the changed SQL, the side that looks stale (`sql`,
+`declaration`, or `either` when the plan changed both), and both fixes. A change
+to both sides that agrees is silent, a declaration-only change is never blamed on
+the SQL, and a predicate dex cannot read is `unchecked`, never removed. A
+contradicted population cites row attribution's measured delta (free on DuckDB,
+`--attribute-rows` elsewhere). Warnings only: nothing here refuses a plan or
+blocks apply. Every field: `skills/transform/references/declarations.md`.
 
 ### The envelope
 

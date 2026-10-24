@@ -24,6 +24,10 @@ of or on top of hand-authored edits.
   `declarations.md`. Absent when the plan touches no model. `drafted.precedent`
   says what the project's other models do with each column this one filters,
   branches on or aggregates, grouped and counted.
+- Contradiction warnings: on a model that already exists, a declared rule the
+  edit breaks, also listed under `data.declarations.<model>.contradictions`
+  (`check`, `status`, `rule`, `stale`, `prior`, `authored`, `preexisting`,
+  `row_delta`). Shape and states in `declarations.md`. Never a refusal.
 - Literal warnings: a value compared directly to a column whose cached domain is
   complete and does not hold it, naming any case- or whitespace-insensitive
   match. Silent on a capped domain or a PII-flagged column; never a refusal.
