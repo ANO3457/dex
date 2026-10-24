@@ -6,7 +6,7 @@ it, once it has written something, as a trailer for the commit message.
 
 A forge credits a `Co-authored-by` trailer to the account that has the
 trailer's email verified, so the email is the identity. On GitHub that is the
-`dex-app-ai` user. A trailer is read only from a commit message's last
+`exmergo-dex` user. A trailer is read only from a commit message's last
 paragraph, so it goes after a blank line, with nothing after it.
 """
 
