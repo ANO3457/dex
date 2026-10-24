@@ -1,7 +1,7 @@
 ---
 name: transform
 description: 'Use this to author and change a dbt project or a semantic layer: bootstrap a project (`transform init`), write or refactor models from staging to marts, add tests and docs, and define semantic models, entities, dimensions, and metrics in MetricFlow, Apache Ossie or SLayer YAML. Reach for it instead of editing model files by hand whenever a change spans more than one file or must stay consistent with the project: it validates the edit against the real schema, returns a reviewable diff with a plan id, and catches what otherwise fails at `dbt run`, such as wrong columns or broken refs. Bug-fix tickets count: "this model returns wrong numbers, fix it" is a transform task. Also for "build a staging model for this table", "define a revenue metric", "add a dimension to this entity". Warehouse builds are dev-target only, gated, and cost-surfaced first. If you have not verified the source tables'' columns or grain, use explore first. For a project that drifted from the warehouse, use maintain.'
-compatibility: 'Needs a local shell and uv. On first use, uv downloads the exmergo-dex-core engine from PyPI at the version scripts/run.py pins. Runs in Claude Code or another agent that loads Agent Skills and has a shell, not in claude.ai chat.'
+compatibility: 'Needs a local shell and uv. On first use, uv builds the exmergo-dex-core engine from the source bundled with the plugin, or installs it from PyPI at the version scripts/run.py pins when no source is bundled. Runs in Claude Code or another agent that loads Agent Skills and has a shell, not in claude.ai chat.'
 ---
 
 # Transform
@@ -75,9 +75,13 @@ configuration and writes its cache there. The wrapper path is absolute:
 uv run --no-project --script "${CLAUDE_SKILL_DIR}/scripts/run.py" <subcommand> [flags]
 ```
 
-Installed as a plugin or skill, `run.py` runs the `exmergo-dex-core` engine from
-PyPI at the exact version its `DEX_CORE_VERSION` line pins, built from
-https://github.com/exmergo/dex/tree/main/packages/dex-core.
+Installed as a plugin, `run.py` builds the `exmergo-dex-core` engine from the
+source bundled beside the skill (the plugin's `packages/dex-core`, from
+https://github.com/exmergo/dex/tree/main/packages/dex-core), and uv's build
+output names that `file:///.../packages/dex-core` path.
+Installed as a standalone skill, with no bundled source, it installs the engine
+from PyPI at the exact version its `DEX_CORE_VERSION` line pins. Either way, uv
+fetches the engine's dependencies from PyPI or your configured index.
 
 - `uv` is a prerequisite that Claude Code does not install. If the shell reports
   `uv: command not found`, stop and tell the user to install it
