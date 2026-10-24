@@ -193,6 +193,10 @@ def test_the_extras_are_the_connector_plus_whatever_the_command_needs(
         "snowflake",
         "cluster",
     ]
+    assert wrapper._extras(["semantic", "define", "--edits-file", "edits.json"]) == [
+        "duckdb",
+        "semantic",
+    ]
 
 
 # SLayer is too heavy to install on a guess, so it is the one extra that follows
