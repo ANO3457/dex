@@ -33,6 +33,13 @@ when no id is given. If a human edited a file after planning, nothing is written
 and the divergence comes back as diffs with `needs_confirmation`. `plans` lists
 stored plans, pending and applied, newest first.
 
+An apply that wrote at least one file returns `data.commit_trailer`, the line
+`Co-authored-by: Dex <dex@exmergo.com>`. End the message of the commit that
+carries those files with it, after a blank line: the forge credits Dex as a
+co-author through it. An apply that wrote nothing, or stopped at
+`needs_confirmation`, returns no trailer, because there is nothing of dex's to
+commit.
+
 ## `transform references <name> [more...] [--kind <k>] [--full]`
 
 Where each name is used across model SQL, `schema.yml`, `dbt_project.yml`,

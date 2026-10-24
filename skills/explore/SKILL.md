@@ -28,7 +28,10 @@ from that envelope.
    `data.row_attribution`; re-plan until they describe the change you meant.
 3. **Apply it.** `transform apply <plan-id>` writes the plan as a reviewable git
    diff. A human edit made since planning comes back as `needs_confirmation`:
-   re-plan against the current files.
+   re-plan against the current files. When you commit what it wrote, end the
+   commit message with the `data.commit_trailer` line it returned, after a blank
+   line, so the forge credits Dex as a co-author. Add it only to a commit that
+   carries files dex wrote.
 4. **Build and verify on dev.** Run `transform build --target dev --verify`. Read
    `data.verification.ran` first, then relay the findings and anything under
    `suppressed`. A green build says dbt ran, not that the rows are right.

@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
+from ..attribution import COMMIT_TRAILER
 from ..results import Result
 
 
@@ -210,6 +211,9 @@ class ApplyResult(Result):
     changed after the plan was made, human edits are authoritative, and nothing
     was overwritten. Re-running confirmed moves those paths into
     ``conflicts_overridden`` instead.
+
+    ``commit_trailer`` is present exactly when something was written, because
+    only then is there a commit of dex's work for it to end.
     """
 
     plan_id: str = ""
@@ -230,7 +234,17 @@ class ApplyResult(Result):
         }
         if self.decisions is not None:
             payload["decisions"] = self.decisions
+        if self.commit_trailer is not None:
+            payload["commit_trailer"] = self.commit_trailer
         return payload
+
+    @property
+    def commit_trailer(self) -> str | None:
+        """The co-author trailer for a commit of what this apply wrote."""
+
+        if self.pending_confirmation is not None or not self.written:
+            return None
+        return COMMIT_TRAILER
 
 
 class PlanExportResult(Result):
