@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,20 @@ pytestmark = pytest.mark.packaging
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 QUICKSTART = PACKAGE_ROOT / "examples" / "quickstart.py"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _isolated_installs_use_this_interpreter():
+    """Every fresh install here resolves for the Python running the suite.
+
+    Without this, uv picks whichever interpreter it discovers first, so a CI
+    matrix leg on 3.14 could build and import the wheel under another Python
+    and report a fresh-install check it never ran on its own version (#795).
+    """
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("UV_PYTHON", sys.executable)
+        yield
 
 
 def _uv() -> str:
@@ -351,6 +366,16 @@ def test_the_all_extra_installs_every_optional_capability(wheel: str):
         "import dbt.adapters.clickhouse, dbt.adapters.trino;"
         "from exmergo_dex_core.explore.semantic.hosted import HostedDbtCloudBackend;"
         "from exmergo_dex_core.explore.semantic.local import LocalMetricFlowBackend;"
+        # The MetricFlow modules dex actually calls, and the schema validators:
+        # `import metricflow` alone succeeds where the engine cannot load, and
+        # validators that fail to import degrade semantic authoring to a
+        # structural check rather than raising.
+        "from metricflow.engine.metricflow_engine import MetricFlowEngine;"
+        "from metricflow_semantics.model.semantic_manifest_lookup import"
+        " SemanticManifestLookup;"
+        "from exmergo_dex_core.transform.semantic import _metricflow_validators;"
+        "assert _metricflow_validators() is not None,"
+        " 'MetricFlow schemas did not import';"
         "print('every capability imported')",
         extras=["all"],
     )

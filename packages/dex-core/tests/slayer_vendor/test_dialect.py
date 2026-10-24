@@ -6,8 +6,8 @@ model its declared joins end at, aggregation and transform arguments included;
 and anything it cannot account for is None, never ``[]``, so the PII gate refuses
 rather than screening a filter it did not read.
 
-Needs the real `[slayer]` extra, so it skips without it; the `slayer-sqlglot` CI
-job is where it runs.
+Needs the real `[slayer]` extra, so it skips without it; the `tests` CI job
+is where it runs.
 """
 
 from __future__ import annotations

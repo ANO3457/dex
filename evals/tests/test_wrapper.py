@@ -149,6 +149,9 @@ def _exec_argv(module, monkeypatch, argv: list[str]) -> list[str]:
     """
 
     monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/uv")
+    # The uv version probe (the stale-CA warning) has tests of its own in
+    # packages/dex-core/tests/test_skill_wrapper.py; here it would shell out.
+    monkeypatch.setattr(module, "_uv_ca_warning", lambda: None)
     monkeypatch.setattr(module.os, "name", "posix")
     for target, attr in ((module.subprocess, "call"), (module.os, "execvp")):
         monkeypatch.setattr(
@@ -328,6 +331,9 @@ def _run_warm(module, monkeypatch, argv, *, returncode=0, stderr=""):
         return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr)
 
     monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    # The uv version probe is a second subprocess.run with tests of its own
+    # (packages/dex-core/tests/test_skill_wrapper.py); this counts installs.
+    monkeypatch.setattr(module, "_uv_ca_warning", lambda: None)
     for target, attr in (
         (module.os, "execvp"),
         (module.os, "execvpe"),

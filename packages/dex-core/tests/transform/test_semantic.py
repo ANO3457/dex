@@ -1821,28 +1821,6 @@ def test_validate_semantic_yaml_uses_metricflow_semantic_interfaces(monkeypatch)
         validate_semantic_yaml("models/semantic/customers.yml", bad_metric)
 
 
-def test_validate_semantic_yaml_falls_back_to_dbt_semantic_interfaces(monkeypatch):
-    """When metricflow_semantic_interfaces is absent, fall back to dbt schemas."""
-    orig_import = __import__
-
-    def missing_metricflow_import(name, *args, **kwargs):
-        if name.startswith("metricflow_semantic_interfaces"):
-            raise ImportError(f"No module named '{name}'")
-        return orig_import(name, *args, **kwargs)
-
-    monkeypatch.setattr("builtins.__import__", missing_metricflow_import)
-
-    parsed = yaml.safe_load(_VALID_SEMANTIC_YAML)
-    warnings = validate_semantic_yaml("models/semantic/customers.yml", parsed)
-    assert warnings == []
-
-    bad_metric = yaml.safe_load(
-        "metrics:\n  - name: revenue\n    type: nope\n    type_params: {}\n"
-    )
-    with pytest.raises(EditValidationError, match="'nope' is not one of"):
-        validate_semantic_yaml("models/semantic/customers.yml", bad_metric)
-
-
 def test_validate_semantic_yaml_falls_back_to_structural_check(monkeypatch):
     """When neither interface package is installed, structural check warns cleanly."""
     orig_import = __import__

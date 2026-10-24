@@ -12,8 +12,8 @@ an unknown token and a PII dimension are refused before anything renders,
 `--metric` roots the render at that metric's model and `scoped_to` says so, and
 the values come back capped.
 
-Needs the real `[slayer]` extra, so it skips without it; the `slayer-sqlglot` CI
-job is where it runs.
+Needs the real `[slayer]` extra, so it skips without it; the `tests` CI job
+is where it runs.
 """
 
 from __future__ import annotations

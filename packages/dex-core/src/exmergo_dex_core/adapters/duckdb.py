@@ -124,7 +124,9 @@ class DuckDBAdapter:
         return conn
 
     def capabilities(self) -> dict[str, object]:
-        version = self._conn.sql("SELECT version()").fetchone()[0]
+        # execute(), not sql(): DuckDB 2.0 removed fetchone() from relations
+        # (#797), and the cursor execute() returns keeps it on every release.
+        version = self._conn.execute("SELECT version()").fetchone()[0]
         return {
             "connector": self.name,
             "dialect": self.dialect,

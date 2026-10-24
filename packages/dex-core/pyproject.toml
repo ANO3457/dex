@@ -43,6 +43,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Database",
   "Topic :: Database :: Front-Ends",
   "Topic :: Scientific/Engineering :: Information Analysis",
@@ -54,7 +55,17 @@ classifiers = [
 # the dialect engine live behind the extras below, so the zero-credential DuckDB
 # on-ramp never pulls the cloud client stack, and a deployment that queries a
 # hosted semantic layer over HTTP pulls neither.
+#
+# certifi is the one exception to "what every surface needs", and it is a floor
+# rather than a capability: every TLS client dex reaches (requests, httpx, each
+# warehouse driver, `dbt deps` against the package hub) trusts its CA bundle, and
+# 2026.10.19 is the first release without the emSign roots whose private keys
+# were found to be trivially weak. A lockfile update protects this repository's
+# CI and nothing else; only a floor here constrains a fresh install from PyPI or
+# a skill wrapper. See
+# https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576
 dependencies = [
+  "certifi>=2026.10.19",
   "pydantic>=2",
   "pyyaml>=6",
 ]
@@ -94,14 +105,37 @@ sql = ["sqlglot>=28.6,<31"]
 # dev target, so dbt-duckdb belongs here. (This makes the on-ramp heavier than a
 # pure explore-only install would need; a separate lighter explore extra can be
 # split out later if that tradeoff matters.)
-duckdb = ["duckdb>=1", "dbt-duckdb>=1.9", "exmergo-dex-core[sql]"]
+#
+# Both supported majors, 1.5 and 2.x. DuckDB 2.0 changed the Python client's
+# relation API (relations keep no result, so `fetchone()` and friends are gone;
+# #797), and the engine no longer fetches from a relation. The suite, dbt-duckdb
+# builds, `dex demo` and the values-free conformance suite all pass on 2.0 under
+# every supported Python, so 2.x is the locked line and 1.5 stays the floor for
+# anyone who has pinned it: the `duckdb-1x` job in upstream-deps-canaries.yml
+# runs the suite against it weekly. A file 2.0 creates uses storage that 1.x
+# cannot open, while a file 1.x created keeps its storage version through 2.0's
+# reads and dbt builds. The ceiling is the next major, for the reason the sqlglot
+# one exists: `duckdb-canary` runs the suite against the newest release, so a 3.0
+# is let in on evidence rather than on a user's install. See
+# https://duckdb.org/docs/2.0/clients/python/migration
+#
+# The dbt adapter floors in this and every connector extra below are the lines
+# dbt Core 1.12 ships with: 1.12 is the first dbt that imports on Python 3.14,
+# and an older adapter would pull a dbt-core that cannot (#795).
+duckdb = ["duckdb>=1.5,<3", "dbt-duckdb>=1.11", "exmergo-dex-core[sql]"]
 # 3.17 is the floor for workload-identity auth (the keyless CI path). Like
 # [duckdb], the extra carries the dbt adapter so transform can build against a
 # Snowflake dev target with one install.
-snowflake = ["snowflake-connector-python>=3.17", "dbt-snowflake>=1.9", "exmergo-dex-core[sql]"]
+# The <5 ceiling matches dbt-snowflake's own: the 5.x connector reworks
+# authentication and result fetching, and dbt has not moved to it.
+snowflake = [
+  "snowflake-connector-python>=3.17,<5",
+  "dbt-snowflake>=1.12",
+  "exmergo-dex-core[sql]",
+]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
 # transform can build against a BigQuery dev target with one install.
-bigquery = ["google-cloud-bigquery>=3", "dbt-bigquery>=1.9", "exmergo-dex-core[sql]"]
+bigquery = ["google-cloud-bigquery>=3", "dbt-bigquery>=1.12", "exmergo-dex-core[sql]"]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
 # transform can build against a Databricks dev target with one install. The SDK
 # rides alongside the SQL driver: free Unity Catalog metadata and warehouse facts
@@ -109,12 +143,12 @@ bigquery = ["google-cloud-bigquery>=3", "dbt-bigquery>=1.9", "exmergo-dex-core[s
 databricks = [
   "databricks-sql-connector>=3",
   "databricks-sdk>=0.30",
-  "dbt-databricks>=1.9",
+  "dbt-databricks>=1.12",
   "exmergo-dex-core[sql]",
 ]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
 # transform can build against a Postgres dev schema with one install.
-postgres = ["psycopg[binary]>=3", "dbt-postgres>=1.9", "exmergo-dex-core[sql]"]
+postgres = ["psycopg[binary]>=3", "dbt-postgres>=1.11", "exmergo-dex-core[sql]"]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
 # transform can build against a Redshift dev schema with one install. boto3
 # rides alongside the driver: Serverless workgroup facts (endpoint, base
@@ -123,7 +157,7 @@ postgres = ["psycopg[binary]>=3", "dbt-postgres>=1.9", "exmergo-dex-core[sql]"]
 redshift = [
   "redshift-connector>=2.1",
   "boto3>=1.34",
-  "dbt-redshift>=1.9",
+  "dbt-redshift>=1.11",
   "exmergo-dex-core[sql]",
 ]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
@@ -132,7 +166,7 @@ redshift = [
 # which is also the one dbt-clickhouse defaults to.
 clickhouse = [
   "clickhouse-connect>=0.8",
-  "dbt-clickhouse>=1.8",
+  "dbt-clickhouse>=1.10.3",
   "exmergo-dex-core[sql]",
 ]
 # Like [clickhouse], the extra carries the dbt adapter so transform can build
@@ -146,11 +180,14 @@ trino = [
 # The local semantic-layer query backend (`explore semantic query --local`):
 # MetricFlow renders metric SQL via explain(), and dex executes it through its own
 # connector and cost guard. Just the metricflow library (not dbt-metricflow, whose
-# CLI bundle pulls a dbt adapter the active connector extra already provides). 0.211
-# is the floor that resolves against a released dbt-semantic-interfaces (0.209 pins
-# a prerelease). `explore semantic list --local` is a pure manifest read-view and
-# needs none of this.
-semantic = ["metricflow>=0.211,<0.212", "exmergo-dex-core[sql]"]
+# CLI bundle pulls a dbt adapter the active connector extra already provides).
+# One minor line, because MetricFlow's renderer and manifest-parser modules are
+# internal API that moves between minors: 0.213 is the line dbt Core 1.12 requires,
+# and it ships its schemas only as `metricflow_semantic_interfaces` (no
+# `dbt_semantic_interfaces` at all), which `transform/semantic.py` imports first.
+# `explore semantic list --local` is a pure manifest read-view and needs none of
+# this.
+semantic = ["metricflow>=0.213,<0.214", "exmergo-dex-core[sql]"]
 # The hosted dbt Cloud Semantic Layer backend (`explore semantic --api`): a thin
 # GraphQL client over httpx, nothing else. No warehouse client and no dbt-core:
 # dbt Cloud owns the warehouse connection and executes server-side, so a
@@ -180,8 +217,9 @@ ossie = ["jsonschema>=4.26"]
 # already depends on sqlglot (>=30.17), and dex's guards cap it (<31). Only
 # 30.17 to 30.x satisfies both, so this extra is the place an install is forced
 # to land inside that overlap instead of pairing dex's guards with a sqlglot they
-# were never run against. The `slayer-sqlglot` CI job resolves the two together,
-# so a bump on either side fails CI rather than a user's install.
+# were never run against. The `[all]` packaging test resolves the two together
+# from these declared ranges on every pull request, so a bump on either side
+# fails CI rather than a user's install.
 #
 # Heavy on purpose and therefore never in a base install: a base SLayer brings
 # FastAPI, uvicorn, mcp, duckdb, jafgen and tantivy. Nothing outside
@@ -272,6 +310,12 @@ Repository = "https://github.com/exmergo/dex"
 Changelog = "https://github.com/exmergo/dex/blob/main/CHANGELOG.md"
 Issues = "https://github.com/exmergo/dex/issues"
 
+# The uv that resolves this project must trust the CA bundle certifi now ships:
+# uv vendors its own roots, and 0.13.4 is the first release without the emSign
+# ones (see the certifi floor above).
+[tool.uv]
+required-version = ">=0.13.4"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/exmergo_dex_core"]
 
@@ -290,7 +334,7 @@ source = "vcs"
 [tool.hatch.version.raw-options]
 # This package lives in a subdirectory; the repository .git is two levels up.
 root = "../.."
-fallback_version = "1.15.3"
+fallback_version = "1.16.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

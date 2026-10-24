@@ -8,6 +8,39 @@ from pathlib import Path
 
 import pytest
 
+_importorskip = pytest.importorskip
+
+
+def _importorskip_absent_only(modname: str, *args, **kwargs):
+    """Skip only when the module asked for is absent, never when it is broken.
+
+    A test gated on an optional extra skips where the extra is not installed,
+    and that is the whole of what a skip may mean. pytest skips on any
+    ModuleNotFoundError, though, including one raised for a module the
+    requested one imports: an installed dbt whose own dependency did not
+    install, or that cannot import under a new interpreter, reads as "extra
+    absent" and turns a compatibility failure into a green run (#795). So a
+    skip stands only when the missing module is the requested one or a parent
+    package of it; anything else is re-raised as the failure it is.
+    """
+
+    try:
+        return _importorskip(modname, *args, **kwargs)
+    except pytest.skip.Exception as skipped:
+        try:
+            __import__(modname)
+        except ModuleNotFoundError as exc:
+            missing = exc.name or ""
+            if modname == missing or modname.startswith(missing + "."):
+                raise skipped from None
+            raise ImportError(
+                f"{modname} is installed but cannot import: {missing} is missing"
+            ) from exc
+        raise
+
+
+pytest.importorskip = _importorskip_absent_only
+
 
 @pytest.fixture
 def duckdb_file(tmp_path: Path) -> Path:
