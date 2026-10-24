@@ -14,6 +14,72 @@ pending fragments into a new section below. See
 
 <!-- towncrier release notes start -->
 
+## [1.16.0] - 2026-10-24
+
+### Added
+
+- **Python 3.14 is supported.** dex now installs and runs on Python 3.11 through
+  3.14, and CI tests all four, including every optional extra and fresh wheel
+  installs. To get there, the dbt stack moves as one tested group: dbt Core 1.12.5
+  (held below 1.12.6, the ceiling dbt-databricks 1.12.7 sets), dbt-adapters 1.24,
+  dbt-common 1.38, Mashumaro 3.17, and the 1.12 adapters (dbt-duckdb 1.11,
+  dbt-snowflake 1.12, dbt-bigquery 1.12, dbt-databricks 1.12.7, dbt-postgres 1.11,
+  dbt-redshift 1.11, dbt-clickhouse 1.10.3, dbt-trino 1.10.6). The connector extras'
+  dbt adapter floors rise to those lines, because older adapters pull a dbt Core
+  that cannot import on 3.14. The `[semantic]` extra moves to MetricFlow 0.213, the
+  line dbt 1.12 requires, and semantic authoring validates against its schemas.
+
+### Changed
+
+- **Dependency bounds are explicit where a major would break dex.** The `[duckdb]`
+  extra is now `duckdb>=1.5,<3`, and the Snowflake connector is held below 5,
+  matching dbt-snowflake. sqlglot stays below 31, and motley-slayer stays at
+  exactly 1.2.0. In the lock, sqlglot moves to 30.24, DuckDB to 2.0.0, the
+  Snowflake connector to 4.8, and the Databricks SDK and SQL connector to 0.117 and
+  4.4. Other drivers get patch and minor refreshes, while pandas and pyarrow stay on
+  their current majors. A weekly canary runs the suite against the newest DuckDB
+  and sqlglot on every supported Python, so lifting a ceiling is a decision taken
+  on evidence.
+
+### Fixed
+
+- **`settled_spend()` reports unknown settlement when statements ran with unknown cost.**
+  `DexEngine.settled_spend()` returned `None` both when nothing was billed and
+  when billed amounts were unknown (such as `transform build` on an adapter that
+  reports no billing figure). The accessor now reflects the build's own spend block
+  and returns `{"settled": False, "unknown_settlement": True, ...}` when settlement
+  is unknown, keeping `None` exclusively for commands where nothing was billed. ([#584](https://github.com/exmergo/dex/pull/584))
+- **`transform rename` / `transform remove` honor Python and YAML snapshot readers.** A `dbt.ref()` / `dbt.source()` in a Python model, or a dbt 1.9 snapshot `relation:`, now blocks a removal the way a Jinja `ref()` does. Renaming a model updates a static YAML `relation:`; a Python reader on the old name refuses the rename unless the same plan updates or removes it (`--edits-file`). ([#657](https://github.com/exmergo/dex/pull/657))
+- **`explore query` reports "the warehouse refused the statement" rather than "a statement dex built" on caller SQL.**
+  When a statement executed by `explore query` fails on the warehouse (such as runtime cast or conversion failures), the error message is now marked as caller-authored and omits "dex built", avoiding misleading agents into believing dex authored the failed query. ([#716](https://github.com/exmergo/dex/pull/716))
+- **`semantic define|update|plan` now run MetricFlow schema validation.** The skills' wrappers now install the `[semantic]` extra for semantic authoring commands, and schema validation imports from `metricflow_semantic_interfaces` with fallback to `dbt_semantic_interfaces`. When neither package is available, the warning directs users to the missing package and extra. ([#776](https://github.com/exmergo/dex/pull/776))
+- **The programmatic API now reports `.dex/config.yml` diffs and moot-write warnings.**
+  Answers to cumulative ceiling prompts recorded at `DexEngine` construction, as
+  well as DuckDB connection inference warnings, are now folded onto the first
+  `Result` returned by the engine so library callers receive them without needing
+  to inspect `engine.config_diffs`, `engine.budget_warnings`, or `engine.connection_warnings`.
+  Subsequent results omit them so they are reported once. ([#799](https://github.com/exmergo/dex/pull/799))
+- **DuckDB 2.0 is supported.** DuckDB 2.0 removed `fetchone()` from relations, so
+  every DuckDB project's `connect test` failed with `reason: internal`. The
+  capabilities check now reads the engine version through a cursor. The `[duckdb]`
+  extra admits DuckDB 1.5 through 2.x (`duckdb>=1.5,<3`), and the whole suite,
+  dbt-duckdb builds included, passes on 2.0 under Python 3.11 to 3.14. A database
+  file that DuckDB 2.0 creates, such as a new `dex demo` warehouse, uses a storage
+  format DuckDB 1.x cannot open. A file DuckDB 1.x created keeps its format when
+  dex reads it and when dbt builds into it on 2.0.
+
+### Security
+
+- **Fresh installs trust only the corrected CA bundle.** The engine now requires
+  `certifi>=2026.10.19`, the first release without the emSign root certificates
+  that were withdrawn after their private keys were found to be trivially weak.
+  Every TLS connection dex makes, to a warehouse, the hosted Semantic Layer or the
+  dbt package hub, trusts that bundle, and a stale one leaves those connections
+  open to interception. The skill wrappers also warn when the `uv` on `PATH`
+  is older than 0.13.4, the first release with the corrected roots, and name the
+  update. If you install dex with pip, use pip 26.2.2 or later.
+
+
 ## [1.15.3] - 2026-10-23
 
 ### Added
