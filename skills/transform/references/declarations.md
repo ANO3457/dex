@@ -175,8 +175,9 @@ models you followed.
   each reason is in `limits`, and such a reader is never counted as one that
   keeps every value.
 - Capped at 10 groups and 5 model names per group, with the rest counted in
-  `elided_groups` and `elided_models`. `transform references <model.column>
-  --usage --full` returns the same answer uncapped, before any SQL is written.
+  `elided_groups` and `elided_models`.
+  `transform references <model.column> --usage --full` returns the same answer
+  uncapped, before any SQL is written.
 
 ### Literals the column never holds
 
