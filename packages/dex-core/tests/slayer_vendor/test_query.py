@@ -12,7 +12,7 @@ an unknown token and a PII dimension are refused before anything renders,
 `--metric` roots the render at that metric's model and `scoped_to` says so, and
 the values come back capped.
 
-Needs the real `[slayer]` extra, so it skips without it; the `extras` CI job
+Needs the real `[slayer]` extra, so it skips without it; the `tests` CI job
 is where it runs.
 """
 

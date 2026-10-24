@@ -23,7 +23,7 @@ fails here first, and the change is read rather than shipped. The statement is
 then held to dex's own guards in the connector's dialect: the SELECT-only
 assertion, and the relation pre-check's reading of what it reads.
 
-Needs the real `[slayer]` extra, so it skips without it; the `extras` CI job
+Needs the real `[slayer]` extra, so it skips without it; the `tests` CI job
 is where it runs.
 """
 

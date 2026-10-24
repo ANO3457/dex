@@ -6,7 +6,7 @@ refused before SLayer can migrate it, every broken file is refused with the file
 and the element named, the catalog says what does not map instead of inventing
 it, and reading never writes, moves or renames anything under the storage root.
 
-Needs the real `[slayer]` extra, so it skips without it; the `extras` CI job
+Needs the real `[slayer]` extra, so it skips without it; the `tests` CI job
 is where it runs.
 """
 

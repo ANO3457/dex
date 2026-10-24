@@ -8,7 +8,7 @@ names. Reading the models themselves is `test_reader.py` (#598).
 
 Most of this runs without SLayer installed, by standing in for the installed
 distribution. The tests at the bottom need the real extra and skip without it;
-the `extras` CI job is where they run.
+the `tests` CI job is where they run.
 """
 
 from __future__ import annotations
@@ -308,7 +308,7 @@ def test_the_check_and_the_seam_import_no_slayer():
         assert not _imports_slayer(package / "slayer" / name), name
 
 
-# --- with the real extra (the `extras` CI job) ---------------------------------------
+# --- with the real extra (the `tests` CI job) ----------------------------------------
 
 needs_slayer = pytest.mark.skipif(
     not _HAS_SLAYER, reason="the [slayer] extra is not installed"

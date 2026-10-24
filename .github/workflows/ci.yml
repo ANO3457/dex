@@ -28,60 +28,24 @@ jobs:
           # the packaging tests pin their isolated wheel installs to whatever
           # interpreter runs the suite, so every step tests this version.
           python-version: ${{ matrix.python-version }}
-      # The cloud extras are included so their unit tests and safety families
-      # run here (they are offline against fake clients, but they importorskip
-      # on the client libraries; without the extras they would silently skip).
+      # Every optional capability, not only the connectors: [all] brings each
+      # connector client and dbt adapter, MetricFlow, SLayer, Ossie, clustering
+      # and the hosted backend's client, and dev adds the test tooling. Tests
+      # that need an extra importorskip on it, so a sync without one would read
+      # as green while skipping exactly what breaks first on a new Python (#795:
+      # dbt and Mashumaro on 3.14). With everything installed, the only skips
+      # left are live integration tests and capabilities a backend declares it
+      # lacks. That the pinned SLayer's sqlglot floor still overlaps the [sql]
+      # ceiling is held by the packaging tests, which resolve [all] fresh from
+      # the declared ranges rather than from the lock.
       # --locked: a lock that no longer matches pyproject.toml fails here
       # rather than being silently re-resolved into something nobody reviewed.
-      - name: Sync (duckdb + bigquery + snowflake + databricks + postgres + redshift + clickhouse + trino + dev extras)
-        run: uv sync --locked --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra trino --extra dev --python ${{ matrix.python-version }}
+      - name: Sync (all + dev extras)
+        run: uv sync --locked --extra all --extra dev --python ${{ matrix.python-version }}
       - name: Interpreter and stack under test
         run: uv run --no-sync python -c "import sys, dbt.version, duckdb, sqlglot, certifi; print(sys.version); print('dbt-core', dbt.version.__version__, 'duckdb', duckdb.__version__, 'sqlglot', sqlglot.__version__, 'certifi', certifi.__version__)"
       - name: Tier-1 unit tests
         run: uv run --no-sync pytest -q
-
-  # The optional capabilities the tests job does not sync: MetricFlow (the local
-  # semantic backend and semantic authoring's schema validation), SLayer,
-  # clustering, Ossie and the hosted backend's client, all through [all]. On
-  # every supported interpreter, because these are exactly the dependencies
-  # that break on a new Python first (#795: dbt and Mashumaro on 3.14). The
-  # import step is what makes it a check: a test that importorskips an extra
-  # would read a broken install as an absent one, so the step fails loudly
-  # before any test can skip. This is also where the SLayer suite runs. That the
-  # pinned SLayer's sqlglot floor still overlaps the [sql] ceiling is held by
-  # the tests job instead, whose packaging test resolves [all] fresh from the
-  # declared ranges rather than from the lock.
-  extras:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
-    defaults:
-      run:
-        working-directory: packages/dex-core
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          enable-cache: true
-          python-version: ${{ matrix.python-version }}
-      - name: Sync (all + dev extras)
-        run: uv sync --locked --extra all --extra dev --python ${{ matrix.python-version }}
-      - name: Every optional capability imports
-        run: |
-          uv run --no-sync python -c "
-          from metricflow.engine.metricflow_engine import MetricFlowEngine
-          from metricflow_semantics.model.semantic_manifest_lookup import SemanticManifestLookup
-          from exmergo_dex_core.transform.semantic import _metricflow_validators
-          assert _metricflow_validators() is not None, 'MetricFlow schemas did not import'
-          import slayer.core.models, sklearn, jsonschema, httpx
-          from exmergo_dex_core.explore.semantic.local import LocalMetricFlowBackend
-          from exmergo_dex_core.explore.semantic.hosted import HostedDbtCloudBackend
-          print('every optional capability imported')
-          "
-      - name: Semantic, SLayer, Ossie and clustering suites with their extras installed
-        run: uv run --no-sync pytest -q -rs tests/explore tests/transform tests/maintain tests/slayer_vendor tests/ossie
 
   # The safety spine is broken out as its own gate so a regression on a
   # safety-critical assertion is unmistakable in the checks list. Strict: an

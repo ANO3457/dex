@@ -7,7 +7,7 @@ carries a name and a type and nothing a client could connect with; and a render
 is a dry run that never builds a SQL client, never writes, and never imports
 SLayer's file or SQLite storage.
 
-Needs the real `[slayer]` extra, so it skips without it; the `extras` CI job
+Needs the real `[slayer]` extra, so it skips without it; the `tests` CI job
 is where it runs.
 """
 
