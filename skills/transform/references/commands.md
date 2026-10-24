@@ -18,6 +18,10 @@ of or on top of hand-authored edits.
   plus `--confirm --budget`. `attributed: false` carries the reason (macro SQL, a
   jinja conditional, a renamed CTE, an unprofiled parent). Advisory: nothing here
   refuses a plan.
+- `data.declarations.<model>`: for every model the plan creates, edits or
+  declares, `drafted`, `declared` and `missing`. Free on every connector: it reads
+  the `.dex/` cache and the repository and opens no connection. Shape in
+  `declarations.md`. Absent when the plan touches no model.
 - Shape warnings: the authored SELECT list against the columns `schema.yml`
   declares, in both directions, silent where the model declares none.
 - The resolved-key convention: a model exposing a raw foreign key where at least

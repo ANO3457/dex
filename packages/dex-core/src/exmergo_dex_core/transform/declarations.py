@@ -493,19 +493,10 @@ def _check_filters(
 
 
 def _partial_intent(declaration: Declaration, produced: set[str] | None) -> list[str]:
-    missing = []
-    if not declaration.description:
-        missing.append("description")
-    if not declaration.grain:
-        missing.append("grain")
-    if not declaration.assumptions:
-        missing.append("assumptions")
+    # A missing model-level field (description, grain, population, assumptions)
+    # is warned once per field by `drafting`, which reads the post-change YAML
+    # and so also counts what the entry declared before this payload.
     warnings = []
-    if missing:
-        warnings.append(
-            f"'{declaration.model}' declares no {', '.join(missing)}; a reader "
-            "cannot check what the model leaves unsaid"
-        )
     if produced is not None:
         declared = {c.lower() for c in declaration.columns}
         undeclared = sorted(c for c in produced if c not in declared)

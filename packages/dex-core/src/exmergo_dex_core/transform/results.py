@@ -69,6 +69,11 @@ class PlanResult(Result):
     # relay the decisions it made without reconstructing them. Empty is an
     # answer (nothing declared); absent means no dbt project to read.
     decisions: list[dict[str, Any]] | None = None
+    # Per model the plan creates, edits or declares: what dex drafted from the
+    # cache and the SQL, what the post-change YAML declares, and which intent
+    # fields nobody has supplied. A draft is offered, never written. Absent when
+    # the plan touches no model.
+    declarations: dict[str, dict[str, Any]] | None = None
 
     def data(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -80,6 +85,8 @@ class PlanResult(Result):
         }
         if self.decisions is not None:
             payload["decisions"] = self.decisions
+        if self.declarations is not None:
+            payload["declarations"] = self.declarations
         if self.defined is not None:
             payload["defined"] = self.defined
         if self.updated is not None:

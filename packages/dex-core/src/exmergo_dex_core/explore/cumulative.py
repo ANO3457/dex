@@ -245,6 +245,22 @@ def measure_fractions(
     return fractions
 
 
+#: What every cumulative note says right after the measure's name. The note
+#: is the cache's only record of the finding, so :func:`cumulative_columns`
+#: reads it back by this marker rather than by a second copy of the sentence.
+CUMULATIVE_NOTE_MARKER = " looks cumulative or a point-in-time snapshot:"
+
+
+def cumulative_columns(data_quality: list[str]) -> set[str]:
+    """The measures a dataset's ``data_quality`` notes record as cumulative."""
+
+    return {
+        note.split(CUMULATIVE_NOTE_MARKER, 1)[0]
+        for note in data_quality
+        if CUMULATIVE_NOTE_MARKER in note
+    }
+
+
 def cumulative_measure_notes(
     candidate: CumulativeCandidate, fractions: dict[str, tuple[float, int]]
 ) -> list[str]:
@@ -262,7 +278,7 @@ def cumulative_measure_notes(
         if observations < _MIN_OBSERVATIONS or fraction > _DECREASE_FRACTION_CEILING:
             continue
         notes.append(
-            f"{measure} looks cumulative or a point-in-time snapshot: over "
+            f"{measure}{CUMULATIVE_NOTE_MARKER} over "
             f"{observations} consecutive observations within "
             f"{candidate.entity}, ordered by {candidate.temporal}, only "
             f"{fraction:.1%} decreased; summing it across rows multiplies "

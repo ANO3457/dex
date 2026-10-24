@@ -264,6 +264,7 @@ def test_an_unknown_host_pin_refuses_rather_than_reading_as_full(
         ["explore", "cluster", "orders"],
         ["explore", "semantic", "values", "tier"],
         ["transform", "plans"],
+        ["transform", "plan", "orders mart"],
         ["config", "set", "query.max_rows", "10"],
         ["demo", "elsewhere.duckdb"],
     ],
