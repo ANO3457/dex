@@ -289,6 +289,57 @@ def test_apply_conflict_needs_confirmation_then_confirm_overrides(
     assert target.read_text(encoding="utf-8") == "select 1 as id\n"
 
 
+# --- Crediting dex on the commit of what it wrote ----------------------------
+
+DEX_TRAILER = "Co-authored-by: Dex <dex@exmergo.com>"
+
+
+def test_an_apply_that_writes_hands_back_the_co_author_trailer(
+    dbt_project_dir: Path, tmp_path: Path, capsys
+):
+    plan_id = _make_plan(tmp_path, capsys, "models/marts/fct_y.sql", "select 1\n")
+    rc, envelope = _run(
+        ["--repo-root", str(tmp_path), "transform", "apply", plan_id], capsys
+    )
+    assert rc == 0 and envelope["status"] == "ok"
+    assert envelope["data"]["commit_trailer"] == DEX_TRAILER
+
+
+def test_an_apply_that_writes_nothing_has_no_commit_to_credit(
+    dbt_project_dir: Path, tmp_path: Path, capsys
+):
+    plan_id = _make_plan(tmp_path, capsys, "models/marts/fct_z.sql", "select 1\n")
+    _run(["--repo-root", str(tmp_path), "transform", "apply", plan_id], capsys)
+    rc, envelope = _run(
+        ["--repo-root", str(tmp_path), "transform", "apply", plan_id], capsys
+    )
+    assert rc == 0 and envelope["data"]["written"] == []
+    assert "commit_trailer" not in envelope["data"]
+
+
+def test_a_conflicted_apply_credits_dex_only_once_it_writes(
+    dbt_project_dir: Path, tmp_path: Path, capsys
+):
+    target = dbt_project_dir / "models/staging/stg_customers.sql"
+    plan_id = _make_plan(
+        tmp_path, capsys, "models/staging/stg_customers.sql", "select 1 as id\n"
+    )
+    target.write_text("select 99 as id -- hand-tuned\n", encoding="utf-8")
+
+    _rc, refused = _run(
+        ["--repo-root", str(tmp_path), "transform", "apply", plan_id], capsys
+    )
+    assert refused["status"] == "needs_confirmation"
+    assert "commit_trailer" not in refused["data"]
+
+    _rc, confirmed = _run(
+        ["--repo-root", str(tmp_path), "transform", "apply", plan_id, "--confirm"],
+        capsys,
+    )
+    assert confirmed["status"] == "ok"
+    assert confirmed["data"]["commit_trailer"] == DEX_TRAILER
+
+
 # --- Deletes end to end, and identical across every connector ----------------
 
 

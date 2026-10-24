@@ -553,6 +553,7 @@ def test_a_nested_plan_applies_in_the_checkout_that_stored_it(nested):
         result = engine.apply(NESTED_PLAN_ID)
 
     assert result.written == [NESTED_PATH]
+    assert result.commit_trailer == "Co-authored-by: Dex <dex@exmergo.com>"
     assert (repo / "wh" / "dbt" / NESTED_PATH).read_text(encoding="utf-8") == (
         NESTED_SQL
     )
@@ -619,6 +620,9 @@ def test_export_and_apply_plan_file_carry_a_nested_project_to_a_second_checkout(
     )
     assert rc == 0, applied
     assert applied["data"]["written"] == [NESTED_PATH]
+    assert applied["data"]["commit_trailer"] == (
+        "Co-authored-by: Dex <dex@exmergo.com>"
+    )
     assert (target / "wh" / "dbt" / NESTED_PATH).read_text(encoding="utf-8") == (
         NESTED_SQL
     )
