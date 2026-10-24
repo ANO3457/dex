@@ -246,7 +246,16 @@ named; missing intent, including a model the plan writes SQL for with no
 declaration, is a warning, never a refusal. A plan carrying declarations or
 `schema_yml` edits is parsed by dbt before it is stored. The plan, apply and build
 envelopes report every assumption declared on the models they touched under
-`data.decisions`. Every field: `skills/transform/references/declarations.md`.
+`data.decisions`. The plan envelope also carries `data.declarations.<model>` for
+every model it creates, edits or declares: `drafted` (the grain, keys, references,
+PII and NULL facts, running totals, unit shapes and filtered value domains the
+`.dex/` cache and the SQL support, each with its evidence, never written into the
+project), `declared` (what the post-change YAML says) and `missing` (the intent
+fields still owed, each also a warning). Drafting reads the cache and the
+repository only, so it is free on every connector; an unprofiled input is named
+with the `explore profile` command that would profile it, and a PII-flagged
+column's domain is never drafted. Every field:
+`skills/transform/references/declarations.md`.
 
 ### The envelope
 

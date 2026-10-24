@@ -113,9 +113,14 @@ https://github.com/exmergo/dex/tree/main/packages/dex-core.
    (dbt), `semantic ossie define|update|plan` (native Ossie), or
    `semantic slayer define|update|plan` (SLayer model files). Read
    `${CLAUDE_SKILL_DIR}/references/semantic-layer.md` first.
-4. **Read the plan** (rules below), then `transform apply <plan-id>`.
-5. **Build and verify:** `transform build --target dev --verify`.
-6. **Measure the tests** right after you author or scaffold them, and before
+4. **Declare.** Read `data.declarations.<model>` on the plan envelope: `drafted`
+   is what dex measured, `declared` is what the YAML says, `missing` is the intent
+   still owed. Supply the intent, confirm or override each drafted fact in the
+   `declarations` entry, and re-plan until `missing` holds only what you decided
+   to leave open.
+5. **Read the plan** (rules below), then `transform apply <plan-id>`.
+6. **Build and verify:** `transform build --target dev --verify`.
+7. **Measure the tests** right after you author or scaffold them, and before
    telling the user a model is covered: `transform test --mutate <model>`.
 
 Per-command fields and flags are in `${CLAUDE_SKILL_DIR}/references/commands.md`.
@@ -163,6 +168,12 @@ a field, flag, or macro you need is not described here.
   `assumptions` entry with its `evidence` (`request`, `contract`, `precedent`,
   `data`, `default`). A threshold, a status list or a NULL rule left only in your
   reasoning is one no reviewer can check.
+- A drafted fact is a draft. Copy one into a declaration only after you agree
+  with its `evidence`; a `fraction` or `percent` unit is a hypothesis from a
+  range, and a grain under `withheld` is one dex could not prove, not one that
+  is wrong. An input under `drafted.inputs` with `profiled: false` drafted
+  nothing: run the `command` it names when the facts matter, and say so when you
+  declare without them.
 - Relay `data.decisions` from the plan, apply or build envelope to the user at the
   end of the task, so they see the choices you made and can overturn one.
 - A warning that a model declares nothing, or leaves out a description, grain or

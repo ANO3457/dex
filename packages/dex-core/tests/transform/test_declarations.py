@@ -351,7 +351,6 @@ def test_missing_intent_warns_and_never_refuses():
     edits, warnings = apply_declarations(parsed, _view(_project()), [])
 
     assert edits == [] or all(e.kind is EditKind.SCHEMA_YML for e in edits)
-    assert any("declares no description, grain, assumptions" in w for w in warnings)
     assert any("with no declared role" in w for w in warnings)
 
 

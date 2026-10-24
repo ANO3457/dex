@@ -307,7 +307,7 @@ def plan(
     else:
         scaffold_notes = []
 
-    declared, declaration_notes = _declare(engine, edits, declarations)
+    declared, declaration_notes, drafts = _declare(engine, edits, declarations)
     edits = declared
 
     if not edits:
@@ -392,6 +392,7 @@ def plan(
     result.warnings.extend(declaration_notes)
     result.warnings.extend(parse_notes)
     result.decisions = _plan_decisions(engine, edits, declarations)
+    result.declarations = drafts or None
     _attribute_rows(engine, result, edits, requested=attribute_rows)
     return result
 
@@ -504,14 +505,18 @@ def _keep_one_entry(
 
 def _declare(
     engine: DexEngine, edits: list[PlanEdit], declarations: list[Any] | None
-) -> tuple[list[PlanEdit], list[str]]:
-    """Render the payload's declarations into ``edits``, and warn where intent is
-    missing.
+) -> tuple[list[PlanEdit], list[str], dict[str, Any]]:
+    """Render the payload's declarations into ``edits``, draft what the cache
+    already knows about each model, and warn where intent is missing.
 
     The undeclared-model warning runs even with no declarations at all: a plan
     that writes a model's SQL and says nothing about what it means is the gap this
     exists to close. It stays a warning, because dex declares its own output and
     does not police a model a human wrote.
+
+    The third value is ``data.declarations``: per model the plan creates, edits
+    or declares, its ``drafted``, ``declared`` and ``missing`` parts (see
+    :mod:`.drafting`).
     """
 
     from ..dbt_project import load as load_project
@@ -524,7 +529,7 @@ def _declare(
                 "declarations are rendered into a dbt project's model YAML, and no "
                 "dbt project is the editable project here"
             )
-        return edits, []
+        return edits, [], {}
     view = load_project(engine.project_dir())
 
     warnings: list[str] = []
@@ -556,7 +561,70 @@ def _declare(
             edits, view, (d.model for d in parsed)
         )
     )
-    return edits, warnings
+    drafts, draft_warnings = _draft(engine, view, edits, [d.model for d in parsed])
+    warnings.extend(draft_warnings)
+    return edits, warnings, drafts
+
+
+def _draft(
+    engine: DexEngine, view: Any, edits: list[PlanEdit], declared: list[str]
+) -> tuple[dict[str, Any], list[str]]:
+    """The measured half of each touched model's declaration, from the cache.
+
+    Free on every connector: it reads the post-change project and the stored
+    cache and opens nothing. Total for the same reason row attribution is: the
+    draft is commentary on a plan, so a defect in it is a warning naming the
+    exception rather than a plan that fails to exist.
+    """
+
+    from ..adapters import get_dialect
+    from ..cache import mask_overridden
+    from ..explore.cumulative import cumulative_columns
+    from ..storage import CacheUnreadableError
+    from . import declarations as declarations_mod
+    from . import drafting
+
+    files = declarations_mod.post_change_files(view, edits)
+    models = set(declared)
+    for edit in edits:
+        if (
+            edit.kind is EditKind.MODEL_SQL
+            and edit.op is EditOp.UPSERT
+            and edit.path.endswith(".sql")
+        ):
+            models.add(Path(edit.path).stem)
+    if not models:
+        return {}, []
+
+    note = None
+    try:
+        cache = readable_cache(engine.store)
+    except CacheUnreadableError:
+        cache, note = None, "the exploration cache could not be read"
+    if cache is None and note is None:
+        note = "there is no exploration cache yet; run `explore map` first"
+    if cache is not None:
+        cache = mask_overridden(cache, pii_override_paths(engine.config.pii_overrides))
+    try:
+        return drafting.draft(
+            models,
+            files,
+            view.model_paths,
+            cache,
+            dialect=get_dialect(engine.connector or engine.config.connector),
+            vars=view.vars,
+            domain_cap=engine.config.profile_value_domain_cap,
+            cumulative={
+                dataset.identifier: cumulative_columns(dataset.data_quality)
+                for dataset in (cache.datasets if cache is not None else [])
+            },
+            cache_note=note,
+        )
+    except Exception as exc:
+        return {}, [
+            f"could not draft the declarations of this plan's models "
+            f"({type(exc).__name__}: {exc}); the plan itself is unaffected"
+        ]
 
 
 def _plan_decisions(
@@ -4136,7 +4204,7 @@ def _semantic_plan(
     # Declarations render after the semantic-only checks above, because what they
     # produce is a model's properties (`schema_yml`), not a semantic definition,
     # and before the parse below, so dbt reads the layer and the models together.
-    edits, declaration_notes = _declare(engine, edits, declarations)
+    edits, declaration_notes, drafts = _declare(engine, edits, declarations)
 
     # The authoritative gate: a plan that dbt cannot parse is never stored.
     # Skipped when the time-spine warning fires (dbt would refuse to parse for
@@ -4189,6 +4257,7 @@ def _semantic_plan(
     result.warnings.extend(parse_deprecations)
     result.warnings.extend(declaration_notes)
     result.decisions = _plan_decisions(engine, edits, declarations)
+    result.declarations = drafts or None
     return result
 
 

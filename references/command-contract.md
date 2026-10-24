@@ -405,8 +405,13 @@ is, and the assumptions the model rests on with their evidence. Each is rendered
 into the model's existing YAML entry as a `schema_yml` edit in the same plan, and
 `edits` may be omitted when the payload only declares models that exist. The plan,
 apply and build envelopes then carry `data.decisions`, every assumption declared on
-the models the command touched. A command that takes no declarations refuses a
-payload carrying them rather than dropping them. The full shape, the refusals and
+the models the command touched. The plan envelope also carries
+`data.declarations.<model>` for every model the plan creates, edits or declares:
+`drafted` (facts the `.dex/` cache and the SQL support, each with its evidence),
+`declared` (what the post-change YAML says) and `missing` (intent fields nobody
+supplied, each also a warning). It reads the cache and the repository only and
+opens no connection. A command that takes no declarations refuses a payload
+carrying them rather than dropping them. The full shape, the refusals and
 what each field renders into:
 [`skills/transform/references/declarations.md`](../skills/transform/references/declarations.md).
 
