@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     defaults:
       run:
         working-directory: packages/dex-core
@@ -24,20 +24,73 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          # Never the runner's system Python. The sync below names it too, and
+          # the packaging tests pin their isolated wheel installs to whatever
+          # interpreter runs the suite, so every step tests this version.
+          python-version: ${{ matrix.python-version }}
       # The cloud extras are included so their unit tests and safety families
       # run here (they are offline against fake clients, but they importorskip
       # on the client libraries; without the extras they would silently skip).
+      # --locked: a lock that no longer matches pyproject.toml fails here
+      # rather than being silently re-resolved into something nobody reviewed.
       - name: Sync (duckdb + bigquery + snowflake + databricks + postgres + redshift + clickhouse + trino + dev extras)
-        run: uv sync --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra trino --extra dev --python ${{ matrix.python-version }}
+        run: uv sync --locked --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra trino --extra dev --python ${{ matrix.python-version }}
+      - name: Interpreter and stack under test
+        run: uv run --no-sync python -c "import sys, dbt.version, duckdb, sqlglot, certifi; print(sys.version); print('dbt-core', dbt.version.__version__, 'duckdb', duckdb.__version__, 'sqlglot', sqlglot.__version__, 'certifi', certifi.__version__)"
       - name: Tier-1 unit tests
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q
+
+  # The optional capabilities the tests job does not sync: MetricFlow (the local
+  # semantic backend and semantic authoring's schema validation), SLayer,
+  # clustering, Ossie and the hosted backend's client, all through [all]. On
+  # every supported interpreter, because these are exactly the dependencies
+  # that break on a new Python first (#795: dbt and Mashumaro on 3.14). The
+  # import step is what makes it a check: a test that importorskips an extra
+  # would read a broken install as an absent one, so the step fails loudly
+  # before any test can skip. This is also where the SLayer suite runs. That the
+  # pinned SLayer's sqlglot floor still overlaps the [sql] ceiling is held by
+  # the tests job instead, whose packaging test resolves [all] fresh from the
+  # declared ranges rather than from the lock.
+  extras:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        working-directory: packages/dex-core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - name: Sync (all + dev extras)
+        run: uv sync --locked --extra all --extra dev --python ${{ matrix.python-version }}
+      - name: Every optional capability imports
+        run: |
+          uv run --no-sync python -c "
+          from metricflow.engine.metricflow_engine import MetricFlowEngine
+          from metricflow_semantics.model.semantic_manifest_lookup import SemanticManifestLookup
+          from exmergo_dex_core.transform.semantic import _metricflow_validators
+          assert _metricflow_validators() is not None, 'MetricFlow schemas did not import'
+          import slayer.core.models, sklearn, jsonschema, httpx
+          from exmergo_dex_core.explore.semantic.local import LocalMetricFlowBackend
+          from exmergo_dex_core.explore.semantic.hosted import HostedDbtCloudBackend
+          print('every optional capability imported')
+          "
+      - name: Semantic, SLayer, Ossie and clustering suites with their extras installed
+        run: uv run --no-sync pytest -q -rs tests/explore tests/transform tests/maintain tests/slayer_vendor tests/ossie
 
   # The safety spine is broken out as its own gate so a regression on a
   # safety-critical assertion is unmistakable in the checks list. Strict: an
   # unexpected pass (a placeholder going green early) is fine; a real
   # failure blocks the merge regardless of any benchmark score.
-  # Select a tested Python explicitly: ubuntu-latest's system Python moved to
-  # 3.14, which the locked dbt/Mashumaro stack cannot import under.
+  # The interpreter is selected explicitly, never inherited from the runner's
+  # system Python (ubuntu-latest moved to 3.14 underneath a stack that could not
+  # import there). 3.14 is the newest supported, so it is where a regression is
+  # likeliest; the tests job also runs this file on every supported version.
   safety:
     runs-on: ubuntu-latest
     defaults:
@@ -48,44 +101,11 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Sync (duckdb + bigquery + snowflake + databricks + postgres + redshift + clickhouse + trino + dev extras)
-        run: uv sync --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra trino --extra dev
+        run: uv sync --locked --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra trino --extra dev
       - name: Safety-critical assertions
         run: uv run pytest -q tests/test_safety_spine.py
-
-  # SLayer and dex's guards both bound sqlglot: the pinned SLayer release needs
-  # >=30.17 and the [sql] extra caps it <31, so only 30.17 to 30.x satisfies both.
-  # The [slayer] extra self-references [sql] so every install lands in that
-  # overlap, and this job is what notices when it stops existing: a SLayer pin
-  # bump that raises its floor, or a [sql] ceiling or floor that moves away from
-  # it. Either way the two no longer resolve together, and that has to fail here
-  # rather than on a user's `pip install`.
-  #
-  # Not advisory, unlike the canary above: both ranges are ones this repository
-  # declares, so a red run is something this change did, never an upstream
-  # surprise. The fresh resolve reads pyproject.toml rather than uv.lock, which is
-  # the point of it (a lock can only show that one pair once resolved); the locked
-  # sync then runs the SLayer tests that skip everywhere the extra is absent.
-  slayer-sqlglot:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/dex-core
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          enable-cache: true
-          python-version: "3.12"
-      - name: Resolve [sql,slayer] fresh from the declared ranges
-        run: |
-          uv run --isolated --no-project --with ".[sql,slayer]" python -c \
-            "import sqlglot, slayer.core.models; from importlib.metadata import version; print('sqlglot', sqlglot.__version__, 'motley-slayer', version('motley-slayer'))"
-      - name: Sync (sql + slayer + dev extras)
-        run: uv sync --locked --extra sql --extra slayer --extra dev
-      - name: SLayer tests with the extra installed
-        run: uv run --no-sync pytest -q tests/slayer_vendor
 
   # `explore diagram` emits Mermaid and dex never renders it, so nothing in
   # pyproject.toml pins the syntax dialect it has to stay compatible with: the
@@ -94,8 +114,8 @@ jobs:
   # which is the only way to hold that contract from here, and it is why there is
   # no Python mermaid dependency (every candidate is either a string builder that
   # replaces nothing, or a renderer that would POST the schema to a third-party
-  # host). Advisory like sqlglot-canary.yml and for the same reason: it tracks a
-  # moving upstream, so a Mermaid release breaking our dialect should be loud
+  # host). Advisory like upstream-deps-canaries.yml and for the same reason: it
+  # tracks a moving upstream, so a Mermaid release breaking our dialect should be loud
   # without blocking a merge that changed nothing. It stays per pull request,
   # unlike that weekly canary, because the corpus it parses is our own renderer's
   # output, which a pull request can change.

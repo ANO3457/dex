@@ -82,16 +82,20 @@ Tier 1 always gates (fast, free). Tier 2 gates on release (a safety regression
 blocks regardless of pass-rate). Tier 3 runs on a schedule and pre-release under a
 cost ceiling; a pass-rate or cost/turn regression blocks a release.
 
-Two jobs are deliberately **advisory** rather than blocking, because both track a
+Four jobs are deliberately **advisory** rather than blocking, because each tracks a
 moving upstream and a failure means the world changed rather than that this
 change broke something. `sqlglot-canary` runs the suite, guards and safety spine
 included, against the newest sqlglot, above the declared ceiling, so raising that
-ceiling is a decision taken on evidence. It runs weekly rather than per pull
-request (`.github/workflows/sqlglot-canary.yml`): the question it answers is
-about an upstream release, and a week is soon enough to learn it. `mermaid-syntax` renders `explore diagram` output
-and parses it with the real Mermaid package from npm.
+ceiling is a decision taken on evidence. `duckdb-canary` does the same for DuckDB,
+whose 2.0 changed the Python client's relation API underneath an engine that had
+declared no ceiling (#797), and `duckdb-1x` keeps the 1.5 floor tested now that
+the lock is on 2.x. They run weekly on every supported Python rather than
+per pull request (`.github/workflows/upstream-deps-canaries.yml`): the question they
+answer is about an upstream release, and a week is soon enough to learn it.
+`mermaid-syntax` renders `explore diagram` output and parses it with the real
+Mermaid package from npm.
 
-The second one is worth explaining, because it is the one place CI reaches outside
+The last one is worth explaining, because it is the one place CI reaches outside
 Python. dex emits Mermaid text and never renders it, so no declared dependency
 pins the syntax dialect the renderer has to stay compatible with: that contract is
 with a parser living in whatever tool a reader opens the diagram in. Holding it

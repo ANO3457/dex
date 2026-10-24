@@ -8,8 +8,8 @@ ad-hoc formula, metrics from two models, a token the catalog does not list, a
 grain with no time dimension to bucket, is refused by name. The module renders
 nothing and imports no more of SLayer than its query model.
 
-Needs the real `[slayer]` extra, so it skips without it; the `slayer-sqlglot` CI
-job is where it runs.
+Needs the real `[slayer]` extra, so it skips without it; the `extras` CI job
+is where it runs.
 """
 
 from __future__ import annotations

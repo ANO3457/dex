@@ -1,4 +1,4 @@
-name: Windows
+name: OS canaries (Windows, macOS)
 
 # A weekly run of the tier-1 unit tests on Windows (#487, part 4). Windows is
 # not a claimed platform, so this is not a required check and does not run per
@@ -14,8 +14,13 @@ name: Windows
 # included, so a test that would `importorskip` for want of a client library
 # runs here the same as it does there. One Python version rather than that
 # job's matrix: this run exists to catch platform defects, which do not vary
-# by interpreter, and three Windows runs a week would triple the cost of
-# finding each one once.
+# by interpreter, and four Windows runs a week would quadruple the cost of
+# finding each one once. That version is the newest supported, 3.14, because
+# compiled dependencies are where a platform and a new interpreter meet: a
+# missing Windows wheel for 3.14 is a defect only this run can see (#795).
+#
+# The macos job is the same run on macOS, for the same reason: CI's Linux jobs
+# say nothing about the macOS wheels a contributor's or user's install resolves.
 
 on:
   schedule:
@@ -53,7 +58,25 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
+          python-version: "3.14"
       - name: Sync (duckdb + bigquery + snowflake + databricks + postgres + redshift + clickhouse + trino + dev extras)
-        run: uv sync --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra trino --extra dev --python 3.12
+        run: uv sync --locked --extra duckdb --extra bigquery --extra snowflake --extra databricks --extra postgres --extra redshift --extra clickhouse --extra trino --extra dev --python 3.14
       - name: Tier-1 unit tests
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: packages/dex-core
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - name: Sync (every optional capability + dev extras)
+        run: uv sync --locked --extra all --extra dev --python 3.14
+      - name: Tier-1 unit tests
+        run: uv run --no-sync pytest -q

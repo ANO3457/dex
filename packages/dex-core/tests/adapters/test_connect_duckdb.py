@@ -23,6 +23,39 @@ def test_capabilities_report_read_only(duckdb_file: Path):
         adapter.close()
 
 
+class _RelationWithoutFetchone:
+    """A DuckDB 2.0 relation: it keeps no result, so it has no fetchone()."""
+
+    def __getattr__(self, name: str):
+        if name == "fetchone":
+            raise AttributeError("Relations no longer have fetchone()")
+        raise AttributeError(name)
+
+
+class _Duckdb2Connection:
+    """The locked 1.x connection with its sql() answering as 2.0 does (#797)."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def sql(self, _query: str):
+        return _RelationWithoutFetchone()
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+def test_capabilities_do_not_fetch_from_a_relation(duckdb_file: Path):
+    adapter = DuckDBAdapter(duckdb_file)
+    real = adapter._conn
+    try:
+        adapter._conn = _Duckdb2Connection(real)
+        assert adapter.capabilities()["engine_version"]
+    finally:
+        adapter._conn = real
+        adapter.close()
+
+
 def test_write_is_refused_on_read_only_connection(duckdb_file: Path):
     adapter = DuckDBAdapter(duckdb_file)
     try:

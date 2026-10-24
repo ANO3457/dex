@@ -21,6 +21,11 @@ Documentation: https://docs.exmergo.com/dex
 pip install "exmergo-dex-core"
 ```
 
+Python 3.11 to 3.14. Use pip 26.2.2 or later (or uv 0.13.4 or later): earlier
+releases still trust the emSign CA roots withdrawn after their keys were
+compromised, and the engine's own `certifi>=2026.10.19` floor cannot fix the
+installer that fetched it.
+
 Connector client libraries live behind extras. DuckDB is an embedded data warehouse,
 so you can start from there if you want to test Dex locally. We aim to support all major
 data warehouses. Please suggest any missing connectors on [GitHub](https://github.com/exmergo/dex)!

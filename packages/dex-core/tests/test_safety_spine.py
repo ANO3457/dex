@@ -2010,6 +2010,15 @@ def test_propagation_never_proposes_an_edit_inside_an_installed_package(
 
     from exmergo_dex_core.cli import main
 
+    # Declared as well as installed, which is what `dbt deps` leaves behind:
+    # dbt 1.12 refuses to parse a project whose `dbt_packages/` holds a package
+    # its `packages.yml` does not name, so an undeclared one is not a state a
+    # real project can be in. Parsing checks the count and never resolves the
+    # entry, so a hub-shaped declaration needs no network.
+    (dbt_project_dir / "packages.yml").write_text(
+        "packages:\n  - package: exmergo/utils\n    version: 1.0.0\n",
+        encoding="utf-8",
+    )
     package = dbt_project_dir / "dbt_packages" / "utils"
     (package / "models").mkdir(parents=True)
     (package / "dbt_project.yml").write_text(
@@ -3945,8 +3954,14 @@ def test_the_skill_wrapper_never_installs_into_the_repo_it_is_pointed_at(
     monkeypatch.setattr(wrapper.sys, "argv", ["run.py", "--warm"])
     wrapper.main()
 
-    assert len(issued) == 2, "both paths must reach uv"
-    for cmd in issued:
+    # Each path also asks uv its version, to warn on a release that trusts the
+    # withdrawn emSign CA roots. That query installs nothing and reads no
+    # project, and it is held to exactly that shape so it cannot grow into one.
+    probes = [cmd for cmd in issued if cmd == ["uv", "--version"]]
+    runs = [cmd for cmd in issued if cmd != ["uv", "--version"]]
+    assert len(probes) == 2, issued
+    assert len(runs) == 2, "both paths must reach uv"
+    for cmd in runs:
         assert cmd[:3] == ["uv", "run", "--no-project"], cmd
 
 

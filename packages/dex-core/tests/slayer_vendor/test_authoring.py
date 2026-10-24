@@ -7,8 +7,8 @@ broken set refused naming the file and the element, a write surface of exactly
 `semantic.slayer.models`, and `transform apply` writing the authored bytes or
 nothing at all.
 
-Needs the real `[slayer]` extra, so it skips without it; the `slayer-sqlglot` CI
-job is where it runs.
+Needs the real `[slayer]` extra, so it skips without it; the `extras` CI job
+is where it runs.
 """
 
 from __future__ import annotations

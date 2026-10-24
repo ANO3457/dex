@@ -14,8 +14,8 @@ output exactly as it was; SLayer's sets are back in place only inside
 `slayer_keywords`, which a SLayer render needs; and every dex module that imports
 SLayer imports the guard first.
 
-Needs the real `[slayer]` extra, so it skips without it; the `slayer-sqlglot` CI
-job is where it runs.
+Needs the real `[slayer]` extra, so it skips without it; the `extras` CI job
+is where it runs.
 """
 
 from __future__ import annotations

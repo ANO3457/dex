@@ -454,11 +454,72 @@ def test_both_ways_into_uv_carry_the_child_env(argv, monkeypatch):
         ),
     )
     monkeypatch.setattr(module.sys, "argv", ["run.py", *argv])
+    # The uv version probe is its own subprocess, asserted separately below.
+    monkeypatch.setattr(module, "_uv_ca_warning", lambda: None)
 
     assert module.main() == 0
     assert len(envs) == 1 and envs[0] is not None
     assert "GITHUB_TOKEN" not in envs[0]
     assert envs[0]["DATABASE_URL"] == "postgresql://dex_ro@localhost/app"
+
+
+@pytest.mark.parametrize(
+    ("reported", "warns"),
+    [
+        ("uv 0.13.1 (62faed335 2026-10-13 aarch64-apple-darwin)", True),
+        ("uv 0.9.30", True),
+        ("uv 0.13.4 (7456b60bc 2026-10-20 aarch64-apple-darwin)", False),
+        ("uv 0.14.0", False),
+        ("uv 1.0.0", False),
+        ("", False),
+        ("uv something-unparseable", False),
+    ],
+)
+def test_a_uv_that_trusts_the_withdrawn_ca_roots_is_named(monkeypatch, reported, warns):
+    """A uv older than 0.13.4 still vendors the emSign roots withdrawn after the
+    eMudhra key incident. The wrapper says so and names the update, and it stays
+    silent on a version it cannot read rather than guessing about it."""
+
+    module = _wrapper()
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, stdout=reported),
+    )
+    warning = module._uv_ca_warning()
+    if warns:
+        assert warning is not None and "uv self update" in warning
+        assert reported.split()[1] in warning
+    else:
+        assert warning is None
+
+
+def test_a_stale_uv_is_reported_on_stderr_and_never_on_stdout(monkeypatch, capsys):
+    """stdout carries exactly one envelope, the engine's, so the warning for a
+    command run goes to stderr; only `--warm`, whose envelope is the wrapper's
+    own, carries it in `warnings`."""
+
+    module = _wrapper()
+    monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/uv")
+    monkeypatch.setattr(module, "_uv_ca_warning", lambda: "uv 0.13.1 trusts ...")
+    monkeypatch.setattr(module.os, "execvpe", lambda *_a: None)
+    monkeypatch.setattr(module.subprocess, "call", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(module.sys, "argv", ["run.py", "explore", "inventory"])
+
+    assert module.main() == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "uv 0.13.1 trusts" in captured.err
+
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(module.sys, "argv", ["run.py", "--warm"])
+    assert module.main() == 0
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["warnings"] == ["uv 0.13.1 trusts ..."]
 
 
 @pytest.mark.parametrize("status", ["ok", "error"])
