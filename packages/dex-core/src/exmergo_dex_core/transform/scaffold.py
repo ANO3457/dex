@@ -254,25 +254,33 @@ def _source_schema(identifier: str) -> str:
     return parts[-2] if len(parts) >= 2 else "main"
 
 
+# Connectors whose dev target can sit in another database (catalog, project) than
+# the sources it reads: `dev_database`, `dev_catalog`, or a source project other
+# than the billing one. Elsewhere one connection is one database (DuckDB's file,
+# Postgres and Redshift's database), so the target's is always the source's.
+_SOURCE_DATABASE_CONNECTORS = {"snowflake", "databricks", "bigquery", "trino"}
+
+
 def _source_location(
     identifier: str, connector: str | None
 ) -> tuple[str, str | None, str]:
     """``(source name, database, schema)`` for the source a model reads.
 
-    On Trino the source names its catalog. dbt-trino resolves a source with no
-    ``database`` in the profile's, which is the dev catalog, never a source
-    catalog, so without it every scaffolded model would read the wrong table.
-    And one cluster federates catalogs that share schema names (``app`` in a
-    lake and in a Postgres), so the source name carries the catalog too.
-    Elsewhere the source is named for its schema and the target's database
-    applies, as it always has.
+    dbt resolves a source with no ``database`` in the profile's, which is the
+    dev database, never a source database, so where the two can differ the
+    source names its own (#802). On Trino one cluster also federates catalogs
+    that share schema names (``app`` in a lake and in a Postgres), so the source
+    name carries the catalog too. Elsewhere the source stays named for its
+    schema, so the ``source()`` calls in existing models keep resolving.
     """
 
     schema = _source_schema(identifier)
     parts = identifier.split(".")
-    if connector == "trino" and len(parts) == 3:
+    if len(parts) != 3 or connector not in _SOURCE_DATABASE_CONNECTORS:
+        return schema, None, schema
+    if connector == "trino":
         return f"{parts[0]}_{schema}", parts[0], schema
-    return schema, None, schema
+    return schema, parts[0], schema
 
 
 def _project_view(project_dir: Path | None) -> DbtProjectView | None:
