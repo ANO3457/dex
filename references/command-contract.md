@@ -212,7 +212,9 @@ dex transform references <name>   -> where each name is used: model SQL, schema.
                                      under data.indeterminate rather than dropped. data.completeness is
                                      `complete` only once every reason to doubt it is ruled out, and
                                      data.limits names the rest. Capped, with every elision in notes;
-                                     --full lifts the caps
+                                     --full lifts the caps. --usage adds, for each model.column, how
+                                     other models filter, branch on or aggregate it, grouped and
+                                     counted (a bare column name is refused)
 dex transform rename <kind>       -> every edit the rename needs, as one plan: the definition, every
   <old> <new> [--edits-file <f>]     model that selects it, every schema.yml that documents or tests it,
                                      every semantic reference, and a seed header. <kind> is one of
@@ -409,8 +411,10 @@ the models the command touched. The plan envelope also carries
 `data.declarations.<model>` for every model the plan creates, edits or declares:
 `drafted` (facts the `.dex/` cache and the SQL support, each with its evidence),
 `declared` (what the post-change YAML says) and `missing` (intent fields nobody
-supplied, each also a warning). It reads the cache and the repository only and
-opens no connection. A command that takes no declarations refuses a payload
+supplied, each also a warning). `drafted.precedent` says what the project's other
+models do with each column the model filters, branches on or aggregates, and a
+literal compared to a column whose complete cached domain does not hold it is a
+warning. It reads the cache and the repository only and opens no connection. A command that takes no declarations refuses a payload
 carrying them rather than dropping them. The full shape, the refusals and
 what each field renders into:
 [`skills/transform/references/declarations.md`](../skills/transform/references/declarations.md).

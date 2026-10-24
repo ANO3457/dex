@@ -1514,13 +1514,14 @@ class DexEngine:
         *,
         kind: str | None = None,
         full: bool = False,
+        usage: bool = False,
     ) -> ReferencesResult:
         # From `references` rather than `transform.commands`: this one reads the
         # project's files and needs neither the plan store nor the dialect engine,
         # and reaching it through the authoring module would require both.
         from . import references as references_mod
 
-        return references_mod.run(self, names, kind=kind, full=full)
+        return references_mod.run(self, names, kind=kind, full=full, usage=usage)
 
     def rename(
         self,

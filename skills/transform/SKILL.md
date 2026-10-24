@@ -98,7 +98,9 @@ https://github.com/exmergo/dex/tree/main/packages/dex-core.
    `transform references <name> [more...]`, free on every connector. Read
    `data.completeness`; when it is `incomplete`, open each site under
    `data.indeterminate` and decide yourself rather than treating the resolved
-   list as exhaustive.
+   list as exhaustive. Before writing a filter, `CASE` or aggregation on a
+   column, ask how the project already treats it:
+   `transform references <model.column> --usage`.
 3. **Author and plan.** Write the content into an edits file and run
    `transform plan "<intent>" --edits-file <path|->`
    (`--scaffold <table>` drafts a staging model from the `.dex/` cache). The

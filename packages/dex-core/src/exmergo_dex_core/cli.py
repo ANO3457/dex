@@ -366,8 +366,9 @@ _SUBCOMMAND_HELP: dict[tuple[str, str], tuple[str, str]] = {
     ("transform", "references"): (
         "find where names are used across the project",
         "Report every use of each name across model SQL, YAML, macros, seeds "
-        "and installed packages, and say how complete the answer is. Repo-only "
-        "and free.",
+        "and installed packages, and say how complete the answer is. With "
+        "--usage, also how other models filter, branch on or aggregate each "
+        "model.column. Repo-only and free.",
     ),
     ("transform", "rename"): (
         "plan every edit a rename needs",
@@ -1136,6 +1137,12 @@ def _build_parser() -> argparse.ArgumentParser:
                         action="store_true",
                         default=argparse.SUPPRESS,
                         help="lift the cap of 200 occurrences across 50 files",
+                    )
+                    sp.add_argument(
+                        "--usage",
+                        action="store_true",
+                        default=False,
+                        help="also report how other models use each model.column",
                     )
                 if group == "transform" and name in {"rename", "remove"}:
                     # The write half of `references`, so it sits behind the

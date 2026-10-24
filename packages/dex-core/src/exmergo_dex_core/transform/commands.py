@@ -619,12 +619,22 @@ def _draft(
                 for dataset in (cache.datasets if cache is not None else [])
             },
             cache_note=note,
+            index=lambda: _post_change_index(view, edits),
         )
     except Exception as exc:
         return {}, [
             f"could not draft the declarations of this plan's models "
             f"({type(exc).__name__}: {exc}); the plan itself is unaffected"
         ]
+
+
+def _post_change_index(view: Any, edits: list[PlanEdit]) -> Any:
+    """The reference index of the project as it reads once ``edits`` land."""
+
+    from ..references import ReferenceIndex
+    from .propagate import _project_after_edits
+
+    return ReferenceIndex(_project_after_edits(view, edits), scan_packages=False)
 
 
 def _plan_decisions(
