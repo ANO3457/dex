@@ -396,6 +396,7 @@ def plan(
     result.decisions = _plan_decisions(engine, edits, declarations)
     result.declarations = drafts or None
     _attribute_rows(engine, result, edits, requested=attribute_rows)
+    _contradiction_warnings(result)
     return result
 
 
@@ -622,6 +623,7 @@ def _draft(
             },
             cache_note=note,
             index=lambda: _post_change_index(view, edits),
+            prior={path: source.content for path, source in view.files.items()},
         )
     except Exception as exc:
         return {}, [
@@ -714,6 +716,34 @@ def _attribute_rows(
         result.pending_confirmation = outcome.pending
     if outcome.adapter is not None:
         command_args.stamp_spend(result, outcome.adapter)
+
+
+def _contradiction_warnings(result: PlanResult) -> None:
+    """Say each contradiction the draft found, once row attribution has run.
+
+    Rendered here rather than in the draft so a population contradiction can
+    cite attribution's own measurement of the predicate that left, or its reason
+    for not measuring, without a second measuring path. A model with nothing
+    contradicted carries an empty list, and a new model carries no key at all.
+    """
+
+    from .contradictions import pair_rows, warnings
+
+    for model, entry in sorted((result.declarations or {}).items()):
+        found = entry.get("contradictions")
+        if not found:
+            continue
+        pair_rows(found, _attribution_for(result.row_attribution, model))
+        rendered = warnings(model, found)
+        for item in found:
+            item.pop("row_reason", None)
+        result.warnings.extend(rendered)
+
+
+def _attribution_for(
+    attribution: list[dict[str, Any]] | None, model: str
+) -> list[dict[str, Any]]:
+    return [r for r in attribution or [] if Path(r.get("path", "")).stem == model]
 
 
 def cmd_plan(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
@@ -4378,6 +4408,7 @@ def _semantic_plan(
     result.warnings.extend(declaration_notes)
     result.decisions = _plan_decisions(engine, edits, declarations)
     result.declarations = drafts or None
+    _contradiction_warnings(result)
     return result
 
 

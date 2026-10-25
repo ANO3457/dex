@@ -158,6 +158,10 @@ a field, flag, or macro you need is not described here.
   unknown, not zero. On a billed connector, measuring needs `--attribute-rows`
   plus the cost handshake, which follows the same spending rules as a build
   (see Building): inside committed limits confirm it, otherwise ask first.
+- A contradiction warning means pick a side: update the declaration in the same
+  plan when the change is the job, or restore the SQL when it is not. `stale`
+  says which side looks out of date; `unchecked` means dex could not read the
+  SQL for that rule, so read it yourself before applying.
 - A SELECT list that diverges from the model's `schema.yml` is warned in both
   directions. Fix whichever side is stale, and tell the user which one you
   decided it was.

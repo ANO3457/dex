@@ -416,7 +416,12 @@ the models the command touched. The plan envelope also carries
 supplied, each also a warning). `drafted.precedent` says what the project's other
 models do with each column the model filters, branches on or aggregates, and a
 literal compared to a column whose complete cached domain does not hold it is a
-warning. It reads the cache and the repository only and opens no connection. A command that takes no declarations refuses a payload
+warning. On a model that already exists, `contradictions` lists each declared rule
+(population filter, grain, declared column, an upstream column's additivity) that
+the edit and the post-change declaration disagree on, each also a warning naming
+the side that looks stale and both fixes; it never refuses. It reads the cache and
+the repository only and opens no connection; a contradicted population cites the
+delta row attribution measured, and measures nothing of its own. A command that takes no declarations refuses a payload
 carrying them rather than dropping them. The full shape, the refusals and
 what each field renders into:
 [`skills/transform/references/declarations.md`](../skills/transform/references/declarations.md).
