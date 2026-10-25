@@ -153,10 +153,11 @@ postgres = ["psycopg[binary]>=3", "dbt-postgres>=1.11", "exmergo-dex-core[sql]"]
 # transform can build against a Redshift dev schema with one install. boto3
 # rides alongside the driver: Serverless workgroup facts (endpoint, base
 # capacity) come from the control plane, and the driver mints IAM temporary
-# database credentials through the same chain.
+# database credentials through the same chain. The [crt] extra is what the
+# chain's `aws login` provider needs (#803); awscrt ships abi3 wheels for 3.11+.
 redshift = [
   "redshift-connector>=2.1",
-  "boto3>=1.34",
+  "boto3[crt]>=1.34",
   "dbt-redshift>=1.11",
   "exmergo-dex-core[sql]",
 ]
@@ -301,7 +302,7 @@ all = [
 # runs the whole suite without also picking a connector. towncrier is the version
 # scripts/prepare_release.sh runs, so the changelog tests exercise it offline;
 # tests/test_changelog.py fails if the two pins part.
-dev = ["ruff==0.15.19", "towncrier==26.9.0", "scikit-learn>=1.4", "exmergo-dex-core[ossie,sql,storage-conformance]"]
+dev = ["ruff==0.17.1", "towncrier==26.9.0", "scikit-learn>=1.4", "exmergo-dex-core[ossie,sql,storage-conformance]"]
 
 [project.urls]
 Homepage = "https://www.exmergo.com/dex"

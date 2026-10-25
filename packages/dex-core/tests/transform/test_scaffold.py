@@ -599,7 +599,7 @@ def test_scaffold_into_an_unmergeable_sources_file_is_a_configuration_refusal(
     assert envelope["reason"] == "configuration"
 
 
-def _trino_store(*identifiers: str):
+def _trino_store(*identifiers: str, connector: str = "trino"):
     from exmergo_dex_core.cache import CacheProvenance, ColumnProfile, DexCache
     from exmergo_dex_core.storage.memory import MemoryStore
 
@@ -613,7 +613,7 @@ def _trino_store(*identifiers: str):
                 )
                 for identifier in identifiers
             ],
-            provenance=CacheProvenance(connector="trino"),
+            provenance=CacheProvenance(connector=connector),
         )
     )
     return store
@@ -641,6 +641,44 @@ def test_a_trino_source_names_its_catalog():
     ]
     model = next(e for e in edits if e.path.endswith("stg_orders.sql"))
     assert "source('memory_app', 'orders')" in model.new_content
+
+
+@pytest.mark.parametrize("connector", ["snowflake", "databricks", "bigquery"])
+def test_a_source_in_another_database_names_it(connector):
+    """#802: the dev target can sit in another database (catalog, project), and
+    dbt resolves a source with no `database` in the target's, so the scaffolded
+    model read a relation that does not exist. The source keeps its schema name,
+    so existing `source()` calls still resolve."""
+
+    from exmergo_dex_core.transform.scaffold import scaffold_edits
+
+    identifier = "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER"
+    edits = scaffold_edits([identifier], _trino_store(identifier, connector=connector))
+    sources = yaml.safe_load(next(e for e in edits if "sources" in e.path).new_content)
+    assert sources["sources"] == [
+        {
+            "name": "TPCH_SF1",
+            "database": "SNOWFLAKE_SAMPLE_DATA",
+            "schema": "TPCH_SF1",
+            "tables": [{"name": "CUSTOMER"}],
+        }
+    ]
+    model = next(e for e in edits if e.path.endswith("stg_CUSTOMER.sql"))
+    assert "source('TPCH_SF1', 'CUSTOMER')" in model.new_content
+
+
+@pytest.mark.parametrize("connector", ["duckdb", "postgres", "redshift"])
+def test_a_one_database_connection_writes_no_source_database(connector):
+    """One connection is one database there, so the target's is the source's."""
+
+    from exmergo_dex_core.transform.scaffold import scaffold_edits
+
+    identifier = "warehouse.main.orders"
+    edits = scaffold_edits([identifier], _trino_store(identifier, connector=connector))
+    sources = yaml.safe_load(next(e for e in edits if "sources" in e.path).new_content)
+    assert sources["sources"] == [
+        {"name": "main", "schema": "main", "tables": [{"name": "orders"}]}
+    ]
 
 
 def test_two_relations_sharing_a_table_name_are_refused_in_one_call():

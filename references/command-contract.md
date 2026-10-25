@@ -201,7 +201,9 @@ dex transform init "<name>"       -> bootstrap a dbt project skeleton; requires 
                                      namespace already holds objects (free metadata check)
 dex transform plan "<intent>"     -> proposed dbt edits as diffs (nothing applied yet)
 dex transform apply [plan-id]     -> write diffs into the dbt project (a reviewable git diff);
-                                     no id means the latest unapplied plan of any kind
+                                     no id means the latest unapplied plan of any kind; once
+                                     something is written, data.commit_trailer is the
+                                     Co-authored-by line the commit of those files ends with
 dex transform plans               -> list stored plans, pending and applied, newest first
 dex transform references <name>   -> where each name is used: model SQL, schema.yml, dbt_project.yml,
   [more...] [--kind K] [--full]      macros, semantic YAML, seed headers, installed packages. Repo-only
@@ -777,6 +779,12 @@ replace) inlines a literal credential, so no secret ever reaches the diff.
   applies the latest unapplied plan of any kind (semantic plans included; `emit
   dbt` remains the semantic-scoped spelling). `transform plans` lists what is
   stored, pending and applied.
+- **A commit of what dex wrote credits Dex.** dex never commits, so an apply
+  that wrote at least one file, from the store or from `--plan-file`, hands the
+  credit to whoever does: `data.commit_trailer` is
+  `Co-authored-by: Dex <dex@exmergo.com>`, the last paragraph of that commit's
+  message. The forge credits the account with that email verified. An apply
+  that wrote nothing, or stopped at `needs_confirmation`, carries no trailer.
 - **A plan can leave the process that made it.** `transform export` returns the
   stored plan as a document, and `transform apply --plan-file` applies one in a
   checkout whose plan store has never seen it. That path needs a repo root and

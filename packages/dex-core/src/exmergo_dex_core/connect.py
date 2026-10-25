@@ -56,6 +56,7 @@ from .errors import (
     ConfigurationError,
     DexError,
     NoConnectorSelectedError,
+    PrerequisiteError,
     StoreRequiredError,
 )
 from .guards.cost_guard import CostGate, ledger_field, utc_day_start
@@ -2290,7 +2291,11 @@ def _redshift_serverless_iam(
 
     try:
         import boto3
-        from botocore.exceptions import BotoCoreError, ClientError
+        from botocore.exceptions import (
+            BotoCoreError,
+            ClientError,
+            MissingDependencyException,
+        )
     except ImportError as exc:
         raise CredentialDiscoveryError(
             "the Redshift client is not installed; install the connector "
@@ -2304,6 +2309,14 @@ def _redshift_serverless_iam(
     try:
         client = session.client("redshift-serverless")
         workgroup = client.get_workgroup(workgroupName=target.workgroup)["workgroup"]
+    except MissingDependencyException as exc:
+        # A BotoCoreError too, so it is caught first: the fix is an install
+        # (an `aws login` profile needs botocore[crt]), not chain configuration.
+        raise PrerequisiteError(
+            f"could not resolve Redshift Serverless workgroup "
+            f"'{target.workgroup}': {exc} Reinstall with the connector extra "
+            "exmergo-dex-core[redshift], which includes it"
+        ) from exc
     except (BotoCoreError, ClientError, ValueError) as exc:
         raise CredentialDiscoveryError(
             f"could not resolve Redshift Serverless workgroup "

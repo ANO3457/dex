@@ -1170,6 +1170,36 @@ def test_discovery_workgroup_failure_names_every_fix(monkeypatch, tmp_path: Path
         assert fix in message
 
 
+def test_discovery_missing_botocore_dependency_is_a_prerequisite(
+    monkeypatch, tmp_path: Path
+):
+    # An `aws login` profile without botocore[crt] (#803): the fix is an
+    # install, so the credential-chain advice above must not replace it.
+    from botocore.exceptions import MissingDependencyException
+
+    from exmergo_dex_core.envelope import Reason, reason_for
+    from exmergo_dex_core.errors import PrerequisiteError
+
+    class _NoCrt:
+        def get_workgroup(self, workgroupName):  # noqa: N803 (boto3's spelling)
+            raise MissingDependencyException(
+                msg="Using the login credential provider requires an additional "
+                'dependency. You will need to pip install "botocore[crt]" '
+                "before proceeding."
+            )
+
+    _stub_boto3(monkeypatch, _NoCrt())
+    with pytest.raises(PrerequisiteError) as excinfo:
+        resolve_redshift_connection(
+            RedshiftTarget(workgroup="dex-wg", aws_profile="dex"), {}, tmp_path
+        )
+    message = str(excinfo.value)
+    assert "botocore[crt]" in message
+    assert "exmergo-dex-core[redshift]" in message
+    assert "aws configure" not in message
+    assert reason_for(excinfo.value) is Reason.PREREQUISITE
+
+
 def test_discovery_cluster_requires_dbname_and_user(tmp_path: Path):
     with pytest.raises(CredentialDiscoveryError, match=r"redshift\.dbname"):
         resolve_redshift_connection(
