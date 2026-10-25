@@ -1,0 +1,35 @@
+{
+  "name": "classify-dex-config",
+  "contract": "classification",
+  "description": "A .dex/config.yml setting the budget and guards changes what dex's own guards allow.",
+  "payload": {
+    "path": ".dex/config.yml",
+    "content": "connector: duckdb\nbudget:\n  daily_ceiling: 10\nguards:\n  approved_functions: [my_udf]\n"
+  },
+  "expect": {
+    "artifact_class": "authority_bearing",
+    "result": {
+      "path": ".dex/config.yml",
+      "artifact_class": "authority_bearing",
+      "basis": "content",
+      "parsed": true,
+      "signals": [
+        {
+          "signal": "dex_config",
+          "where": "budget",
+          "detail": "budget"
+        },
+        {
+          "signal": "dex_config",
+          "where": "guards",
+          "detail": "guards"
+        },
+        {
+          "signal": "dex_config",
+          "where": "connector",
+          "detail": "connector"
+        }
+      ]
+    }
+  }
+}

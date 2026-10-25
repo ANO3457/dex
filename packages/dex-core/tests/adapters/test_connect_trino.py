@@ -148,7 +148,9 @@ def test_a_degraded_column_gets_only_a_non_null_count(fake_trino_connection):
         ("SELECT id FROM customers", "not fully qualified"),
         (
             "SELECT * FROM TABLE(pg.system.query(query => 'SELECT 1'))",
-            "table functions",
+            # The base guard's external-read denylist names `query` before this
+            # adapter's table-function rule is reached; same decision, same reason.
+            "query is not permitted",
         ),
         ('SELECT "$path" FROM memory.shop.customers', "hidden column"),
         ('SELECT * FROM lake.app."orders$files"', "metadata table"),

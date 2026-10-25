@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1994,6 +1995,92 @@ def test_build_env_caps_postgres_statements_via_pgoptions(monkeypatch):
     assert _build_env("postgres", Paradigm.DB_LOAD, None) is None
     assert _build_env("postgres", Paradigm.FREE_LOCAL, 120.0) is None
     assert _build_env("postgres", Paradigm.BYTES_SCANNED, 120.0) is None
+
+
+def _parent_env_with_unrelated_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("CLICKHOUSE_CLOUD_API_KEY", "ch-cloud-key")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_not_real")
+    monkeypatch.setenv("DBT_SL_TOKEN", "sl-not-real")
+    monkeypatch.setenv("PGPASSWORD", "dbt-dev-pw")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "ch-dev-pw")
+    monkeypatch.setenv("DBT_INDIRECT_SELECTION", "cautious")
+
+
+def _assert_withheld_and_kept(env: dict[str, str]) -> None:
+    for name in ("CLICKHOUSE_CLOUD_API_KEY", "GITHUB_TOKEN", "DBT_SL_TOKEN"):
+        assert name not in env, name
+    # Dex-rendered profiles read warehouse credentials from this environment.
+    assert env["PGPASSWORD"] == "dbt-dev-pw"
+    assert env["CLICKHOUSE_PASSWORD"] == "ch-dev-pw"  # noqa: S105 (a dummy)
+    assert env["DO_NOT_TRACK"] == "1"
+
+
+def test_the_default_runner_never_lets_dbt_inherit_the_whole_environment(
+    monkeypatch, tmp_path: Path
+):
+    """`parse` and `deps` reach dbt through the default runner with no env of
+    their own. Inheriting would hand every macro in every installed package the
+    credentials dbt never reads, readable through `env_var()`."""
+
+    # The module, not the `build` function the package re-exports under it.
+    build = importlib.import_module("exmergo_dex_core.transform.build")
+
+    _parent_env_with_unrelated_credentials(monkeypatch)
+    seen: list[dict[str, str] | None] = []
+    monkeypatch.setattr(
+        build.subprocess,
+        "run",
+        lambda argv, **kwargs: (
+            seen.append(kwargs["env"]) or subprocess.CompletedProcess(argv, 0, "", "")
+        ),
+    )
+    build._default_runner(5.0, tmp_path)(["dbt", "parse"])
+    build._default_runner(5.0, tmp_path, None)(["dbt", "deps"])
+
+    assert len(seen) == 2
+    for env in seen:
+        assert env is not None
+        _assert_withheld_and_kept(env)
+        # An ordinary dbt run keeps the user's own dbt settings.
+        assert env["DBT_INDIRECT_SELECTION"] == "cautious"
+
+
+@pytest.mark.parametrize("connector", ["postgres", "clickhouse"])
+def test_a_capped_build_env_is_built_from_the_child_environment(monkeypatch, connector):
+    from exmergo_dex_core.envelope import Paradigm
+    from exmergo_dex_core.transform.build import _build_env
+
+    _parent_env_with_unrelated_credentials(monkeypatch)
+    paradigm = Paradigm.DB_LOAD
+    env = _build_env(connector, paradigm, 120.0)
+    assert env is not None
+    _assert_withheld_and_kept(env)
+    assert _build_env(connector, paradigm, None) is None
+
+
+def test_a_capped_shadow_run_keeps_its_dbt_settings_scrubbed(
+    monkeypatch, dbt_project_dir: Path
+):
+    """The shadow run scrubs the `DBT_*` settings that change what a run means,
+    then adds the cap. Merging a whole capped environment on top used to put
+    every scrubbed setting back, so a capped mutation run was not isolated."""
+
+    from exmergo_dex_core.envelope import Paradigm
+    from exmergo_dex_core.transform.build import ShadowRun
+
+    _parent_env_with_unrelated_credentials(monkeypatch)
+    monkeypatch.delenv("PGOPTIONS", raising=False)
+    shadow = ShadowRun(
+        dbt_project_dir,
+        target="dev",
+        connector="postgres",
+        paradigm=Paradigm.DB_LOAD,
+        ceiling=60.0,
+    )
+    env = shadow._env()
+    _assert_withheld_and_kept(env)
+    assert "DBT_INDIRECT_SELECTION" not in env
+    assert env["PGOPTIONS"] == "-c statement_timeout=60s"
 
 
 def test_build_env_caps_clickhouse_statements_via_custom_settings(monkeypatch):

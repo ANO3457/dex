@@ -844,7 +844,10 @@ class SemanticConfig(BaseModel):
     ``host`` and ``environment_id`` are the non-secret hosted coordinates, copied
     from the dbt Cloud Semantic Layer panel (or ``DBT_SL_HOST`` / ``DBT_SL_ENV_ID``
     at runtime). The service token is a secret and is never here: connect.py reads
-    it from ``DBT_SL_TOKEN`` (then ``~/.dbt/dbt_cloud.yml``) at runtime.
+    it from ``DBT_SL_TOKEN`` (then ``~/.dbt/dbt_cloud.yml``) at runtime. Because
+    this file may be one the repository wrote, ``host`` cannot choose where that
+    token goes: it must be a dbt Cloud host (``semantic_hosts.py``), and only the
+    user's environment or an embedding host can admit another.
     """
 
     backend: str = "local"
@@ -1049,6 +1052,10 @@ class GuardConfig(BaseModel):
     name. ``explore query`` never consults this: its firewall governs what a
     caller may read, and narrowing what SQL may *call* is a different question
     asked by a different caller.
+
+    Nothing listed here can admit a function on the external-read denylist in
+    ``guards/sql_guard.py`` (files, URLs, other databases, SQL in a string) on
+    any surface that applies it, because this file may be one an agent wrote.
     """
 
     #: Function names a guarded build may call beyond the dialect's own builtins.

@@ -1098,16 +1098,19 @@ all = [
     { name = "snowflake-connector-python" },
     { name = "sqlglot" },
     { name = "trino" },
+    { name = "urllib3" },
 ]
 bigquery = [
     { name = "dbt-bigquery" },
     { name = "google-cloud-bigquery" },
     { name = "sqlglot" },
+    { name = "urllib3" },
 ]
 clickhouse = [
     { name = "clickhouse-connect" },
     { name = "dbt-clickhouse" },
     { name = "sqlglot" },
+    { name = "urllib3" },
 ]
 cluster = [
     { name = "scikit-learn" },
@@ -1117,6 +1120,7 @@ databricks = [
     { name = "databricks-sql-connector" },
     { name = "dbt-databricks" },
     { name = "sqlglot" },
+    { name = "urllib3" },
 ]
 dev = [
     { name = "jsonschema" },
@@ -1130,6 +1134,7 @@ duckdb = [
     { name = "dbt-duckdb" },
     { name = "duckdb" },
     { name = "sqlglot" },
+    { name = "urllib3" },
 ]
 ossie = [
     { name = "jsonschema" },
@@ -1138,6 +1143,7 @@ postgres = [
     { name = "dbt-postgres" },
     { name = "psycopg", extra = ["binary"] },
     { name = "sqlglot" },
+    { name = "urllib3" },
 ]
 project-conformance = [
     { name = "pytest" },
@@ -1147,6 +1153,7 @@ redshift = [
     { name = "dbt-redshift" },
     { name = "redshift-connector" },
     { name = "sqlglot" },
+    { name = "urllib3" },
 ]
 semantic = [
     { name = "metricflow" },
@@ -1166,6 +1173,7 @@ snowflake = [
     { name = "dbt-snowflake" },
     { name = "snowflake-connector-python" },
     { name = "sqlglot" },
+    { name = "urllib3" },
 ]
 sql = [
     { name = "sqlglot" },
@@ -1178,12 +1186,14 @@ trino = [
     { name = "dbt-trino" },
     { name = "sqlglot" },
     { name = "trino" },
+    { name = "urllib3" },
 ]
 values-free-conformance = [
     { name = "dbt-duckdb" },
     { name = "duckdb" },
     { name = "pytest" },
     { name = "sqlglot" },
+    { name = "urllib3" },
 ]
 
 [package.metadata]
@@ -1263,6 +1273,16 @@ requires-dist = [
     { name = "towncrier", marker = "extra == 'dev'", specifier = "==26.9.0" },
     { name = "trino", marker = "extra == 'all'", specifier = ">=0.336,<1" },
     { name = "trino", marker = "extra == 'trino'", specifier = ">=0.336,<1" },
+    { name = "urllib3", marker = "extra == 'all'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'bigquery'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'clickhouse'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'databricks'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'duckdb'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'postgres'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'redshift'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'snowflake'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'trino'", specifier = ">=2.8.0" },
+    { name = "urllib3", marker = "extra == 'values-free-conformance'", specifier = ">=2.8.0" },
 ]
 provides-extras = ["all", "bigquery", "clickhouse", "cluster", "databricks", "dev", "duckdb", "ossie", "postgres", "project-conformance", "redshift", "semantic", "semantic-api", "semantic-conformance", "slayer", "snowflake", "sql", "storage-conformance", "trino", "values-free-conformance"]
 
@@ -4473,11 +4493,11 @@ wheels = [
 
 [[package]]
 name = "urllib3"
-version = "2.7.0"
+version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/53/0c/06f8b233b8fd13b9e5ee11424ef85419ba0d8ba0b3138bf360be2ff56953/urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c", size = 433602, upload-time = "2026-05-07T16:13:18.596Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63", size = 458972, upload-time = "2026-09-15T19:29:36.253Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897", size = 131087, upload-time = "2026-05-07T16:13:17.151Z" },
+    { url = "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3", size = 135717, upload-time = "2026-09-15T19:29:34.577Z" },
 ]
 
 [[package]]

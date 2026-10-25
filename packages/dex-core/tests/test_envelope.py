@@ -143,6 +143,59 @@ def test_redact_masks_dsn_password():
     assert "hunter2" not in env.redact("postgres://user:hunter2@host:5432/db")
 
 
+@pytest.mark.parametrize(
+    ("text", "secrets"),
+    [
+        # The password runs to the last `@` before the host, and may hold `/`.
+        ("snowflake://bob:p@ss@acct/db", ["p@ss", "ss@"]),
+        ("clickhouse://default:pw/with/slash@h:8443", ["pw/with/slash"]),
+        ("uv reported: token=abc Bearer xyz", ["abc", "xyz"]),
+        ("DBT_SL_TOKEN=sekrit", ["sekrit"]),
+        ('password: "hunter 2"', ["hunter"]),
+        ("api_key=k-123, region=eu", ["k-123"]),
+        ("Authorization: Basic dXNlcjpwYXNz", ["dXNlcjpwYXNz"]),
+        ("GET https://h/x?a=1&sig=zzz&b=2", ["zzz"]),
+    ],
+)
+def test_redact_masks_credentials_beyond_dsn_userinfo(text, secrets):
+    redacted = env.redact(text)
+    for secret in secrets:
+        assert secret not in redacted, redacted
+    assert env.redact(redacted) == redacted, "redaction is idempotent"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "export `DBT_SL_TOKEN` or add a token to ~/.dbt/dbt_cloud.yml",
+        "token: `DBT_SL_TOKEN` is not set",
+        "metric revenue has 40 groupable tokens: a, b",
+        "secret-like key 'password' at data.x",
+        "https://github.com/exmergo/dex/security/advisories",
+    ],
+)
+def test_redact_leaves_dex_s_own_guidance_alone(text):
+    assert env.redact(text) == text
+
+
+def test_emit_redacts_every_error_and_warning(capsys):
+    """Messages often carry text dex did not write, so emit redacts them at the
+    one place stdout is written rather than trusting every call site."""
+
+    env.emit(
+        env.error(
+            "uv reported: token=abc Bearer xyz",
+            warnings=["driver said: password=hunter2"],
+        )
+    )
+    out = capsys.readouterr().out
+    for secret in ("abc", "xyz", "hunter2"):
+        assert secret not in out
+    envelope = json.loads(out)
+    assert envelope["errors"] == ["uv reported: token=*** Bearer ***"]
+    assert envelope["warnings"] == ["driver said: password=***"]
+
+
 # --- reason_for / error_for: a machine-readable refusal reason (#170) --------
 
 

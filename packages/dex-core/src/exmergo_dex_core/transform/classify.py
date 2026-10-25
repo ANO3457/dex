@@ -77,17 +77,75 @@ EXECUTABLE_SIGNALS = frozenset(
         "jinja_expression",
         "python_model",
         "sql_statement",
+        # A dependency declaration: `dbt deps` fetches whatever it names and the
+        # next build runs that package's macros and materializations. The
+        # source type is in the name, so a host can choose to admit, say, a hub
+        # package pinned to an exact version.
+        "dependency_hub",
+        "dependency_git",
+        "dependency_local",
+        "dependency_tarball",
+        "dependency_private",
+        "dependency",
     }
 )
 
-AUTHORITY_SIGNALS = frozenset({"grants", "external_location"})
+AUTHORITY_SIGNALS = frozenset(
+    {
+        "grants",
+        "external_location",
+        # dbt_project.yml keys that change which code runs (`dispatch` reroutes
+        # macro resolution to another package) or how dbt behaves project-wide.
+        "dispatch",
+        "flags",
+        # A profiles.yml target: the adapter, role and credentials a build
+        # connects as.
+        "profile",
+        # A .dex/config.yml key that changes what dex's own guards allow.
+        "dex_config",
+        # A read of the dbt child's environment, which is the agent's.
+        "env_var",
+    }
+)
+
+#: Signals that leave the verdict unknown: dex can see that the content depends
+#: on something but not on what, so neither declarative nor a weaker class is a
+#: claim it can make.
+UNKNOWN_SIGNALS = frozenset({"env_var_computed"})
 
 #: Jinja callees that name something the project already declares, rather than
 #: running code of the repository's choosing. `doc` is here because a
 #: `{{ doc('...') }}` in a description is the single most common jinja call in a
 #: schema.yml and flagging it would make the signal useless.
 _DECLARATIVE_CALLEES = frozenset(
-    {"ref", "source", "var", "config", "this", "target", "doc", "env_var"}
+    {"ref", "source", "var", "config", "this", "target", "doc"}
+)
+
+#: Hub, git, local, tarball and private package sources, keyed by the field
+#: that names each in a packages.yml or dependencies.yml entry.
+_DEPENDENCY_SOURCES = {
+    "package": "dependency_hub",
+    "git": "dependency_git",
+    "local": "dependency_local",
+    "tarball": "dependency_tarball",
+    "private": "dependency_private",
+}
+
+#: Top-level dbt_project.yml keys that carry authority rather than declare.
+_PROJECT_AUTHORITY_KEYS = ("dispatch", "flags")
+
+#: Top-level .dex/config.yml keys that change what dex reads, connects to, or
+#: allows: the budget and guards, the payload limits, the PII and blob
+#: clearances, on-demand profiling, the connector, and the semantic host.
+_DEX_CONFIG_AUTHORITY_KEYS = (
+    "budget",
+    "guards",
+    "query",
+    "pii_overrides",
+    "blob_overrides",
+    "auto_profile",
+    "connector",
+    "semantic",
 )
 
 #: Config keys that schedule execution, and the class each implies. Both the
@@ -241,6 +299,21 @@ def _jinja_signals(
                         detail=f"{call.callee}({token})" if token else call.callee,
                     )
                 )
+            elif call.callee == "env_var":
+                # dbt renders jinja in YAML too, so this reads the dbt child's
+                # environment into whatever the content renders into. The
+                # variable is named, never its value; a computed name cannot be
+                # named at all, so the verdict cannot be either.
+                name = call.args[0] if call.args else None
+                signals.append(
+                    ArtifactSignal(signal="env_var", where=where, detail=name)
+                    if name
+                    else ArtifactSignal(
+                        signal="env_var_computed",
+                        where=where,
+                        detail="variable name is not a literal",
+                    )
+                )
             elif call.callee not in _DECLARATIVE_CALLEES:
                 signals.append(
                     ArtifactSignal(signal="macro_call", where=where, detail=call.callee)
@@ -295,6 +368,66 @@ def _walk_yaml(node: Any, path: str, signals: list[ArtifactSignal]) -> None:
             signals.append(ArtifactSignal(signal="run_operation", where=path))
 
 
+def _document_signals(document: Any, signals: list[ArtifactSignal]) -> None:
+    """Signals a document carries by its shape rather than by any one key.
+
+    Read from the content, never the path: a dependency list, a profile, and a
+    dex config are recognizable from what they hold, and a host classifying an
+    edit before it lands cannot trust the filename to say which file it is.
+    """
+
+    if not isinstance(document, dict):
+        return
+
+    entries = document.get("packages")
+    if isinstance(entries, list):
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            where = f"packages[{i}]"
+            source = next((k for k in _DEPENDENCY_SOURCES if k in entry), None)
+            if source is None:
+                signals.append(ArtifactSignal(signal="dependency", where=where))
+                continue
+            detail = None
+            if source == "package":
+                # The package and its pin are the facts a host's policy turns
+                # on. A git URL is not echoed: it can carry a token.
+                version = entry.get("version")
+                if isinstance(version, list):
+                    version = ",".join(str(v) for v in version)
+                detail = (
+                    f"{entry.get('package')}@{version}"
+                    if version
+                    else (str(entry.get("package")))
+                )
+            signals.append(
+                ArtifactSignal(
+                    signal=_DEPENDENCY_SOURCES[source],
+                    where=f"{where}.{source}",
+                    detail=detail,
+                )
+            )
+
+    signals.extend(
+        ArtifactSignal(signal=key, where=key)
+        for key in _PROJECT_AUTHORITY_KEYS
+        if key in document
+    )
+
+    for key, value in document.items():
+        if isinstance(value, dict) and isinstance(value.get("outputs"), dict):
+            signals.append(
+                ArtifactSignal(signal="profile", where=f"{key}.outputs", detail=key)
+            )
+
+    signals.extend(
+        ArtifactSignal(signal="dex_config", where=key, detail=key)
+        for key in _DEX_CONFIG_AUTHORITY_KEYS
+        if key in document
+    )
+
+
 def _looks_like_delimited_data(content: str) -> bool:
     """A header row and at least one body row, every row the same width.
 
@@ -344,6 +477,7 @@ def classify_content(
         parsed = False
 
     if parsed and isinstance(document, (dict, list)):
+        _document_signals(document, signals)
         _walk_yaml(document, "", signals)
         return _verdict(
             path, signals, basis, parsed=True, default=ArtifactClass.DECLARATIVE
@@ -385,16 +519,21 @@ def _verdict(
     parsed: bool,
     default: ArtifactClass,
 ) -> ArtifactClassification:
-    """Execution outranks authority; both outrank the default.
+    """Execution outranks an unknown, which outranks authority; all three
+    outrank the default.
 
     A document that both runs something and grants something is executable, and
     the grant stays in ``signals``. Reporting the weaker of two true findings as
-    the verdict would understate what applying the change does.
+    the verdict would understate what applying the change does. An unknown sits
+    above authority because dex cannot rule out that the part it could not read
+    is the stronger finding.
     """
 
     names = {s.signal for s in signals}
     if names & EXECUTABLE_SIGNALS:
         artifact_class = ArtifactClass.EXECUTABLE
+    elif names & UNKNOWN_SIGNALS:
+        artifact_class = ArtifactClass.UNKNOWN
     elif names & AUTHORITY_SIGNALS:
         artifact_class = ArtifactClass.AUTHORITY_BEARING
     else:

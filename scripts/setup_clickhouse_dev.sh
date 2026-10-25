@@ -56,6 +56,10 @@ HARDENING=(
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 SEED="$SCRIPTS/clickhouse_seed.sql"
 USERS="$SCRIPTS/clickhouse_local_users.sql"
+# The connection exports are written here rather than printed, so no password
+# lands in a terminal's scrollback or a CI log.
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dex-dogfood"
+EXPORTS="$STATE_DIR/clickhouse.env"
 
 if [[ "${1:-}" == "--down" ]]; then
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -71,18 +75,21 @@ fi
 if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
     # CLICKHOUSE_SKIP_USER_SETUP leaves the built-in `default` user open so the
     # seed can create the two real users below; dex never connects as `default`.
+    # That is why both ports are published on loopback only: an open `default`
+    # must not be reachable from a shared network.
     docker run -d --name "$CONTAINER" \
         "${HARDENING[@]}" \
         -e CLICKHOUSE_SKIP_USER_SETUP=1 \
-        -p "$HTTP_PORT":8123 \
-        -p "$NATIVE_PORT":9000 \
+        -p "127.0.0.1:$HTTP_PORT:8123" \
+        -p "127.0.0.1:$NATIVE_PORT:9000" \
         --ulimit nofile=262144:262144 \
         "$IMAGE" >/dev/null
-    echo "started $IMAGE as $CONTAINER on http port $HTTP_PORT"
+    echo "started $IMAGE as $CONTAINER on 127.0.0.1, http port $HTTP_PORT"
 fi
 # Checked before a stopped container is started again, so one this script
 # created before it hardened them is refused rather than reused.
 "$SCRIPTS/check_container_hardening.sh" "$CONTAINER" "$DIGEST"
+"$SCRIPTS/check_loopback_ports.sh" "$CONTAINER"
 if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]]; then
     docker start "$CONTAINER" >/dev/null
     echo "restarted existing container $CONTAINER"
@@ -102,9 +109,17 @@ docker exec -i "$CONTAINER" clickhouse-client --multiquery \
     --param_dev_database=dbt_dev <"$SEED"
 docker exec -i "$CONTAINER" clickhouse-client --multiquery <"$USERS"
 
+install -d -m 700 "$STATE_DIR"
+(
+    umask 077
+    cat >"$EXPORTS" <<EXPORTS
+# dex reads as the read-only user:
+export DEX_TEST_CH_DSN=clickhouse://dex_ro:dex_ro@127.0.0.1:$HTTP_PORT/app
+# dbt dev builds (transform build) authenticate as dbt_dev; profiles.yml reads
+# it via env_var:
+export DEX_TEST_CH_DEV_PASSWORD=dbt_dev
+EXPORTS
+)
+
 echo "seeded app and dbt_dev from scripts/clickhouse_seed.sql"
-echo
-echo "connect dex as the read-only user:"
-echo "  export DEX_TEST_CH_DSN=clickhouse://dex_ro:dex_ro@localhost:$HTTP_PORT/app"
-echo "dbt dev builds (transform build) authenticate as dbt_dev:"
-echo "  export DEX_TEST_CH_DEV_PASSWORD=dbt_dev   # profiles.yml reads it via env_var"
+echo "connection exports: source $EXPORTS"

@@ -443,16 +443,20 @@ def test_warm_refuses_with_an_actionable_envelope_when_the_install_fails(
         monkeypatch,
         ["--warm"],
         returncode=1,
-        stderr="  \n  x No solution found when resolving dependencies\n",
+        stderr="  \n  x No solution found when resolving dependencies (token=abc)\n",
     )
 
     assert code == 1
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["status"] == "error"
     assert envelope["reason"] == "prerequisite"
-    message = envelope["errors"][0]
-    assert "exmergo-dex-core[duckdb]" in message, "name what could not be installed"
-    assert "No solution found when resolving dependencies" in message
+    # A fixed message: uv's stderr and the engine spec can carry an index URL,
+    # a proxy credential or a local path, and the wrapper has no redaction of
+    # its own (GHSA-jm75-qwf5-vg52). It says where to look instead.
+    assert envelope["errors"] == [
+        "warm-up could not install the connector extra; re-run with uv directly "
+        "to see why"
+    ]
 
 
 def _write_config(repo_root: Path, body: str) -> Path:

@@ -521,7 +521,8 @@ expression over separately instead, and the gate screens every column it reads.
 Needs no local dbt project, the way BigQuery needs no local DuckDB: only a host,
 an environment id, and a service token. dex talks to the dbt Cloud Semantic Layer
 GraphQL API (`createQuery` then poll then read the result). The token is
-discovered from `DBT_SL_TOKEN` (then `~/.dbt/dbt_cloud.yml`), held only for the
+discovered from `DBT_SL_TOKEN` (then the active project's `token-value` in
+`~/.dbt/dbt_cloud.yml`, and never another project's), held only for the
 `Authorization` header, and never written to config or an envelope. Needs the
 `[semantic-api]` extra, which is an httpx client and nothing heavier: no warehouse
 client, no dbt-core, and no SQL parser, because dbt Cloud renders and executes the
@@ -537,6 +538,20 @@ warehouse with nothing on the filesystem, since it needs no project, no store, a
 no connector. When a token is supplied, nothing ambient is read, the coordinates
 included, so a stray `DBT_SL_HOST` cannot redirect the request. The CLI is
 unaffected and discovers exactly as described above.
+
+**The token is only sent to dbt Cloud.** The host can come from
+`.dex/config.yml`, which a cloned repository, a fork, or a pull request writes,
+and the token never does, so the two are bound before any token is read: the
+host must be a bare hostname that is, or ends in `.` plus, `getdbt.com` or
+`dbt.com` (`sl.cloud.getdbt.com`, `<account>.semantic-layer.<region>.dbt.com`).
+Anything else is refused naming the host, with no token read and no request
+sent, on every path: config, `DBT_SL_HOST`, and a supplied `SemanticSource`. The
+transport checks the URL again before each request. A private-link or
+single-tenant host outside those domains is admitted by exact name only, and
+only from somewhere the repository cannot write: `DEX_SL_ALLOWED_HOSTS`
+(comma-separated) in your own environment, or `SemanticSource(allowed_hosts=...)`
+for a library caller, where the ambient variable is not read. No
+`.dex/config.yml` key widens the list.
 
 Selecting this backend is explicit: the deployment defaults to `local`, so a
 deployment with no dbt project sets `semantic.deployment: dbt_cloud` in config or

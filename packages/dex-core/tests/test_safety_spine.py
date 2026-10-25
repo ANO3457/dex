@@ -7567,7 +7567,7 @@ def test_hosted_semantic_pii_gate_still_binds_on_an_injected_token(monkeypatch):
     monkeypatch.delenv("DBT_SL_TOKEN", raising=False)
     config = DexConfig(
         semantic=SemanticConfig(
-            backend="dbt_cloud", host="sl.example.com", environment_id="7"
+            backend="dbt_cloud", host="sl.cloud.getdbt.com", environment_id="7"
         )
     )
     engine = DexEngine(

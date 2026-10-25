@@ -1,0 +1,25 @@
+{
+  "name": "classify-env-var-computed",
+  "contract": "classification",
+  "description": "An env_var() whose variable name is computed cannot be named, so dex cannot say what it reads and the verdict is unknown.",
+  "payload": {
+    "path": "models/staging/mart.yml",
+    "content": "version: 2\nmodels:\n  - name: mart\n    description: \"{{ env_var(var('name')) }}\"\n"
+  },
+  "expect": {
+    "artifact_class": "unknown",
+    "result": {
+      "path": "models/staging/mart.yml",
+      "artifact_class": "unknown",
+      "basis": "content",
+      "parsed": true,
+      "signals": [
+        {
+          "signal": "env_var_computed",
+          "where": "models[0].description: line 1",
+          "detail": "variable name is not a literal"
+        }
+      ]
+    }
+  }
+}

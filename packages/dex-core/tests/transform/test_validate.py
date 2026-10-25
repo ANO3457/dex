@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from exmergo_dex_core.transform.plans import EditKind, PlanEdit
 from exmergo_dex_core.transform.validate import (
@@ -42,6 +43,55 @@ def test_find_inlined_secret_walks_nested_outputs():
         "      token: raw-token-value\n"
     )
     assert find_inlined_secret(content) == "token"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '{{ env_var("PW") }} still-a-password',
+        'password {{ env_var("X") }}',
+        '{{ env_var("PW") }}{{ env_var("X") }}',
+        "{{ env_var('U') }}hunter2",
+        # A non-empty default is a committed literal that becomes the live
+        # credential whenever the variable is unset.
+        "{{ env_var('UNUSED', 'hunter2') }}",
+        "{{ env_var('PW') | default('hunter2') }}",
+        "{{ env_var('PW') ~ 'x' }}",
+        "{{ env_var('PW') or 'hunter2' }}",
+        "{{ env_var('PW') if false else 'hunter2' }}",
+    ],
+)
+def test_find_inlined_secret_refuses_a_literal_beside_an_env_var(value):
+    content = yaml.safe_dump({"p": {"outputs": {"dev": {"password": value}}}})
+    assert find_inlined_secret(content) == "password"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '{{ env_var("PW") }}',
+        "{{ env_var('PW', '') }}",
+        '  {{env_var("PW")}}  ',
+        "{{ env_var('PW') | as_text }}",
+    ],
+)
+def test_find_inlined_secret_allows_exactly_one_env_var_reference(value):
+    content = yaml.safe_dump({"p": {"outputs": {"dev": {"password": value}}}})
+    assert find_inlined_secret(content) is None
+
+
+@pytest.mark.parametrize(
+    "key", ["db_password", "admin_pass", "password_v2", "jwt_token", "api_key"]
+)
+def test_find_inlined_secret_reads_a_credential_name_inside_a_longer_key(key):
+    assert find_inlined_secret(f"o:\n  {key}: hunter2\n") == key
+
+
+@pytest.mark.parametrize(
+    "key", ["private_key_path", "keyfile", "token_uri", "passthrough", "bypass_cache"]
+)
+def test_find_inlined_secret_leaves_locators_and_lookalikes_alone(key):
+    assert find_inlined_secret(f"o:\n  {key}: /some/where\n") is None
 
 
 def test_validate_project_yml_requires_a_name():

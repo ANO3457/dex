@@ -374,7 +374,7 @@ to provision and nothing to spend. The same script CI runs stands it up locally:
 
 ```bash
 scripts/setup_clickhouse_dev.sh
-DEX_TEST_CH_DSN=clickhouse://dex_ro:dex_ro@localhost:8124/app \
+DEX_TEST_CH_DSN=clickhouse://dex_ro:dex_ro@127.0.0.1:8124/app \
     DEX_TEST_CH_DEV_PASSWORD=dbt_dev \
     uv run pytest tests/integration -q -m clickhouse
 scripts/setup_clickhouse_dev.sh --down

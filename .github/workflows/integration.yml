@@ -115,13 +115,6 @@ jobs:
       DEX_TEST_BQ_MAX_BYTES: "104857600" # 100 MB per query
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Exports Application Default Credentials (credential file plus
-      # GOOGLE_APPLICATION_CREDENTIALS/GOOGLE_CLOUD_PROJECT), which is exactly
-      # the discovery path the engine uses: no CI special-casing anywhere.
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
-        with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_INTEGRATION_SA }}
       - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           enable-cache: true
@@ -130,6 +123,13 @@ jobs:
       # which skips itself without it.
       - name: Sync (bigquery + duckdb + slayer + dev extras)
         run: uv sync --extra bigquery --extra duckdb --extra slayer --extra dev
+      # Exports Application Default Credentials (credential file plus
+      # GOOGLE_APPLICATION_CREDENTIALS/GOOGLE_CLOUD_PROJECT), which is exactly
+      # the discovery path the engine uses: no CI special-casing anywhere.
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_INTEGRATION_SA }}
       - name: Live BigQuery integration suite
         run: uv run pytest tests/integration -q -m bigquery
 
@@ -159,6 +159,14 @@ jobs:
       SNOWFLAKE_WORKLOAD_IDENTITY_PROVIDER: OIDC
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      # [slayer] runs the governed SLayer query smoke (test_slayer_query.py),
+      # which skips itself without it.
+      - name: Sync (snowflake + duckdb + slayer + dev extras)
+        run: uv sync --extra snowflake --extra duckdb --extra slayer --extra dev
       # Mint the GitHub OIDC token Snowflake validates (audience pinned to
       # what the service user's OIDC_AUDIENCE_LIST expects) and hand it to the
       # connector through the same SNOWFLAKE_* discovery path the engine uses
@@ -170,14 +178,6 @@ jobs:
             const token = await core.getIDToken('snowflakecomputing.com')
             core.setSecret(token)
             core.exportVariable('SNOWFLAKE_TOKEN', token)
-      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
-        with:
-          enable-cache: true
-          python-version: "3.14"
-      # [slayer] runs the governed SLayer query smoke (test_slayer_query.py),
-      # which skips itself without it.
-      - name: Sync (snowflake + duckdb + slayer + dev extras)
-        run: uv sync --extra snowflake --extra duckdb --extra slayer --extra dev
       # Keyless: connect, explore, and the transform tests' own skip guard all
       # run on the workload identity above. The transform tests skip themselves
       # here (dbt cannot authenticate that way) and run in the next step.
@@ -255,6 +255,12 @@ jobs:
       DEX_TEST_DATABRICKS_MAX_SECONDS: "60"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - name: Sync (databricks + duckdb + dev extras)
+        run: uv sync --extra databricks --extra duckdb --extra dev
       # dbt needs a token to select its SDK-backed token branch instead of an
       # interactive browser flow. Keep this bootstrap exchange; the explicit
       # github-oidc auth type above makes both clients acquire fresh tokens
@@ -282,12 +288,6 @@ jobs:
             const token = (await response.json()).access_token
             core.setSecret(token)
             core.exportVariable('DATABRICKS_TOKEN', token)
-      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
-        with:
-          enable-cache: true
-          python-version: "3.14"
-      - name: Sync (databricks + duckdb + dev extras)
-        run: uv sync --extra databricks --extra duckdb --extra dev
       - name: Live Databricks integration suite
         run: uv run pytest tests/integration -q -m databricks
 
@@ -314,14 +314,6 @@ jobs:
       DEX_TEST_REDSHIFT_MAX_SECONDS: "60"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Assume the OIDC-trusted role, exporting AWS_* credentials into the
-      # default chain, which is exactly the discovery path the engine uses:
-      # no CI special-casing anywhere.
-      - name: Assume the Redshift integration role via OIDC
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.DEX_TEST_REDSHIFT_ROLE_ARN }}
-          aws-region: ${{ vars.DEX_TEST_REDSHIFT_REGION }}
       - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
           enable-cache: true
@@ -330,6 +322,14 @@ jobs:
       # which skips itself without it.
       - name: Sync (redshift + duckdb + slayer + dev extras)
         run: uv sync --extra redshift --extra duckdb --extra slayer --extra dev
+      # Assume the OIDC-trusted role, exporting AWS_* credentials into the
+      # default chain, which is exactly the discovery path the engine uses:
+      # no CI special-casing anywhere.
+      - name: Assume the Redshift integration role via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.DEX_TEST_REDSHIFT_ROLE_ARN }}
+          aws-region: ${{ vars.DEX_TEST_REDSHIFT_REGION }}
       - name: Live Redshift integration suite
         run: >-
           uv run pytest tests/integration -q -m redshift
@@ -424,7 +424,7 @@ jobs:
       run:
         working-directory: packages/dex-core
     env:
-      DEX_TEST_CH_DSN: clickhouse://dex_ro:dex_ro@localhost:8124/app
+      DEX_TEST_CH_DSN: clickhouse://dex_ro:dex_ro@127.0.0.1:8124/app
       DEX_TEST_CH_DEV_PASSWORD: dbt_dev
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -512,6 +512,12 @@ jobs:
             fi
           done
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - name: Sync (trino + duckdb + dev extras)
+        run: uv sync --extra trino --extra duckdb --extra dev
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.DEX_TEST_TRINO_ROLE_ARN }}
@@ -519,12 +525,6 @@ jobs:
       - name: Start and seed Trino with the Glue catalog
         working-directory: .
         run: scripts/setup_trino_dev.sh --aws
-      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
-        with:
-          enable-cache: true
-          python-version: "3.14"
-      - name: Sync (trino + duckdb + dev extras)
-        run: uv sync --extra trino --extra duckdb --extra dev
       - name: Live Trino Glue Iceberg suite
         run: uv run pytest tests/integration -q -m trino_iceberg
 
@@ -562,6 +562,12 @@ jobs:
             DEX_TEST_CH_CLOUD_MAX_SECONDS DEX_TEST_CH_CLOUD_MAX_DAILY_CHC; do
             test -n "${!name}" || { echo "$name is missing" >&2; exit 1; }
           done
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - name: Sync (clickhouse + duckdb + dev extras)
+        run: uv sync --extra clickhouse --extra duckdb --extra dev
       # The only step whose environment holds the Cloud API key. It writes the
       # key and secret to owner-only files; from here on, preflight.sh hands
       # them to its two clickhousectl calls and the Cloud test to its one, and
@@ -605,12 +611,6 @@ jobs:
         id: preflight
         working-directory: .
         run: scripts/clickhouse_cloud/preflight.sh
-      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
-        with:
-          enable-cache: true
-          python-version: "3.14"
-      - name: Sync (clickhouse + duckdb + dev extras)
-        run: uv sync --extra clickhouse --extra duckdb --extra dev
       # The two database credentials are the suite's alone, so they ride on this
       # step and no other.
       - name: Narrow ClickHouse Cloud integration suite

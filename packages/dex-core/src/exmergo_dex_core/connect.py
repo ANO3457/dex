@@ -60,6 +60,11 @@ from .errors import (
     StoreRequiredError,
 )
 from .guards.cost_guard import CostGate, ledger_field, utc_day_start
+from .semantic_hosts import (
+    SemanticHostRefusedError,
+    check_semantic_layer_host,
+    env_allowed_hosts,
+)
 from .storage import ExploreStore
 
 # What each connector bills in. Absent means free and local (DuckDB), which is
@@ -208,6 +213,11 @@ class SemanticSource:
     #: Zero-argument, returning the dbt Cloud Semantic Layer service token. Held
     #: only for the Authorization header, never logged, never put in an envelope.
     token: Callable[[], str]
+    #: Exact hosts outside dbt Cloud's own domains this token may be sent to, for
+    #: a private-link or single-tenant deployment. It lives here, beside the
+    #: token, because the config naming the host may be one the repository wrote,
+    #: and a repository must not be able to choose where the token goes.
+    allowed_hosts: tuple[str, ...] = ()
 
 
 # Connectors whose adapters take an already-built connection or credential, and so
@@ -2643,6 +2653,8 @@ def resolve_semantic_layer_connection(
                 "panel and neither is secret, so they belong in config next to the "
                 "connector rather than beside the token"
             )
+        # Before the token callable runs: a host it may not reach costs no read.
+        host = _checked_semantic_host(host, source.allowed_hosts)
         token = source.token()
         if not token:
             raise CredentialDiscoveryError(
@@ -2665,20 +2677,25 @@ def resolve_semantic_layer_connection(
             "DBT_SL_HOST and DBT_SL_ENV_ID (both are shown in the dbt Cloud "
             "Semantic Layer panel and are not secret)"
         )
+    # Before either token source is read. The host may come from a repository's
+    # .dex/config.yml and the token never does, so it goes only to dbt Cloud.
+    host = _checked_semantic_host(host, env_allowed_hosts(env))
     token = env.get("DBT_SL_TOKEN") or _dbt_cloud_service_token(env)
     if not token:
         raise CredentialDiscoveryError(
             "no dbt Cloud Semantic Layer token found; export DBT_SL_TOKEN (a "
-            "'Semantic Layer Only' service token) or add one to ~/.dbt/dbt_cloud.yml"
+            "'Semantic Layer Only' service token) or give the active project in "
+            "~/.dbt/dbt_cloud.yml a token-value (another project's token is never "
+            "used)"
         )
     return str(host), str(env_id), str(token), "service_token"
 
 
 def _dbt_cloud_service_token(env: dict | os._Environ) -> str | None:
     """A ``token-value`` from ``~/.dbt/dbt_cloud.yml`` (the dbt Cloud CLI config),
-    the active project's first. It may be a dbt Cloud API token rather than a
-    Semantic Layer service token; if so the API rejects it with a clear message,
-    which is why ``DBT_SL_TOKEN`` is the documented primary source."""
+    the active project's and no other. It may be a dbt Cloud API token rather
+    than a Semantic Layer service token; if so the API rejects it with a clear
+    message, which is why ``DBT_SL_TOKEN`` is the documented primary source."""
 
     directory = env.get("DBT_CLOUD_CONFIG_DIR")
     path = (Path(directory) if directory else Path.home() / ".dbt") / "dbt_cloud.yml"
@@ -2690,10 +2707,17 @@ def _dbt_cloud_service_token(env: dict | os._Environ) -> str | None:
         return None
     projects = data.get("projects") or []
     active = (data.get("context") or {}).get("active-project")
+    # The active project's token or none. Falling back to the first project
+    # holding one could hand dex a token for a dbt Cloud account the user never
+    # pointed it at.
     for project in projects:
         if str(project.get("project-id")) == str(active) and project.get("token-value"):
             return str(project["token-value"])
-    for project in projects:
-        if project.get("token-value"):
-            return str(project["token-value"])
     return None
+
+
+def _checked_semantic_host(host: object, extra_hosts: tuple[str, ...]) -> str:
+    try:
+        return check_semantic_layer_host(host, extra_hosts=extra_hosts)
+    except SemanticHostRefusedError as exc:
+        raise CredentialDiscoveryError(str(exc)) from exc

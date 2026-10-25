@@ -343,7 +343,10 @@ def guarded_statement_verdict(
     from .sql_guard import NotSelectOnlyError, assert_select_only
 
     try:
-        assert_select_only(sql, dialect=dialect)
+        # A compiled model is the user's own, run by dbt under the user's own
+        # profile, so the external-read denylist that guards dex's own reads is
+        # not applied here; the allowlist below is this surface's function policy.
+        assert_select_only(sql, dialect=dialect, deny_external_reads=False)
     except NotSelectOnlyError as exc:
         return StatementVerdict(
             node=node,

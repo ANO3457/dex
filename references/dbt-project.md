@@ -154,7 +154,11 @@ the repo, never a relation from the warehouse.
 
 Every dbt subprocess runs with its working directory pinned to the project dir, so
 relative paths in `profiles.yml` and anywhere else resolve against the project, not
-the caller's shell cwd. When the project declares packages (`packages.yml`, or a
+the caller's shell cwd. Its environment is the caller's minus the credentials dbt
+never reads (`GITHUB_TOKEN`, `GH_TOKEN`, `DBT_SL_TOKEN`, the ClickHouse Cloud API
+key and secret, AI provider API keys), because any macro, a package's included,
+can read any variable through `env_var()`; warehouse credentials a profile reads
+still reach it. When the project declares packages (`packages.yml`, or a
 `dependencies.yml` with a `packages:` key) and `dbt_packages/` is missing or empty,
 `transform build` runs `dbt deps` automatically before building; `transform deps`
 is the explicit install/refresh. Package installation writes only `dbt_packages/`

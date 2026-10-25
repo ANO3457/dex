@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from exmergo_dex_core.cli import main
+from exmergo_dex_core.transform.validate import find_inlined_secret
 
 CONNECTORS = ("duckdb", "snowflake", "bigquery", "databricks", "postgres")
 
@@ -24,6 +25,23 @@ def _run(argv: list[str], capsys) -> tuple[int, dict]:
 
 def _init_argv(repo: Path, *extra: str, name: str = "analytics") -> list[str]:
     return ["--repo-root", str(repo), "transform", "init", name, *extra]
+
+
+@pytest.fixture(autouse=True)
+def init_profiles_pass_the_secret_guard(tmp_path: Path):
+    """Every profiles.yml init writes passes the plan-time inlined-secret guard.
+
+    The guard also reads the current file on every later profiles_yml edit, so a
+    profile init renders that the guard refuses would refuse every edit in that
+    project. This covers each connector's key names and env_var defaults
+    (key-pair `private_key_path`, Trino `jwt_token`, the `''` defaults) in one
+    place rather than one assertion per test.
+    """
+
+    yield
+    for profile in tmp_path.rglob("profiles.yml"):
+        content = profile.read_text(encoding="utf-8")
+        assert find_inlined_secret(content) is None, profile
 
 
 @pytest.fixture(autouse=True)

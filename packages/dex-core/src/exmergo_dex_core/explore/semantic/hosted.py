@@ -24,6 +24,11 @@ from typing import Any
 from ... import metricflow_dialect
 from ...config import QueryLimits
 from ...semantic_catalog import SemanticCatalogView
+from ...semantic_hosts import (
+    SemanticHostRefusedError,
+    check_semantic_layer_host,
+    env_allowed_hosts,
+)
 from ..results import SemanticQueryResult, SemanticValuesResult
 from . import (
     DIMENSIONS_PER_QUERYABLE_PATH,
@@ -153,7 +158,15 @@ class HostedDbtCloudBackend:
         limits: QueryLimits,
         *,
         timeout: float = 60.0,
+        allowed_hosts: tuple[str, ...] = (),
     ) -> None:
+        # Checked here as well as in the resolver, because this class can be built
+        # directly, and checked again by the transport on every request.
+        try:
+            host = check_semantic_layer_host(host, extra_hosts=allowed_hosts)
+        except SemanticHostRefusedError as exc:
+            raise SemanticBackendError(str(exc)) from exc
+        self._allowed_hosts = tuple(allowed_hosts)
         self._url = f"https://{host}/api/graphql"
         self._env = str(environment_id)
         # Secret: held only for the Authorization header, never logged, never put
@@ -188,7 +201,14 @@ class HostedDbtCloudBackend:
         except CredentialDiscoveryError as exc:
             raise SemanticBackendError(str(exc)) from exc
         limits = getattr(config, "query", None) or QueryLimits()
-        return cls(host, env_id, token, limits)
+        # A supplied source brings its own extra hosts and nothing ambient is
+        # read, the same rule the resolver applies to the token.
+        allowed = (
+            tuple(source.allowed_hosts)
+            if source is not None
+            else env_allowed_hosts(os.environ)
+        )
+        return cls(host, env_id, token, limits, allowed_hosts=allowed)
 
     # ---- transport ---------------------------------------------------------
 
@@ -198,6 +218,7 @@ class HostedDbtCloudBackend:
             token=self._token,
             timeout=self._timeout,
             query=query,
+            allowed_hosts=self._allowed_hosts,
         )
 
     # ---- discovery ---------------------------------------------------------

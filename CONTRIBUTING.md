@@ -222,9 +222,16 @@ Stand the container up and run the suite locally:
 
 ```
 scripts/setup_postgres_dev.sh
-DEX_TEST_PG_DSN=postgresql://dex_ro:dex_ro@localhost:5433/dex_dogfood \
+DEX_TEST_PG_DSN=postgresql://dex_ro:dex_ro@127.0.0.1:5433/dex_dogfood \
     DEX_TEST_PG_DEV_PASSWORD=dbt_dev uv run pytest tests/integration -q -m postgres
 ```
+
+The container listens on 127.0.0.1 only, and its superuser password is random
+per container and never printed: seeding runs through `docker exec`, so nothing
+needs it. The script writes the connection exports for the two roles to
+`~/.cache/dex-dogfood/postgres.env` (mode 0600) instead of echoing them. A
+container started before this, published on every interface, is refused until
+you run `scripts/setup_postgres_dev.sh --down` and start it again.
 
 In CI the same suite runs from `.github/workflows/integration.yml` against a
 `postgres:16` service container seeded from the same SQL: free, keyless, and
@@ -259,11 +266,15 @@ means the same script serves both places:
 
 ```
 scripts/setup_clickhouse_dev.sh
-DEX_TEST_CH_DSN=clickhouse://dex_ro:dex_ro@localhost:8124/app \
+DEX_TEST_CH_DSN=clickhouse://dex_ro:dex_ro@127.0.0.1:8124/app \
     DEX_TEST_CH_DEV_PASSWORD=dbt_dev \
     uv run pytest tests/integration -q -m clickhouse
 scripts/setup_clickhouse_dev.sh --down
 ```
+
+Both ports are published on 127.0.0.1 only, since the built-in `default` user is
+open until the seed runs, and the exports are written to
+`~/.cache/dex-dogfood/clickhouse.env` rather than printed.
 
 There is no setup script for the free container job; there is nothing to
 provision for that exhaustive path.

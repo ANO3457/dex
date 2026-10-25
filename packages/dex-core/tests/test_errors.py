@@ -88,6 +88,9 @@ INTERNAL_REFUSALS = {
     # Wrapped before a caller sees it: the firewall turns this into
     # QueryRefusedError, which is what carries the refusal to the boundary.
     "NotSelectOnlyError",
+    # Wrapped before a caller sees it: the resolver turns this into
+    # CredentialDiscoveryError and the backend into SemanticBackendError.
+    "SemanticHostRefusedError",
     # An envelope-layer invariant, raised at the CLI boundary rather than
     # returned from the engine.
     "SanitizationError",

@@ -149,26 +149,28 @@ def _refusal_in(sql: str, cache: DexCache, dialect: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ("sql", "name"),
+    ("sql", "fragment"),
     [
+        # system.query is on the shape check's external-read denylist, which
+        # refuses it by name before the table-function rule is reached.
         (
             "SELECT * FROM TABLE(pg.system.query(query => 'SELECT 1'))",
-            "pg.system.query",
+            "function query is not permitted",
         ),
         (
             "SELECT * FROM TABLE(exclude_columns(input => TABLE(db.main.RAW_HOSTS), "
             "columns => DESCRIPTOR(NAME)))",
-            "EXCLUDE_COLUMNS",
+            "table function EXCLUDE_COLUMNS is not permitted",
         ),
     ],
 )
-def test_a_table_function_is_refused_by_name(sql: str, name: str, cache: DexCache):
+def test_a_table_function_is_refused_by_name(sql: str, fragment: str, cache: DexCache):
     """TABLE(...) returns rows the cache never profiled, and Trino's
     system.query passes its text to a federated database unread. The refusal
     names the function, where it used to say "unnest of Anonymous"."""
 
     message = _refusal_in(sql, cache, "trino")
-    assert f"table function {name} is not permitted" in message
+    assert fragment in message
     assert "Anonymous" not in message
     # The sibling the refusal points at is admitted.
     inspect_query(

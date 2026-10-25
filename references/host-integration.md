@@ -225,6 +225,25 @@ document carrying both a hook and a grant classifies as executable with the gran
 still listed, because a host applying its own policy needs the evidence rather
 than the verdict alone.
 
+Some files decide which code a later build runs, or as whom, without a hook in
+sight, and they are classified by what they hold rather than by their name:
+
+| content | class | signal |
+|---|---|---|
+| a `packages:` entry (`packages.yml`, `dependencies.yml`) | `executable` | `dependency_hub` (detail `package@version`), `dependency_git`, `dependency_local`, `dependency_tarball`, `dependency_private` |
+| top-level `dispatch:` or `flags:` (`dbt_project.yml`) | `authority_bearing` | `dispatch`, `flags` |
+| a profile with `outputs:` (`profiles.yml`) | `authority_bearing` | `profile`, naming the profile |
+| a guard, budget, limit, clearance, connector or semantic key (`.dex/config.yml`) | `authority_bearing` | `dex_config`, naming the key |
+| `env_var('NAME')` anywhere in jinja | `authority_bearing` | `env_var`, naming the variable |
+| `env_var(...)` with a computed name | `unknown` | `env_var_computed` |
+
+`dbt deps` fetches whatever a dependency names and the next build runs its
+macros, so a hub package pinned to an exact version is still `executable`; the
+signal's detail is there so a host can choose to admit one. An `env_var()` read
+puts a value from the dbt child's environment, which is the agent's, into
+whatever the file renders into: `target/manifest.json`, docs, and with
+`persist_docs` the warehouse's own comments.
+
 The case worth having: two YAML files in one plan, both authored as
 `kind: schema_yml`, one of them carrying a `post-hook`. Identical kind, different
 verdicts, and the signal names the exact YAML path.

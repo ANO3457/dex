@@ -57,6 +57,7 @@ from ..config import QueryLimits
 from ..errors import DexError
 from . import PII_BLOCK_CONFIDENCE
 from .sql_guard import NotSelectOnlyError, assert_select_only
+from .sql_guard import function_name as _func_name
 
 
 class QueryRefusedError(DexError):
@@ -549,8 +550,14 @@ def _query_outputs(
     known: dict[str, Dataset],
     tables: set[str],
     dialect: str,
+    correlated: dict[str, _Source] | None = None,
 ) -> _Outputs:
-    """Output taints of a whole query node (SELECT or a set operation)."""
+    """Output taints of a whole query node (SELECT or a set operation).
+
+    ``correlated`` is the enclosing query's sources, for a subquery that may
+    name them (``WHERE x IN (SELECT t.id FROM u)``). They resolve a column the
+    subquery's own sources do not have, and never shadow one they do.
+    """
 
     # sqlglot attaches a WITH clause to the query root. For a plain query that
     # root is a Select, but for UNION/INTERSECT/EXCEPT it is the set operation.
@@ -564,10 +571,12 @@ def _query_outputs(
         )
 
     if isinstance(node, exp.Select):
-        return _select_outputs(node, local_env, known, tables, dialect)
+        return _select_outputs(node, local_env, known, tables, dialect, correlated)
     if isinstance(node, _QUERY_ROOTS):  # set operation: UNION/INTERSECT/EXCEPT
-        left = _query_outputs(node.left, local_env, known, tables, dialect)
-        right = _query_outputs(node.right, local_env, known, tables, dialect)
+        left = _query_outputs(node.left, local_env, known, tables, dialect, correlated)
+        right = _query_outputs(
+            node.right, local_env, known, tables, dialect, correlated
+        )
         # Column names come from the left side; taints merge positionally, and a
         # length mismatch (invalid SQL anyway) merges everything conservatively.
         left_items = list(left.items())
@@ -579,8 +588,64 @@ def _query_outputs(
             name: taint | right_taints[i] for i, (name, taint) in enumerate(left_items)
         }
     if isinstance(node, exp.Subquery):
-        return _query_outputs(node.this, local_env, known, tables, dialect)
+        return _query_outputs(node.this, local_env, known, tables, dialect, correlated)
     raise QueryRefusedError(f"unsupported query shape: {type(node).__name__}")
+
+
+#: Select arguments that hold the query's own sources or projections, which the
+#: projection path already resolves. Every other argument (WHERE, HAVING,
+#: QUALIFY, PREWHERE, GROUP BY, ORDER BY, LIMIT, ...) is searched for subqueries.
+_SOURCE_AND_PROJECTION_ARGS = frozenset(
+    {"expressions", "from", "from_", "joins", "laterals", "with"}
+)
+
+
+def _clause_queries(node: exp.Expression):
+    """The outermost queries under ``node``: each one resolves its own nested
+    subqueries, so descending further would resolve them twice."""
+
+    if isinstance(node, (exp.Subquery, *_QUERY_ROOTS)):
+        yield node
+        return
+    for child in node.iter_expressions():
+        yield from _clause_queries(child)
+
+
+def _resolve_clause_subqueries(
+    select: exp.Select,
+    sources: dict[str, _Source],
+    env: dict[str, _Source],
+    known: dict[str, Dataset],
+    tables: set[str],
+    dialect: str,
+    correlated: dict[str, _Source] | None,
+) -> None:
+    """Resolve every subquery outside the projection against the cache.
+
+    A subquery under WHERE, EXISTS, IN or a join's ON projects nothing out of
+    the statement, but it still reads: a table nobody profiled, used as a
+    filter, is an oracle over values whose PII flags were never checked, and a
+    table function there reaches whatever it reaches. So each one goes through
+    the same source resolution as the projection path, with the same refusals,
+    and its tables join the ones the relation check and the cost estimate see.
+    Its taint is discarded, because none of its values leave the statement.
+    """
+
+    clauses: list[exp.Expression] = []
+    for key, value in select.args.items():
+        if key in _SOURCE_AND_PROJECTION_ARGS or value is None:
+            continue
+        values = value if isinstance(value, list) else [value]
+        clauses.extend(v for v in values if isinstance(v, exp.Expression))
+    for join in select.args.get("joins") or []:
+        on = join.args.get("on")
+        if on is not None:
+            clauses.append(on)
+
+    scope = {**(correlated or {}), **sources}
+    for clause in clauses:
+        for query in _clause_queries(clause):
+            _query_outputs(query, env | sources, known, tables, dialect, scope)
 
 
 def _select_outputs(
@@ -589,10 +654,17 @@ def _select_outputs(
     known: dict[str, Dataset],
     tables: set[str],
     dialect: str,
+    correlated: dict[str, _Source] | None = None,
 ) -> _Outputs:
     env = dict(outer_env)
 
     sources = _resolve_sources(select, env, known, tables, dialect)
+    _resolve_clause_subqueries(select, sources, env, known, tables, dialect, correlated)
+    if correlated:
+        # A correlated subquery's projection may name the enclosing query's
+        # columns. SQL resolves a name in the innermost scope first, so the
+        # enclosing sources are a fallback, never a peer.
+        sources = _ScopedSources(sources, outer=correlated)
 
     outputs: _Outputs = {}
     for projection in select.expressions:
@@ -1018,11 +1090,22 @@ def _unnest_taint(
     return taint
 
 
+class _ScopedSources(dict):
+    """A subquery's own sources, with the enclosing query's behind them."""
+
+    def __init__(self, own: dict[str, _Source], *, outer: dict[str, _Source]):
+        super().__init__(own)
+        self.outer = outer
+
+
 def _resolve_column(node: exp.Column, sources: dict[str, _Source]) -> set[_Taint]:
     name = node.name
     qualifier = node.table.lower() if node.table else ""
+    outer = getattr(sources, "outer", None)
 
     if qualifier:
+        if qualifier not in sources and outer is not None:
+            return _resolve_column(node, outer)
         if qualifier not in sources:
             raise QueryRefusedError(
                 f"unknown table or alias '{node.table}' for column "
@@ -1031,6 +1114,8 @@ def _resolve_column(node: exp.Column, sources: dict[str, _Source]) -> set[_Taint
         return _source_column_taint(sources[qualifier], name)
 
     hits = [source for source in sources.values() if _source_has_column(source, name)]
+    if not hits and outer is not None:
+        return _resolve_column(node, outer)
     if not hits:
         raise QueryRefusedError(
             f"column '{name}' is not in any queried table's profile; check the "
@@ -1054,17 +1139,6 @@ def _source_column_taint(source: _Source, name: str) -> set[_Taint]:
     if taint is None:
         raise QueryRefusedError(f"column '{name}' does not exist in the subquery")
     return set(taint)
-
-
-def _func_name(node: exp.Func) -> str:
-    # AnonymousAggFunc and CombinedAggFunc are how sqlglot parses every
-    # ClickHouse aggregate it has no canonical class for; like Anonymous they
-    # carry the written name in `this`, and their own sql_name() is the class
-    # name ("anonymous_agg_func"), which would match nothing and silently make
-    # every such aggregate carry.
-    if isinstance(node, (exp.Anonymous, exp.AnonymousAggFunc, exp.CombinedAggFunc)):
-        return str(node.this).lower()
-    return node.sql_name().lower()
 
 
 def _measures(node: exp.Func) -> bool:

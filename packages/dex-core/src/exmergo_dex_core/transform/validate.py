@@ -16,8 +16,9 @@ import yaml
 from sqlglot.errors import TokenError
 from sqlglot.tokens import TokenType
 
+from ..envelope import secret_like
 from ..errors import DexError
-from ..guards.sql_guard import assert_select_only
+from ..guards.sql_guard import assert_select_only, external_read_function
 
 if TYPE_CHECKING:
     from ..dbt_project import DbtProjectView
@@ -28,36 +29,48 @@ class EditValidationError(DexError):
     pass
 
 
-# profiles.yml keys whose value dbt reads from the environment, never a literal
-# in a committed file. A path-typed key (``private_key_path``) holds no secret,
-# and method-based auth (externalbrowser/iam/oauth) carries none either, so both
-# are exempt by not being listed. This mirrors init's "no persisted secret" rule
-# and, at author time, keeps a credential out of the plan diff and thus out of
-# agent context.
-_SECRET_KEYS = frozenset(
-    {
-        "password",
-        "pass",
-        "token",
-        "access_token",
-        "refresh_token",
-        "client_secret",
-        "secret",
-        "private_key",
-        "private_key_passphrase",
-    }
+# A profiles.yml key holds a secret when its name reads as a credential: the
+# envelope's own `secret_like` substring rule (so `db_password` and `jwt_token`
+# count, not just `password` and `token`), or a `pass`/`pwd` word in a
+# snake-case name (`admin_pass`), which a substring rule cannot take without also
+# refusing `passthrough` and `bypass_*`. A key naming where something lives
+# (`private_key_path`, `keyfile`, `token_uri`) holds no secret and is exempt,
+# which matters because the guard also reads the current file: refusing a path
+# init itself writes would refuse every later profiles_yml edit in that project.
+_PASSWORD_WORDS = frozenset({"pass", "passphrase", "pwd"})
+_LOCATOR_SUFFIXES = ("_path", "_file", "_dir", "_uri", "_url")
+
+# The one safe form for a sensitive value: the whole value is a single dbt
+# env_var() reference, resolved at runtime. A default is allowed only when it is
+# empty, since a non-empty default is a committed literal that becomes the live
+# credential whenever the variable is unset. Nothing may sit between the call
+# and the close (`| default('x')`, `~ 'x'`, `or 'x'` each smuggle a literal back
+# in) except dbt's `as_text` filter, which changes the type and adds no value.
+_ENV_VAR_REF = re.compile(
+    r"\{\{\s*env_var\s*\(\s*(['\"])[^'\"]+\1"
+    r"(?:\s*,\s*(['\"])\2)?\s*\)"
+    r"(?:\s*\|\s*as_text)?\s*\}\}"
 )
-# The one safe form for a sensitive value: a dbt env_var() reference, resolved at
-# runtime. Any other value for a sensitive key is a literal and is refused.
-_ENV_VAR_REF = re.compile(r"\{\{\s*env_var\s*\(")
+
+
+def _sensitive_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    lowered = key.lower()
+    if lowered.endswith(_LOCATOR_SUFFIXES):
+        return False
+    if secret_like(lowered):
+        return True
+    return any(word in _PASSWORD_WORDS for word in re.split(r"[_\-]", lowered))
 
 
 def find_inlined_secret(content: str) -> str | None:
     """The first profiles.yml key that inlines a literal secret, or ``None``.
 
-    Walks the parsed mapping; a sensitive key is safe only when its value is an
-    ``env_var()`` reference. A parse failure returns ``None`` here (the mapping
-    check reports malformed YAML), so this never masks a structural error.
+    Walks the parsed mapping; a sensitive key is safe only when its whole value
+    is one ``env_var()`` reference. A parse failure returns ``None`` here (the
+    mapping check reports malformed YAML), so this never masks a structural
+    error.
     """
 
     try:
@@ -70,9 +83,8 @@ def find_inlined_secret(content: str) -> str | None:
 def _scan_for_secret(node: object) -> str | None:
     if isinstance(node, dict):
         for key, value in node.items():
-            sensitive = isinstance(key, str) and key.lower() in _SECRET_KEYS
-            if sensitive and not (
-                isinstance(value, str) and _ENV_VAR_REF.search(value)
+            if _sensitive_key(key) and not (
+                isinstance(value, str) and _ENV_VAR_REF.fullmatch(value.strip())
             ):
                 return key
             hit = _scan_for_secret(value)
@@ -276,10 +288,28 @@ def _assert_query_only(path: str, content: str, noun: str) -> list[str]:
     if not stripped:
         return [f"{path}: {noun} is entirely jinja; SELECT-only check skipped"]
     try:
-        assert_select_only(stripped)
+        # dbt runs this under the user's own profile, and a dbt-duckdb model
+        # reading a parquet file is ordinary work, so a function that reads
+        # outside the named relations is said out loud rather than refused.
+        assert_select_only(stripped, deny_external_reads=False)
     except Exception as exc:
         raise EditValidationError(f"{path}: {exc}") from exc
+    called = _external_read(stripped)
+    if called is not None:
+        return [
+            f"{path}: {noun} calls {called}, which reads a file, a URL, another "
+            "database, or SQL held in a string; dbt will run it as written. "
+            "Check that it reads what you intend"
+        ]
     return []
+
+
+def _external_read(sql: str) -> str | None:
+    try:
+        root = sqlglot.parse_one(sql)
+    except Exception:
+        return None
+    return external_read_function(root) if root is not None else None
 
 
 def validate_snapshot(path: str, content: str) -> None:
@@ -378,7 +408,7 @@ def validate_snapshot(path: str, content: str) -> None:
             "the source it captures"
         )
     try:
-        assert_select_only(stripped)
+        assert_select_only(stripped, deny_external_reads=False)
     except Exception as exc:
         raise EditValidationError(f"{path}: {exc}") from exc
 

@@ -10,10 +10,14 @@ the workflow themselves:
   preflight.sh starts, and preflight refuses (exit 2, naming the path) when its
   files are missing, empty, or in a directory other accounts can open.
 - scripts/check_container_hardening.sh refuses a container missing any one of
-  its invariants, whichever flag went missing.
+  its invariants, whichever flag went missing, and
+  scripts/check_loopback_ports.sh refuses one published beyond loopback.
+- The dogfood setup scripts publish on 127.0.0.1, commit no superuser password,
+  and print none.
 - integration.yml puts no secret in any job's environment, hands the Cloud API
-  key to exactly one step, and gives the Snowflake transform suite a key path
-  rather than the key.
+  key to exactly one step, gives the Snowflake transform suite a key path
+  rather than the key, and runs no third-party action after a step that puts a
+  credential where later steps can read it.
 
 The scripts run against fakes put first on PATH (a clickhousectl that answers
 from canned JSON, a docker that answers one inspect line), so nothing here
@@ -35,6 +39,11 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 PREFLIGHT = ROOT / "scripts" / "clickhouse_cloud" / "preflight.sh"
 CHECKER = ROOT / "scripts" / "check_container_hardening.sh"
+LOOPBACK = ROOT / "scripts" / "check_loopback_ports.sh"
+DOGFOOD_SETUPS = (
+    ROOT / "scripts" / "setup_postgres_dev.sh",
+    ROOT / "scripts" / "setup_clickhouse_dev.sh",
+)
 WORKFLOW = ROOT / ".github" / "workflows" / "integration.yml"
 
 BASH = shutil.which("bash")
@@ -289,6 +298,64 @@ def test_the_checker_refuses_a_cap_add_the_caller_did_not_name(tmp_path: Path):
     assert "capabilities added back" in result.stderr
 
 
+# --- the dogfood databases listen on loopback only ---------------------------------
+
+
+def _check_ports(tmp_path: Path, bindings: str):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    _write_executable(
+        bin_dir / "docker",
+        f"""#!/usr/bin/env bash
+[[ "$1" == inspect ]] || exit 9
+printf '%s\\n' '{bindings}'
+""",
+    )
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    return subprocess.run(  # noqa: S603  (a fixed argv, no shell)
+        [BASH, str(LOOPBACK), "dex-ch"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@needs_bash
+def test_the_loopback_check_accepts_ports_published_on_127_0_0_1(tmp_path: Path):
+    result = _check_ports(tmp_path, "8123/tcp=127.0.0.1 9000/tcp=127.0.0.1 ")
+    assert result.returncode == 0, result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("bindings", "said"),
+    [
+        ("8123/tcp= 9000/tcp=127.0.0.1 ", "8123/tcp is published on 'all interfaces'"),
+        ("5432/tcp=0.0.0.0 ", "5432/tcp is published on '0.0.0.0'"),
+    ],
+)
+def test_the_loopback_check_refuses_a_port_beyond_loopback(
+    tmp_path: Path, bindings: str, said: str
+):
+    result = _check_ports(tmp_path, bindings)
+    assert result.returncode == 1
+    assert said in result.stderr
+
+
+@pytest.mark.parametrize("script", DOGFOOD_SETUPS, ids=lambda p: p.name)
+def test_a_dogfood_setup_publishes_on_loopback_and_prints_no_password(script: Path):
+    body = script.read_text(encoding="utf-8")
+    published = [line.strip() for line in body.splitlines() if '-p "' in line]
+    assert published, "the setup script publishes no port"
+    assert all(line.startswith('-p "127.0.0.1:') for line in published), published
+    assert "check_loopback_ports.sh" in body
+    assert "SUPERPASS" not in body
+    assert "POSTGRES_PASSWORD=postgres" not in body
+    echoed = [line for line in body.splitlines() if line.strip().startswith("echo")]
+    assert not [line for line in echoed if "PASSWORD" in line or ":dex_ro@" in line]
+
+
 # --- the workflow's credential channels ---------------------------------------------
 
 
@@ -483,3 +550,39 @@ def test_the_trino_job_needs_no_secret_and_seeds_through_the_dogfood_script(jobs
     steps = " ".join(str(step.get("run", "")) for step in job["steps"])
     assert "scripts/setup_trino_dev.sh" in steps
     assert "secrets." not in str(job)
+
+
+# --- third-party actions never run beside a minted credential ----------------------
+
+#: Steps that put a credential where every later step in the job can read it:
+#: into GITHUB_ENV, onto the runner's disk, or into the default AWS/GCP chain.
+_CREDENTIAL_ACTIONS = (
+    "google-github-actions/auth",
+    "actions/github-script",
+    "aws-actions/configure-aws-credentials",
+)
+
+
+def _writes_a_credential(step: dict) -> bool:
+    uses = str(step.get("uses", ""))
+    if uses.split("@")[0] in _CREDENTIAL_ACTIONS:
+        return True
+    return "secrets." in json.dumps(step.get("env") or {}) and "DEX_SECRETS_DIR" in str(
+        step.get("run", "")
+    )
+
+
+def test_no_third_party_action_runs_after_a_credential_reaches_the_job(jobs):
+    """A SHA pin limits which code an action runs, not what that code can read.
+    setup-uv and `uv sync` need no cloud credential, so they run first, and the
+    only steps after a credential is minted are dex's own `run:` steps."""
+
+    offenders = {}
+    for name, job in jobs.items():
+        minted = False
+        for step in job.get("steps", []):
+            uses = str(step.get("uses", ""))
+            if minted and uses and uses.split("@")[0] not in _CREDENTIAL_ACTIONS:
+                offenders.setdefault(name, []).append(uses.split("@")[0])
+            minted = minted or _writes_a_credential(step)
+    assert offenders == {}

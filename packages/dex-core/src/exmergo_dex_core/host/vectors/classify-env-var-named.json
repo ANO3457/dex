@@ -1,0 +1,25 @@
+{
+  "name": "classify-env-var-named",
+  "contract": "classification",
+  "description": "An env_var() call in YAML reads the dbt child's environment into whatever the file renders into. The signal names the variable, never its value.",
+  "payload": {
+    "path": "models/staging/mart.yml",
+    "content": "version: 2\nmodels:\n  - name: mart\n    description: \"{{ env_var('GITHUB_TOKEN') }}\"\n"
+  },
+  "expect": {
+    "artifact_class": "authority_bearing",
+    "result": {
+      "path": "models/staging/mart.yml",
+      "artifact_class": "authority_bearing",
+      "basis": "content",
+      "parsed": true,
+      "signals": [
+        {
+          "signal": "env_var",
+          "where": "models[0].description: line 1",
+          "detail": "GITHUB_TOKEN"
+        }
+      ]
+    }
+  }
+}

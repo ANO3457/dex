@@ -59,6 +59,10 @@ subcommands are **stateless**: the agent orchestrates multi-step flows by
 re-reading them between calls. Credentials never cross this boundary, and nothing
 reaches agent context except through the sanitized envelope: values cross only
 from profiled, PII-cleared columns, bounded and capped by the query firewall.
+Every `errors` and `warnings` entry is redacted as the envelope is printed
+(`key=value` and `key: value` secrets, `Bearer` and `Authorization:` credentials,
+query-string secrets, and URL passwords), since a message often quotes text dex
+did not write.
 
 ## The command surface
 
@@ -303,7 +307,10 @@ dex transform classify [plan-id]  -> what each edit's content contains, from the
     [--edits-file <f>]               operation and never from the declared kind or the filename:
                                      declarative, executable, authority_bearing, data, or unknown, with
                                      the signal that decided it and where it sits. Content that does
-                                     not parse is unknown and never declarative. Repo-only and free
+                                     not parse is unknown and never declarative. A dependency entry
+                                     is executable; dispatch, flags, a profile, a dex guard key, and
+                                     an env_var() read are authority_bearing; an env_var() with a
+                                     computed name is unknown. Repo-only and free
 dex transform preflight           -> what the warehouse will enforce on the next guarded build, read
                                      from the project's rendered profiles.yml rather than from what dex
                                      would write there: the provider-side controls, what each binds,
@@ -648,7 +655,13 @@ passes this gate.
 project-root config files into the same plan/diff/apply flow; because they carry
 project-wide settings and connection targets, they are gated by dbt's own parser
 at plan time, and a `profiles_yml` edit is refused if it (or the file it would
-replace) inlines a literal credential, so no secret ever reaches the diff.
+replace) inlines a literal credential, so no secret ever reaches the diff. A
+key reads as a credential when its name contains one (`db_password`,
+`jwt_token`), and its value is safe only when the whole value is one
+`{{ env_var('NAME') }}` reference, with an empty default at most
+(`{{ env_var('NAME', '') }}`): a literal beside the reference, a non-empty
+default, or a filter or operator after it is refused. A key naming a location
+(`private_key_path`, `token_uri`) holds no secret and is exempt.
 
 - `transform init "<name>" --connector <duckdb|snowflake|bigquery|databricks|postgres>`
   bootstraps a dbt project when none exists: `dbt_project.yml`, `models/staging/`
@@ -1356,11 +1369,24 @@ The gate, in order:
    string*: `"select 1; select 2"` stays refused whether it arrives alone or
    alongside other arguments. Separate arguments are the supported way to ask
    several questions, because they keep the statement boundaries explicit
-   instead of asking the parser to find them.
+   instead of asking the parser to find them. A call to a function that reads
+   outside the relations a statement names is refused by name wherever it sits,
+   projection, FROM or subquery: server files (`pg_read_file`, DuckDB
+   `read_csv`/`read_parquet`/`read_text`, `glob`), URLs and object stores
+   (ClickHouse `url`, `s3`, `hdfs`), other databases (`remote`, `mysql`,
+   `postgresql`, `dblink`, BigQuery `EXTERNAL_QUERY`), and SQL held in a string
+   (DuckDB `query`, Trino `system.query`, Postgres `query_to_xml`). The reason is
+   `unapproved_function`. No setting lifts it, `guards.approved_functions`
+   included, because a setting that could would live in a file an agent may
+   write.
 2. **Resolve against the cache, then against the connection.** Every table and
    column must exist in `.dex/cache.json`, because profiling is what makes the
    PII policy computable and the firewall cannot judge a column whose flags it
-   does not have. What follows from a cache miss is not a refusal, though: the
+   does not have. That holds for every table the statement reads, not only the
+   ones it projects from: a subquery under WHERE, EXISTS, IN, HAVING, a join's
+   ON or ORDER BY is resolved the same way, since a table nobody profiled is
+   still an oracle over its values when it is only used as a filter. What
+   follows from a cache miss is not a refusal, though: the
    object is looked up in the live inventory, and if the connection has it, it is
    profiled and the query then runs. This covers the case no amount of upfront
    exploration can, a relation built since the last inventory (a model `dbt run`

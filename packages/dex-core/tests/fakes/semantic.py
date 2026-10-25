@@ -244,7 +244,9 @@ class FakeHostedBackend(HostedDbtCloudBackend):
         limits: QueryLimits | None = None,
         values_need_a_metric: bool = False,
     ) -> None:
-        super().__init__("fake.host", "42", SECRET_TOKEN, limits or QueryLimits())
+        super().__init__(
+            "fake.cloud.getdbt.com", "42", SECRET_TOKEN, limits or QueryLimits()
+        )
         self._metrics = metrics or []
         self._dimensions_meta = dimensions_meta if dimensions_meta is not None else []
         self._result = result

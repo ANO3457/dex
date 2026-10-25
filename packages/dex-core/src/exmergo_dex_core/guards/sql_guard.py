@@ -103,12 +103,120 @@ _FORBIDDEN = tuple(
 _ALLOWED_ROOTS = _read_only_roots()
 
 
-def assert_select_only(sql: str, *, dialect: str = "duckdb") -> str:
+#: Functions that reach past the relations a statement names: a file on the
+#: server, a URL, another database, or SQL held in a string. A SELECT calling one
+#: is read-only in shape and still reads something nothing profiled, or sends a
+#: value somewhere dex cannot see, so the shape check alone cannot admit it.
+#: Matched by name on every dialect, because the names do not collide with
+#: anything a dialect uses for ordinary work, and lowercase, since ClickHouse
+#: spells them in camel case.
+_EXTERNAL_READ_FUNCTIONS = frozenset(
+    {
+        # Postgres: server files, large objects, and SQL held in a string.
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_stat_file",
+        "set_config",
+        # ClickHouse table functions over files, URLs and other databases.
+        "file",
+        "filecluster",
+        "url",
+        "urlcluster",
+        "gcs",
+        "hudi",
+        "deltalake",
+        "deltalakecluster",
+        "postgresql",
+        "jdbc",
+        "odbc",
+        "mongodb",
+        "redis",
+        "executable",
+        "cluster",
+        "clusterallreplicas",
+        "merge",
+        # DuckDB.
+        "glob",
+        "getenv",
+        "query",
+        "query_table",
+        "st_read",
+        "sniff_csv",
+        "delta_scan",
+        # BigQuery, Snowflake, Databricks.
+        "external_query",
+        "infer_schema",
+        "http_request",
+    }
+)
+
+#: Families matched by prefix, where the dialect keeps adding members
+#: (``read_csv_auto``, ``s3Cluster``, ``icebergS3``, ``dblink_exec``).
+_EXTERNAL_READ_PREFIXES = (
+    "read_",  # DuckDB read_csv/json/parquet/text/blob; Databricks read_files/kafka
+    "parquet_",
+    "iceberg",
+    "sqlite_",
+    "postgres_",
+    "mysql",
+    "dblink",
+    "lo_",
+    "pg_ls_",
+    "query_to_xml",
+    "table_to_xml",
+    "schema_to_xml",
+    "database_to_xml",
+    "cursor_to_xml",
+    "remote",
+    "s3",
+    "hdfs",
+    "azureblob",
+)
+
+
+def function_name(node: exp.Func) -> str:
+    """The name a function was called by, lowercase."""
+
+    # AnonymousAggFunc and CombinedAggFunc are how sqlglot parses every
+    # ClickHouse aggregate it has no canonical class for; like Anonymous they
+    # carry the written name in `this`, and their own sql_name() is the class
+    # name ("anonymous_agg_func"), which would match nothing and silently make
+    # every such aggregate carry.
+    if isinstance(node, (exp.Anonymous, exp.AnonymousAggFunc, exp.CombinedAggFunc)):
+        return str(node.this).lower()
+    return node.sql_name().lower()
+
+
+def external_read_function(root: exp.Expression) -> str | None:
+    """The first function in ``root`` that reads outside the named relations.
+
+    Over every function node, typed ones included: sqlglot models DuckDB's
+    ``read_csv`` as its own class rather than as an anonymous call, so a check
+    over anonymous calls alone would miss the one the advisory was about.
+    """
+
+    for node in root.find_all(exp.Func):
+        name = function_name(node)
+        if name in _EXTERNAL_READ_FUNCTIONS or name.startswith(_EXTERNAL_READ_PREFIXES):
+            return name
+    return None
+
+
+def assert_select_only(
+    sql: str, *, dialect: str = "duckdb", deny_external_reads: bool = True
+) -> str:
     """Return ``sql`` unchanged if it is a single read-only query; else raise.
 
     Multi-statement input (``;``-chained) is refused outright: profiling never
     needs more than one statement, and allowing several is how a DDL/DML slips in.
     A read or write node anywhere in the tree (not just at the root) fails it.
+
+    A call to a function that reads a file, a URL, another database, or SQL held
+    in a string is refused too, wherever it sits, and no configuration lifts
+    that: the setting that could would live in a file an agent may write. The
+    one caller that turns it off is the authoring check on dbt model SQL, which
+    dbt runs under the user's own profile and whose values never come back
+    through dex; it warns there instead (``deny_external_reads=False``).
     """
 
     statements = [s for s in sqlglot.parse(sql, dialect=dialect) if s is not None]
@@ -130,6 +238,16 @@ def assert_select_only(sql: str, *, dialect: str = "duckdb") -> str:
             raise NotSelectOnlyError(
                 f"write/DDL statement is not allowed: {type(forbidden).__name__}",
                 reason=classify_refusal(forbidden),
+            )
+    if deny_external_reads:
+        called = external_read_function(root)
+        if called is not None:
+            raise NotSelectOnlyError(
+                f"function {called} is not permitted: it reads a file, a URL, "
+                "another database, or SQL held in a string, none of which the "
+                "exploration cache profiled or the PII firewall can see. Query "
+                "cached tables and views",
+                reason=RefusalReason.UNAPPROVED_FUNCTION,
             )
     return sql
 

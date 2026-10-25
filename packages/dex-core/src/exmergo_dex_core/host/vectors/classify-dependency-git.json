@@ -1,0 +1,28 @@
+{
+  "name": "classify-dependency-git",
+  "contract": "classification",
+  "description": "A packages.yml naming a git source and a local path: dbt deps fetches them and the next build runs their macros, so the verdict is executable and each source type is named.",
+  "payload": {
+    "path": "packages.yml",
+    "content": "packages:\n  - git: https://example.com/acme/dbt-helpers.git\n    revision: main\n  - local: ../shared_macros\n"
+  },
+  "expect": {
+    "artifact_class": "executable",
+    "result": {
+      "path": "packages.yml",
+      "artifact_class": "executable",
+      "basis": "content",
+      "parsed": true,
+      "signals": [
+        {
+          "signal": "dependency_git",
+          "where": "packages[0].git"
+        },
+        {
+          "signal": "dependency_local",
+          "where": "packages[1].local"
+        }
+      ]
+    }
+  }
+}

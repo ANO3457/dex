@@ -526,6 +526,33 @@ def test_a_stale_uv_is_reported_on_stderr_and_never_on_stdout(monkeypatch, capsy
     assert envelope["warnings"] == ["uv 0.13.1 trusts ..."]
 
 
+def test_a_failed_warm_up_puts_none_of_uv_s_stderr_in_the_envelope(monkeypatch, capsys):
+    """uv's stderr can quote an index URL, a proxy, or a token, and the wrapper
+    is stdlib-only with no redaction of its own, so a failed warm-up reports a
+    fixed message and nothing uv said, nor the engine spec."""
+
+    module = _wrapper()
+    monkeypatch.setattr(module.shutil, "which", lambda _name: "/usr/local/bin/uv")
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda cmd, **_kw: subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="error: token=abc https://u:pw@index/simple"
+        ),
+    )
+    monkeypatch.setattr(module.sys, "argv", ["run.py", "--warm"])
+
+    assert module.main() == 1
+    out = capsys.readouterr().out
+    assert "abc" not in out and "pw@" not in out
+    envelope = json.loads(out)
+    assert envelope["reason"] == "prerequisite"
+    assert envelope["errors"] == [
+        "warm-up could not install the connector extra; re-run with uv directly "
+        "to see why"
+    ]
+
+
 @pytest.mark.parametrize("status", ["ok", "error"])
 def test_wrapper_envelope_matches_engine(wrapper, status):
     """Bootstrap responses obey the same contract as installed-engine responses."""

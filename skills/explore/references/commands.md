@@ -437,7 +437,9 @@ it as `execution` (`dex` or `vendor`).
   extra.
 - `--api` sends the query to a hosted dbt Cloud deployment. It needs a host, an
   environment id, `DBT_SL_TOKEN`, and the `[semantic-api]` extra, and no local
-  project. dbt Cloud executes server-side, so no `--confirm` is asked and every
+  project. The host must be a dbt Cloud one (`*.getdbt.com` or `*.dbt.com`), or
+  named exactly in `DEX_SL_ALLOWED_HOSTS`, since the token is never sent
+  anywhere else. dbt Cloud executes server-side, so no `--confirm` is asked and every
   result warns that spend is governed there. The layer's own PII metadata is
   fetched per metric, so a multi-metric query stays authoritative.
 - `semantic.vendor: ossie` reads native Apache Ossie documents from the

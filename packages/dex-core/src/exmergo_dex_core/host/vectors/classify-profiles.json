@@ -1,0 +1,25 @@
+{
+  "name": "classify-profiles",
+  "contract": "classification",
+  "description": "A profiles.yml target names the adapter, role and credentials a build connects as, so it is never declarative.",
+  "payload": {
+    "path": "profiles.yml",
+    "content": "things:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      path: dev.duckdb\n"
+  },
+  "expect": {
+    "artifact_class": "authority_bearing",
+    "result": {
+      "path": "profiles.yml",
+      "artifact_class": "authority_bearing",
+      "basis": "content",
+      "parsed": true,
+      "signals": [
+        {
+          "signal": "profile",
+          "where": "things.outputs",
+          "detail": "things"
+        }
+      ]
+    }
+  }
+}

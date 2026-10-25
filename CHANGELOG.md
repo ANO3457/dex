@@ -14,6 +14,233 @@ pending fragments into a new section below. See
 
 <!-- towncrier release notes start -->
 
+## [1.16.1] - 2026-10-25
+
+### Added
+
+- **`transform apply` hands back a co-author trailer that credits Dex.** dex never
+  commits: the agent or person driving it does, so a commit of files dex wrote
+  carried no sign of it. An apply that writes at least one file now returns
+  `data.commit_trailer`, the line `Co-authored-by: Dex <dex@exmergo.com>`, and the
+  three skills tell the agent to end the message of the commit carrying those
+  files with it, after a blank line. GitHub credits the trailer to the
+  [exmergo-dex](https://github.com/exmergo-dex) account, so Dex appears among a
+  repository's contributors once that commit is on its default branch. The typed
+  API carries it as `ApplyResult.commit_trailer`. An apply that wrote nothing, or
+  stopped at `needs_confirmation`, returns no trailer. To leave the credit out,
+  remove the line from the commit message.
+- **`transform plan` drafts the measured half of each model's declaration.** For
+  every model a plan creates, edits or declares, `data.declarations.<model>` carries
+  `drafted` (the grain, keys and references, PII and NULL facts, running totals,
+  unit shapes and filtered value domains the `.dex/` cache and the SQL support, each
+  with its evidence), `declared` (what the model's YAML says once the plan lands)
+  and `missing` (the intent fields nobody has supplied). Each missing field is a
+  warning, naming what the SQL already implies where it can ("fct_orders declares
+  no population rule; its SQL filters on status"). Drafting reads the cache and the
+  repository only, so it is free on every connector; an unprofiled input is named
+  with the command that would profile it, a fact the cache cannot support is left
+  out with the reason, and a PII-flagged column's values are never drafted. A draft
+  is never written into the project.
+- **`transform plan` shows how the project already decides.** For each upstream
+  column a planned model filters, branches on or aggregates, the declaration draft
+  now carries `precedent`: what the project's other models reading the same relation
+  do with that column, grouped by the predicate, `CASE` condition or aggregation they
+  write, with counts and model names ("4 models exclude `('cancelled', 'returned')`,
+  1 keeps every status"). Column identity follows aliases and CTEs, so a column of
+  the same name on another relation is not counted, and conflicting precedent stays
+  visible. A reader dex cannot read statically, or a `ref()` it cannot resolve, makes
+  the answer `incomplete` with the reason, in the vocabulary `transform references`
+  uses. The same answer is available before any SQL is written from
+  `transform references <model.column> --usage`. A plan also warns when a filter
+  compares a column to a literal its complete cached value domain never holds,
+  naming any value that matches it ignoring case and whitespace; it never refuses,
+  and stays silent on a capped domain or a PII-flagged column. All of it reads the
+  repository and the cache only, so it is free on every connector.
+- **`transform plan` warns when an edit contradicts what the model declares.** On a
+  model that already exists and carries a declaration, the plan now names each
+  declared rule the edit breaks: a population filter whose predicate is removed or
+  changed, a changed `GROUP BY` or a dropped grain column, a dropped declared column
+  (naming what it was declared as), and a `SUM` of a column the upstream model
+  declares `semi_additive` or `non_additive`, or an `AVG` of a declared ratio. Each
+  warning names the rule, the changed SQL, the side that looks stale, and both fixes:
+  update the declaration in the same plan when the change is the job, or restore the
+  SQL. A change made to both sides that agrees is silent, a declaration-only change is
+  never blamed on the SQL, a reformat or alias rename is silent, and a predicate dex
+  cannot read (a macro, a function around the column) is reported as unchecked rather
+  than removed. The same findings are listed under
+  `data.declarations.<model>.contradictions`. A contradicted population cites the row
+  delta row attribution measured: free on DuckDB, and named without measuring on a
+  billed connector unless `--attribute-rows` is passed. Warnings only; nothing refuses
+  a plan or blocks apply.
+- Documented what to commit in `.dex/`: a README table saying, per file, what it
+  is, whether to commit it, and whether it can contain data values, including
+  the correction that a cache-pinned `snapshot.json` carries the cache's capped
+  value domains, plus a ready-to-paste `.gitignore` snippet and a link from the
+  maintain skill's snapshot guidance.
+
+### Fixed
+
+- Build evidence follows a metric to its measure and the transformation model
+  behind that measure, so a metric-only plan no longer reports `validated` when an
+  unrelated model was built. Plans whose edits cannot name a buildable node
+  (unresolved metrics, macros, project-config changes) report
+  `coverage_undetermined` instead. ([#573](https://github.com/exmergo/dex/pull/573))
+- **`DexEngine` returns typed host models from transform results.** `engine.build().evidence`, `engine.classify().classifications`, `engine.ground().grounding`, and `engine.export_plan().plan` return typed host models (`BuildEvidence`, `ArtifactClassification`, `Grounding`, `PortablePlan`) rather than plain dictionaries, with backwards-compatible subscripting (`item["key"]`), `.get()`, and `in` operator support, as well as typed accessor methods (`.evidence_model()`, `.classification_models()`, `.grounding_model()`, `.plan_model()`). ([#579](https://github.com/exmergo/dex/pull/579))
+- `skills/explore/references/commands.md` now shows one example envelope for
+  `explore semantic list`, `values`, and `query`, and for a multi-statement
+  `explore query`, so callers see `data.cells` / `data.results[].cells` without
+  trial and error. ([#741](https://github.com/exmergo/dex/pull/741))
+- ﻿**Fully NULL columns on small tables receive appropriately damped severity.** The `maintain grain` check now applies the `maintain.grain_min_rows` threshold to fully NULL columns that are not supplied by a failed join, reducing the severity to `low` for small tables while preserving high severity for fully NULL join-supplied columns. ([#798](https://github.com/exmergo/dex/pull/798))
+- **`transform build` ledgers executed seconds or reports `unknown_settlement: true` when dbt raises.**
+  When dbt raises (e.g. on subprocess timeout), statements executed before the failure are read from `run_results.json` and ledgered against the daily ceiling, and runs that wrote no artifact report unknown settlement rather than nothing. ([#808](https://github.com/exmergo/dex/pull/808))
+- **Redshift Serverless works with an `aws login` profile.** botocore's login
+  credential provider needs `botocore[crt]`, which the `[redshift]` extra did not
+  install, so every command on such a profile failed with advice to configure the
+  AWS credential chain. The extra now installs `boto3[crt]`. If the dependency is
+  ever missing again, dex refuses with `reason: prerequisite` and botocore's own
+  message naming what to install, instead of the credential-chain advice. ([#815](https://github.com/exmergo/dex/pull/815))
+- **`transform plan --scaffold` names the source's database on Snowflake,
+  Databricks and BigQuery.** The scaffolded source declared only a schema, so dbt
+  resolved it in the dev target's database, catalog or project, and a model over
+  a source that lives elsewhere (`SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER` with a
+  different `dev_database`) failed to build. New sources now carry `database:`,
+  as they already did on Trino. The source keeps its schema name, so existing
+  `source()` calls still resolve. DuckDB, Postgres and Redshift are unchanged:
+  one connection is one database there. ([#816](https://github.com/exmergo/dex/pull/816))
+
+### Security
+
+- **Errors and warnings are redacted before they are printed, and `--warm` no
+  longer copies uv's output into its envelope**
+  ([GHSA-jm75-qwf5-vg52](https://github.com/exmergo/dex/security/advisories/GHSA-jm75-qwf5-vg52)).
+  dex checked `data` and `connection` for credentials before printing an envelope,
+  but left `errors` and `warnings` to each call site. Those messages often quote
+  text dex did not write (a driver's exception, a dbt log line, an installer's
+  stderr), and the one redaction available only masked a `user:pass@` password in
+  a URL, and not even all of those. So a token or password in such a message could
+  reach the agent, and from there the user's screen or logs.
+
+  - Every error and warning now passes through redaction at the point the envelope
+    is printed. It masks `token=`, `password:`, `api_key=` and similar `key=value`
+    forms (including names like `DBT_SL_TOKEN=`), `Bearer` credentials,
+    `Authorization:` headers, and credentials in a query string.
+  - A URL password is masked up to the last `@` before the host and may contain
+    `/`, so `snowflake://bob:p@ss@acct` and `clickhouse://default:pw/x@h` no longer
+    leave part of the password behind.
+  - When the skill wrapper's `--warm` fails, it reports a fixed message telling you
+    to re-run with uv directly. It no longer includes uv's stderr or the engine
+    spec, either of which can hold an index URL, a proxy, or a local path.
+
+  Reported by [Sthenos Security](https://github.com/sthenos-security), found with
+  [Reachable](https://sthenosec.com/).
+- **Security hardening from an external review.** Alongside the three advisories
+  in this release, it tightens several guards that held for normal use but could be
+  made stricter. None needs action unless a change below refuses something you
+  rely on.
+
+  - **dbt no longer inherits credentials it never reads.** Every dbt run dex starts
+    (`build`, `parse`, `deps`, `compile`, and the mutation and equivalence shadow
+    runs) withholds `GITHUB_TOKEN`, `GH_TOKEN`, `GHRS_TOKEN`, `DBT_SL_TOKEN`, the
+    ClickHouse Cloud API key and secret, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+    `GEMINI_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`, since any macro in any installed
+    package can read the environment with `env_var()`. Warehouse credentials your
+    profile reads (`PGPASSWORD`, `SNOWFLAKE_PASSWORD`, `DATABRICKS_TOKEN`, ...) still
+    reach dbt. Fixed along the way: on a capped Postgres, ClickHouse or Trino run,
+    mutation testing (`transform test --mutate`) put back the `DBT_*` settings, such
+    as `DBT_INDIRECT_SELECTION`, that it had removed so its result would mean the
+    same on every machine.
+  - **A `profiles.yml` secret must be exactly one `{{ env_var('NAME') }}`
+    reference**, with an empty default at most (`{{ env_var('PGPASSWORD', '') }}`,
+    which `transform init` writes). A literal beside the reference, a non-empty
+    default, or a filter or operator after it is refused. Any key whose name
+    contains a credential (`db_password`, `admin_pass`, `jwt_token`) is checked,
+    while keys naming a location (`private_key_path`, `keyfile`, `token_uri`) are
+    not. Every profile `transform init` writes still passes; if a hand-written one
+    is now refused, move the literal into an environment variable.
+  - **`transform classify` reads more files as more than `declarative`.** A
+    `packages:` entry is `executable`, with a signal naming its source
+    (`dependency_hub` carries `package@version`, so a host can admit pinned hub
+    packages). Top-level `dispatch:` and `flags:` in `dbt_project.yml`, a profile
+    with `outputs:`, a `.dex/config.yml` key that changes what dex allows (`budget`,
+    `guards`, `query`, `pii_overrides`, `blob_overrides`, `auto_profile`,
+    `connector`, `semantic`), and an `env_var('NAME')` read are `authority_bearing`,
+    each with a signal naming the key or variable. An `env_var()` with a computed
+    name is `unknown`. A host that applies `declarative` edits without review now
+    holds these for a person. Each case ships as a `classification` conformance
+    vector.
+  - **Every connector extra requires urllib3 2.8.0 or later**, the first release
+    outside GHSA-8988-9cw3-xx77, GHSA-vxq7-64xx-v4gw and GHSA-gh4c-6fx4-qh6g. The
+    base install still pulls no urllib3.
+  - For contributors: the dogfood Postgres and ClickHouse containers listen on
+    127.0.0.1 only, and the Postgres superuser password is now random per container
+    and never printed. The integration CI installs uv and syncs before any cloud
+    credential is minted.
+
+  Reported by [Sthenos Security](https://github.com/sthenos-security), found with
+  [Reachable](https://sthenosec.com/).
+- **The hosted Semantic Layer token is only ever sent to dbt Cloud**
+  ([GHSA-28xv-9wpg-c42r](https://github.com/exmergo/dex/security/advisories/GHSA-28xv-9wpg-c42r)).
+  dex took the hosted Semantic Layer host from `semantic.host` in `.dex/config.yml`
+  and the token from your environment or `~/.dbt/dbt_cloud.yml`, then sent the
+  token to that host without checking it. A repository you cloned, a fork, or a
+  pull request an agent was reviewing could set `semantic.host` to a server it
+  controls and receive your dbt Cloud token the first time anyone ran
+  `explore semantic --api` in it.
+
+  - The host must now be a bare hostname that is, or ends in `.` plus,
+    `getdbt.com` or `dbt.com`. Anything else is refused naming the host, before
+    any token is read and with no request sent. That applies to `semantic.host`,
+    `DBT_SL_HOST`, and a host-supplied `SemanticSource` alike, and the transport
+    checks the URL again before every request.
+  - A private-link or single-tenant host outside those domains is admitted by
+    exact name only: set `DEX_SL_ALLOWED_HOSTS` in your own environment, or pass
+    `SemanticSource(allowed_hosts=...)` from a library. No `.dex/config.yml` key
+    can widen the list.
+  - `~/.dbt/dbt_cloud.yml` is read for the active project's `token-value` only.
+    It used to fall back to the first project holding a token, which could belong
+    to a dbt Cloud account you never pointed dex at. If your active project has no
+    token there, export `DBT_SL_TOKEN` or add one to that project.
+
+  If you used the hosted backend in a repository you did not write, check its
+  `.dex/config.yml` for a `semantic.host` outside dbt Cloud, and rotate the token
+  if you find one.
+
+  Reported by [Sthenos Security](https://github.com/sthenos-security), found with
+  [Reachable](https://sthenosec.com/).
+- **`explore query` refuses functions that read files, URLs or other databases,
+  and resolves every subquery against the cache**
+  ([GHSA-f3jf-cv9h-7c3g](https://github.com/exmergo/dex/security/advisories/GHSA-f3jf-cv9h-7c3g)).
+  The query firewall checked that a statement was one read-only SELECT, but not
+  what it called, and it resolved only the tables a query projected from. So a
+  prompt-injected or careless agent could, through the guarded path, read a local
+  file (`SELECT pg_read_file(...)`, `WHERE EXISTS (SELECT 1 FROM read_csv(...))`),
+  make the warehouse send query-derived values to a URL (ClickHouse `url`,
+  `remote`, `s3`), or filter on a table that was never profiled, so its PII flags
+  were never checked.
+
+  - A call to a function that reads a server file, a URL or object store, another
+    database, or SQL held in a string is now refused by name wherever it sits,
+    with reason `unapproved_function`. That covers the Postgres file and
+    large-object functions and `dblink`; DuckDB `read_*`, `glob`, `getenv`,
+    `query` and the scanner extensions; the ClickHouse table functions over
+    files, URLs, object stores and remote servers; BigQuery `EXTERNAL_QUERY`;
+    Databricks `read_files` and `http_request`; and Snowflake `INFER_SCHEMA`. It
+    applies to every statement dex itself sends as well as to `explore query`. No
+    setting lifts it, `guards.approved_functions` included.
+  - A subquery under WHERE, EXISTS, IN, HAVING, QUALIFY, ORDER BY or a join's ON
+    is resolved against the exploration cache like the main query. A table that
+    is not cached and profiled there is refused, or profiled on demand where auto
+    profiling is on, and it counts toward the relation check and the cost
+    estimate.
+  - dbt models and snapshots that read files (a dbt-duckdb model over
+    `read_parquet`, say) are not refused when you author them. dbt runs them under
+    your own profile, so `transform plan` warns, naming the function, instead.
+    Guarded builds are unchanged.
+
+  Reported by [Sthenos Security](https://github.com/sthenos-security), found with
+  [Reachable](https://sthenosec.com/).
+
+
 ## [1.16.0] - 2026-10-24
 
 ### Added

@@ -122,7 +122,19 @@ sql = ["sqlglot>=28.6,<31"]
 # The dbt adapter floors in this and every connector extra below are the lines
 # dbt Core 1.12 ships with: 1.12 is the first dbt that imports on Python 3.14,
 # and an older adapter would pull a dbt-core that cannot (#795).
-duckdb = ["duckdb>=1.5,<3", "dbt-duckdb>=1.11", "exmergo-dex-core[sql]"]
+#
+# Every connector extra also floors urllib3 at 2.8.0, the first release outside
+# GHSA-8988-9cw3-xx77, GHSA-vxq7-64xx-v4gw and GHSA-gh4c-6fx4-qh6g. It is not a
+# base dependency (the base install stays pydantic and pyyaml); it arrives
+# through dbt-core's requests and each warehouse client, so the floor sits where
+# it arrives and protects an install that resolves its own versions, which the
+# lockfile cannot.
+duckdb = [
+  "duckdb>=1.5,<3",
+  "dbt-duckdb>=1.11",
+  "urllib3>=2.8.0",
+  "exmergo-dex-core[sql]",
+]
 # 3.17 is the floor for workload-identity auth (the keyless CI path). Like
 # [duckdb], the extra carries the dbt adapter so transform can build against a
 # Snowflake dev target with one install.
@@ -131,11 +143,17 @@ duckdb = ["duckdb>=1.5,<3", "dbt-duckdb>=1.11", "exmergo-dex-core[sql]"]
 snowflake = [
   "snowflake-connector-python>=3.17,<5",
   "dbt-snowflake>=1.12",
+  "urllib3>=2.8.0",
   "exmergo-dex-core[sql]",
 ]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
 # transform can build against a BigQuery dev target with one install.
-bigquery = ["google-cloud-bigquery>=3", "dbt-bigquery>=1.12", "exmergo-dex-core[sql]"]
+bigquery = [
+  "google-cloud-bigquery>=3",
+  "dbt-bigquery>=1.12",
+  "urllib3>=2.8.0",
+  "exmergo-dex-core[sql]",
+]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
 # transform can build against a Databricks dev target with one install. The SDK
 # rides alongside the SQL driver: free Unity Catalog metadata and warehouse facts
@@ -144,11 +162,17 @@ databricks = [
   "databricks-sql-connector>=3",
   "databricks-sdk>=0.30",
   "dbt-databricks>=1.12",
+  "urllib3>=2.8.0",
   "exmergo-dex-core[sql]",
 ]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
 # transform can build against a Postgres dev schema with one install.
-postgres = ["psycopg[binary]>=3", "dbt-postgres>=1.11", "exmergo-dex-core[sql]"]
+postgres = [
+  "psycopg[binary]>=3",
+  "dbt-postgres>=1.11",
+  "urllib3>=2.8.0",
+  "exmergo-dex-core[sql]",
+]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
 # transform can build against a Redshift dev schema with one install. boto3
 # rides alongside the driver: Serverless workgroup facts (endpoint, base
@@ -159,6 +183,7 @@ redshift = [
   "redshift-connector>=2.1",
   "boto3[crt]>=1.34",
   "dbt-redshift>=1.11",
+  "urllib3>=2.8.0",
   "exmergo-dex-core[sql]",
 ]
 # Like [duckdb], the extra carries the dbt adapter (which pulls dbt-core) so
@@ -168,6 +193,7 @@ redshift = [
 clickhouse = [
   "clickhouse-connect>=0.8",
   "dbt-clickhouse>=1.10.3",
+  "urllib3>=2.8.0",
   "exmergo-dex-core[sql]",
 ]
 # Like [clickhouse], the extra carries the dbt adapter so transform can build
@@ -176,6 +202,7 @@ clickhouse = [
 trino = [
   "trino>=0.336,<1",
   "dbt-trino>=1.10",
+  "urllib3>=2.8.0",
   "exmergo-dex-core[sql]",
 ]
 # The local semantic-layer query backend (`explore semantic query --local`):
@@ -335,7 +362,7 @@ source = "vcs"
 [tool.hatch.version.raw-options]
 # This package lives in a subdirectory; the repository .git is two levels up.
 root = "../.."
-fallback_version = "1.16.0"
+fallback_version = "1.16.1"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

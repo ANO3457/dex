@@ -398,6 +398,52 @@ _ISOLATED_ENV_SCRUBBED = (
     "DBT_FAIL_FAST",
 )
 
+# Credentials in the agent's environment that dbt never reads, withheld from
+# every dbt child. dbt runs project and package code, and Jinja's `env_var()`
+# reads any variable the child holds, so whatever is left here is readable by
+# every macro in every installed package. A deny list rather than an allowlist,
+# because dex-rendered profiles read warehouse credentials (`PGPASSWORD`,
+# `SNOWFLAKE_PASSWORD`, `DATABRICKS_TOKEN`, ...) from this same environment, and
+# a hand-written profile may read any name it likes.
+_CHILD_ENV_WITHHELD = (
+    # ClickHouse Cloud control-plane keys: dex's usage preflight reads them, dbt
+    # connects with the SQL user's password.
+    "CLICKHOUSE_CLOUD_API_KEY",
+    "CLICKHOUSE_CLOUD_API_SECRET",
+    "DEX_TEST_CH_CLOUD_API_KEY",
+    "DEX_TEST_CH_CLOUD_API_SECRET",
+    # The hosted Semantic Layer token belongs to dex's own GraphQL client.
+    "DBT_SL_TOKEN",
+    # Source-forge and agent-host tokens.
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GHRS_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+)
+
+
+def _child_environ(*, isolated: bool = False) -> dict[str, str]:
+    """The environment every dbt child starts from.
+
+    The parent's environment minus the credentials dbt never reads, with usage
+    tracking off. ``isolated`` also drops the ``DBT_*`` settings that change
+    what a run means, for the shadow runs whose verdict must not depend on the
+    caller's machine; an ordinary build keeps them, since a user's own
+    ``DBT_TARGET_PATH`` is theirs to set.
+    """
+
+    withheld = set(_CHILD_ENV_WITHHELD)
+    if isolated:
+        withheld.update(_ISOLATED_ENV_SCRUBBED)
+    env = {key: value for key, value in os.environ.items() if key not in withheld}
+    # dbt writes a `.user.yml` into the profiles directory when usage tracking
+    # is on, and the profiles directory here is often the real project.
+    env["DO_NOT_TRACK"] = "1"
+    return env
+
 
 class ShadowRun:
     """A copied project that dbt can be run against many times, never the real one.
@@ -657,15 +703,10 @@ class ShadowRun:
         return run(argv)
 
     def _env(self) -> dict[str, str]:
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in _ISOLATED_ENV_SCRUBBED
-        }
-        # dbt writes a `.user.yml` into the profiles directory when usage
-        # tracking is on, and the profiles directory here is the real project.
-        env["DO_NOT_TRACK"] = "1"
-        env.update(_build_env(self._connector, self._paradigm, self._ceiling) or {})
+        # Only the cap knobs are merged on top: merging a whole capped
+        # environment would put back every `DBT_*` setting just scrubbed.
+        env = _child_environ(isolated=True)
+        env.update(_cap_overrides(self._connector, self._paradigm, self._ceiling))
         return env
 
     def _require_shadow(self) -> Path:
@@ -1330,10 +1371,10 @@ _CAP_ENV_BUILDERS: dict[str, Callable[[int], dict[str, str]]] = {
 }
 
 
-def _build_env(
+def _cap_overrides(
     connector: str | None, paradigm: Paradigm, ceiling: float | None
-) -> dict[str, str] | None:
-    """Environment overrides for the dbt subprocess, or ``None`` to inherit.
+) -> dict[str, str]:
+    """The server-side cap variables alone, empty where no cap applies.
 
     On db-load gating the ceiling becomes a per-statement server-side cap: the
     ``maximum_bytes_billed`` analogue, so a build statement cannot load the
@@ -1341,7 +1382,7 @@ def _build_env(
     """
 
     if ceiling is None:
-        return None
+        return {}
     # ClickHouse uses the same two server settings under both deployments; only
     # the meaning of the seconds changes. Other compute-time connectors own
     # their caps elsewhere, and other db-load connectors remain opt-in below.
@@ -1349,11 +1390,24 @@ def _build_env(
         connector == "clickhouse" and paradigm is Paradigm.COMPUTE_TIME
     )
     if not supported:
-        return None
+        return {}
     builder = _CAP_ENV_BUILDERS.get(connector or "")
     if builder is None:
+        return {}
+    return builder(max(int(ceiling), 1))
+
+
+def _build_env(
+    connector: str | None, paradigm: Paradigm, ceiling: float | None
+) -> dict[str, str] | None:
+    """The whole environment for a capped dbt subprocess, or ``None`` where no
+    cap applies, which leaves :func:`_default_runner` to use
+    :func:`_child_environ`."""
+
+    overrides = _cap_overrides(connector, paradigm, ceiling)
+    if not overrides:
         return None
-    return {**os.environ, **builder(max(int(ceiling), 1))}
+    return {**_child_environ(), **overrides}
 
 
 def _default_runner(
@@ -1369,7 +1423,9 @@ def _default_runner(
             timeout=timeout,
             check=False,
             cwd=str(cwd),
-            env=env,
+            # Never `None`: inheriting would hand every macro the credentials
+            # `_child_environ` withholds.
+            env=env if env is not None else _child_environ(),
         )
 
     return run

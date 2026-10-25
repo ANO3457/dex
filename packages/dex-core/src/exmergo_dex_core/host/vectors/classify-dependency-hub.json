@@ -1,0 +1,25 @@
+{
+  "name": "classify-dependency-hub",
+  "contract": "classification",
+  "description": "A hub package pinned to an exact version is still a dependency dbt deps fetches and runs. The signal names the package and its pin so a host can choose to admit it.",
+  "payload": {
+    "path": "packages.yml",
+    "content": "packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.3.0\n"
+  },
+  "expect": {
+    "artifact_class": "executable",
+    "result": {
+      "path": "packages.yml",
+      "artifact_class": "executable",
+      "basis": "content",
+      "parsed": true,
+      "signals": [
+        {
+          "signal": "dependency_hub",
+          "where": "packages[0].package",
+          "detail": "dbt-labs/dbt_utils@1.3.0"
+        }
+      ]
+    }
+  }
+}

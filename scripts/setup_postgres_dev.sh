@@ -35,9 +35,12 @@ HARDENING=(
     --pids-limit 256
     --memory 1g
 )
-SUPERPASS=postgres
 SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 SEED="$SCRIPTS/postgres_seed.sql"
+# The connection exports are written here rather than printed, so no password
+# lands in a terminal's scrollback or a CI log.
+STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dex-dogfood"
+EXPORTS="$STATE_DIR/postgres.env"
 
 if [[ "${1:-}" == "--down" ]]; then
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
@@ -51,16 +54,28 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 if ! docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    # The image requires a superuser password, and nothing here needs it:
+    # seeding runs through `docker exec`, over the container's local socket. So
+    # it is random per container and handed over in a file read once and
+    # removed, never as `-e` on a command line other processes can read. The
+    # port is published on loopback only: a superuser can run
+    # `COPY ... FROM PROGRAM`, and a shared network must not reach it.
+    envfile="$(mktemp)"
+    trap 'rm -f "$envfile"' EXIT
+    chmod 600 "$envfile"
+    printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 16)" >"$envfile"
     docker run -d --name "$CONTAINER" \
         "${HARDENING[@]}" \
-        -e POSTGRES_PASSWORD="$SUPERPASS" \
-        -p "$PORT":5432 \
+        --env-file "$envfile" \
+        -p "127.0.0.1:$PORT:5432" \
         "$IMAGE" >/dev/null
-    echo "started $IMAGE as $CONTAINER on port $PORT"
+    rm -f "$envfile"
+    echo "started $IMAGE as $CONTAINER on 127.0.0.1:$PORT"
 fi
 # Checked before a stopped container is started again, so one this script
 # created before it hardened them is refused rather than reused.
 "$SCRIPTS/check_container_hardening.sh" "$CONTAINER" "$DIGEST"
+"$SCRIPTS/check_loopback_ports.sh" "$CONTAINER"
 if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]]; then
     docker start "$CONTAINER" >/dev/null
     echo "restarted existing container $CONTAINER"
@@ -76,9 +91,17 @@ docker exec "$CONTAINER" psql -U postgres -q \
 docker exec -i "$CONTAINER" psql -U postgres -q -d dex_dogfood -v ON_ERROR_STOP=1 \
     <"$SEED"
 
+install -d -m 700 "$STATE_DIR"
+(
+    umask 077
+    cat >"$EXPORTS" <<EXPORTS
+# dex reads as the read-only role:
+export DATABASE_URL=postgresql://dex_ro:dex_ro@127.0.0.1:$PORT/dex_dogfood
+# dbt dev builds (transform build) authenticate as dbt_dev; profiles.yml reads
+# it via env_var:
+export PGPASSWORD=dbt_dev
+EXPORTS
+)
+
 echo "seeded dex_dogfood from scripts/postgres_seed.sql"
-echo
-echo "connect dex as the read-only role:"
-echo "  export DATABASE_URL=postgresql://dex_ro:dex_ro@localhost:$PORT/dex_dogfood"
-echo "dbt dev builds (transform build) authenticate as dbt_dev:"
-echo "  export PGPASSWORD=dbt_dev   # profiles.yml reads it via env_var"
+echo "connection exports: source $EXPORTS"

@@ -9,15 +9,28 @@ from typing import Any
 
 from ... import envelope as env
 from ...config import QueryLimits
+from ...semantic_hosts import SemanticHostRefusedError, check_semantic_layer_host
 from .backend import SemanticBackendError
 from .policy import cap_columnar
 
 
-def post_graphql(*, url: str, token: str, timeout: float, query: str) -> dict[str, Any]:
-    """Execute one GraphQL document and return its data block."""
+def post_graphql(
+    *,
+    url: str,
+    token: str,
+    timeout: float,
+    query: str,
+    allowed_hosts: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Execute one GraphQL document and return its data block.
+
+    The URL is checked before the Authorization header exists, whoever called:
+    the token goes to a dbt Cloud host's GraphQL endpoint over HTTPS or nowhere.
+    """
 
     import httpx
 
+    _check_graphql_url(httpx.URL(url), allowed_hosts)
     try:
         with httpx.Client(timeout=timeout) as client:
             response = client.post(
@@ -52,6 +65,25 @@ def post_graphql(*, url: str, token: str, timeout: float, query: str) -> dict[st
         joined = "; ".join(str(item.get("message", item)) for item in body["errors"])
         raise SemanticBackendError(f"semantic layer error: {env.redact(joined)}")
     return body.get("data") or {}
+
+
+def _check_graphql_url(url: Any, allowed_hosts: tuple[str, ...]) -> None:
+    if (
+        url.scheme != "https"
+        or url.userinfo
+        or url.port is not None
+        or url.path != "/api/graphql"
+        or url.query
+        or url.fragment
+    ):
+        raise SemanticBackendError(
+            "refusing to send the dbt Cloud Semantic Layer token, because the "
+            "request URL is not https://<dbt Cloud host>/api/graphql"
+        )
+    try:
+        check_semantic_layer_host(url.host, extra_hosts=allowed_hosts)
+    except SemanticHostRefusedError as exc:
+        raise SemanticBackendError(str(exc)) from exc
 
 
 def await_result(

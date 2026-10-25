@@ -1,0 +1,28 @@
+{
+  "name": "classify-dispatch-flags",
+  "contract": "classification",
+  "description": "A dbt_project.yml with dispatch (which reroutes macro resolution to another package) and flags (which change dbt behaviour project-wide) confers authority rather than declaring.",
+  "payload": {
+    "path": "dbt_project.yml",
+    "content": "name: things\nversion: '1.0'\nprofile: things\ndispatch:\n  - macro_namespace: dbt_utils\n    search_order: [things, dbt_utils]\nflags:\n  require_explicit_package_overrides_for_builtin_materializations: false\n"
+  },
+  "expect": {
+    "artifact_class": "authority_bearing",
+    "result": {
+      "path": "dbt_project.yml",
+      "artifact_class": "authority_bearing",
+      "basis": "content",
+      "parsed": true,
+      "signals": [
+        {
+          "signal": "dispatch",
+          "where": "dispatch"
+        },
+        {
+          "signal": "flags",
+          "where": "flags"
+        }
+      ]
+    }
+  }
+}

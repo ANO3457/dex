@@ -263,9 +263,9 @@ def _looks_like_rows(value: Any) -> bool:
 def sanitize(envelope: Envelope) -> Envelope:
     """Assert the envelope is safe to print. Returns it unchanged on success.
 
-    Raises :class:`SanitizationError` if ``data`` carries a secret-like key or a
-    raw-row payload. Only ``data`` is scanned: ``errors``/``warnings`` are message
-    strings that the caller is responsible for keeping clean.
+    Raises :class:`SanitizationError` if ``data`` or ``connection`` carries a
+    secret-like key or a raw-row payload. ``errors``/``warnings`` are free text
+    with no keys to scan, so :func:`emit` redacts them instead.
     """
 
     _scan(envelope.data)
@@ -281,9 +281,22 @@ def sanitize(envelope: Envelope) -> Envelope:
 
 
 def emit(envelope: Envelope) -> None:
-    """Sanitize, then print exactly one JSON envelope to stdout."""
+    """Sanitize, redact the messages, then print exactly one JSON envelope.
+
+    Every ``errors`` and ``warnings`` entry passes through :func:`redact` here,
+    at the one place stdout is written, rather than at each call site: a message
+    often carries text dex did not write (a driver's exception, dbt's log line,
+    an installer's stderr), and a call site that forgets would print whatever
+    credential that text held.
+    """
 
     sanitize(envelope)
+    envelope = envelope.model_copy(
+        update={
+            "errors": [redact(message) for message in envelope.errors],
+            "warnings": [redact(message) for message in envelope.warnings],
+        }
+    )
     sys.stdout.write(json.dumps(envelope.model_dump(mode="json")) + "\n")
 
 
@@ -531,10 +544,44 @@ def needs_confirmation(
     )
 
 
-# Re-exported for callers that build messages and want to avoid leaking secrets
-# into error/warning strings (e.g. a DSN that embeds a password).
-def redact(text: str) -> str:
-    """Best-effort redaction of secret-looking tokens in a free-text message."""
+# The password in a URL's userinfo runs to the *last* `@` before the host, and
+# may itself hold `@` or `/` (`snowflake://bob:p@ss@acct`). Stopping at the first
+# `@`, or refusing `/`, leaves the tail of the password in the message.
+_URL_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.\-]*://[^\s/@:\[\]]*:)(\S*)(@)", re.I)
+# `Authorization: <anything>` to the end of the line, then a bare bearer
+# credential wherever it sits.
+_AUTHORIZATION = re.compile(r"(\bauthorization\s*:\s*)[^\r\n]+", re.I)
+_BEARER = re.compile(r"(\bbearer\s+)[A-Za-z0-9._~+/=\-]+", re.I)
+# A secret-named key with a value: `token=abc`, `password: abc`, `DBT_SL_TOKEN=abc`.
+# The name may carry a prefix or a `_suffix` but not a plural (`tokens: 3` is a
+# count), and a value that opens with a backtick is a name dex is pointing at
+# (``token: `DBT_SL_TOKEN` ``), not the secret, so it is left as written.
+_KEY_VALUE = re.compile(
+    r"(?<![a-z0-9])((?:[a-z0-9]+_)*(?:api[_\-]?key|access[_\-]?key|secret|token|"
+    r"password|passwd|pwd)(?:_[a-z0-9]+)*)(?![a-z0-9])(\s*[:=]\s*)"
+    r"(?!\*\*\*|`)(\"[^\"]*\"|'[^']*'|[^\s,;&'\"`)]+)",
+    re.I,
+)
+# A credential in a query string: `?token=abc&...`, `&sig=...`.
+_QUERY_SECRET = re.compile(
+    r"([?&](?:token|access_token|key|api_key|sig|signature|password)=)[^&\s#]+",
+    re.I,
+)
 
-    text = re.sub(r"(://[^:/\s]+:)([^@/\s]+)(@)", r"\1***\3", text)  # user:pass@host
+
+# Re-exported for callers that build messages and want to avoid leaking secrets
+# into error/warning strings (e.g. a DSN that embeds a password). `emit` also
+# runs it over every error and warning, so a missed call site prints nothing.
+def redact(text: str) -> str:
+    """Best-effort redaction of secret-looking tokens in a free-text message.
+
+    Idempotent: a value already reading ``***`` is left alone, so a message
+    redacted at its call site and again in :func:`emit` reads the same.
+    """
+
+    text = _URL_USERINFO.sub(r"\1***\3", text)
+    text = _AUTHORIZATION.sub(r"\1***", text)
+    text = _BEARER.sub(r"\1***", text)
+    text = _QUERY_SECRET.sub(r"\1***", text)
+    text = _KEY_VALUE.sub(r"\1\2***", text)
     return text
