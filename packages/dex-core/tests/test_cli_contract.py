@@ -720,7 +720,7 @@ _SUBCOMMAND_PARITY: dict[tuple[str, str | None], dict] = {
     ("transform", "macro"): {"method": "macro", "args": {"argument": _TRANSLATED}},
     ("transform", "references"): {
         "method": "references",
-        "args": {"names": "names", "kind": "kind", "full": "full"},
+        "args": {"names": "names", "kind": "kind", "full": "full", "usage": "usage"},
     },
     ("transform", "rename"): {
         "method": "rename",

@@ -27,16 +27,19 @@ not drafted as non-null.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from ..cache import ColumnProfile, Dataset, DexCache, match_identifier
 from ..guards.pii_meta import entry_meta
 from .declarations import DEX_META_KEY, model_sql_path
+
+if TYPE_CHECKING:
+    from ..references import ReferenceIndex
 
 #: The model-level intent fields every declaration is expected to state, in the
 #: order a reader would ask about them.
@@ -68,6 +71,26 @@ class _Origin:
 
 
 @dataclass
+class Usage:
+    """One thing a model does with one upstream column: a filter conjunct, a
+    ``CASE`` condition, or an aggregation over it.
+
+    ``expression`` is the fragment as sqlglot renders it, with every column the
+    lineage resolved rewritten to its bare upstream name, so ``o.status <> 'x'``
+    in one model and ``status != 'x'`` in another read as the same decision.
+    ``literals`` is set only for a bare-column comparison (``=``, ``<>``, ``IN``,
+    ``NOT IN``) against literals, the one shape whose literals can be checked
+    against a value domain; ``lower(status) = 'x'`` compares something else.
+    """
+
+    relation: str
+    column: str
+    clause: str
+    expression: str
+    literals: list[str | Decimal] | None = None
+
+
+@dataclass
 class _Reading:
     """Everything one model's SQL says, structurally."""
 
@@ -79,6 +102,12 @@ class _Reading:
     #: Columns the SQL filters or branches on, resolved to their upstream origin:
     #: (relation, column) -> the clauses that use it.
     used: dict[tuple[str, str], set[str]] = field(default_factory=dict)
+    #: Each filter conjunct, ``CASE`` condition and aggregation, one fragment
+    #: at a time, for precedent and the literal check.
+    usages: list[Usage] = field(default_factory=list)
+    #: Column names a usage fragment reads whose lineage dex could not follow,
+    #: so a reader of one is not mistaken for a model that ignores it.
+    untraced: set[str] = field(default_factory=set)
     #: Bare column names the SQL filters on, for the population hint.
     filtered: list[str] = field(default_factory=list)
     relations: list[str] = field(default_factory=list)
@@ -98,25 +127,37 @@ def draft(
     domain_cap: int = 25,
     cumulative: Mapping[str, set[str]] | None = None,
     cache_note: str | None = None,
+    index: Callable[[], ReferenceIndex] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Each model's ``drafted``/``declared``/``missing``, and the warnings.
 
     ``files`` is the project as it reads once the plan lands. ``cache`` has had
     any ``pii_overrides`` applied already. ``cumulative`` maps a cache identifier
     to the columns the cumulative detector flagged there. ``cache_note`` says
-    why the cache is absent, where it is.
+    why the cache is absent, where it is. ``index`` builds the reference index
+    of that same project state, called at most once and only when a model uses
+    a column precedent can be read for; without it no precedent is drafted.
     """
 
     model_paths = list(model_paths)
     cumulative = cumulative or {}
     out: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
+    built: list[ReferenceIndex] = []
+
+    def reference_index() -> ReferenceIndex | None:
+        if index is None:
+            return None
+        if not built:
+            built.append(index())
+        return built[0]
+
     for model in sorted(set(models)):
         sql_path = model_sql_path(files, model_paths, model)
         if sql_path is None:
             continue
         declared = read_declared(files, model)
-        reading = _read(files[sql_path], cache, dialect=dialect, vars=vars)
+        reading = read(files[sql_path], cache, dialect=dialect, vars=vars)
         drafted = _drafted(
             reading,
             cache,
@@ -126,8 +167,15 @@ def draft(
             cumulative=cumulative,
             cache_note=cache_note,
         )
+        if reading.usages and (found := reference_index()) is not None:
+            precedent = _precedent(
+                model, reading, files, model_paths, cache, found, dialect, vars
+            )
+            if precedent:
+                drafted["precedent"] = precedent
         missing = _missing(declared, reading)
         model_warnings = _warnings(model, declared, drafted, reading, missing)
+        model_warnings.extend(_literal_warnings(model, reading, cache))
         out[model] = {
             "drafted": _untoken(drafted, reading.tokens),
             "declared": declared,
@@ -203,7 +251,7 @@ def _declared_from(entry: dict[str, Any]) -> dict[str, Any]:
 # --- reading the SQL --------------------------------------------------------------
 
 
-def _read(
+def read(
     sql: str,
     cache: DexCache | None,
     *,
@@ -686,10 +734,18 @@ class _Lineage:
                 self._use(select, column, clause)
                 if column.name.lower() not in self.reading.filtered:
                     self.reading.filtered.append(column.name.lower())
+            for conjunct in _conjuncts(node.this):
+                self._fragment(select, conjunct, clause)
         for case in select.find_all(exp.Case):
             for branch in case.args.get("ifs") or []:
                 for column in branch.this.find_all(exp.Column):
                     self._use(select, column, "case")
+                if case.find_ancestor(exp.Select) is select:
+                    self._fragment(select, branch.this, "case")
+        for aggregate in select.find_all(exp.AggFunc):
+            if aggregate.find_ancestor(exp.Select) is not select:
+                continue
+            self._fragment(select, aggregate, "aggregation")
 
     def _use(self, select: Any, column: Any, clause: str) -> None:
         if column.find_ancestor(type(select)) is not select:
@@ -700,6 +756,123 @@ class _Lineage:
         self.reading.used.setdefault((origin.relation, origin.column), set()).add(
             clause
         )
+
+    def _fragment(self, select: Any, node: Any, clause: str) -> None:
+        """Record ``node`` as one usage of each upstream column it resolves to."""
+
+        from sqlglot import expressions as exp
+
+        columns = list(node.find_all(exp.Column))
+        origins: list[_Origin | None] = []
+        for column in columns:
+            in_scope = column.find_ancestor(exp.Select) is select
+            star = isinstance(column.this, exp.Star)
+            origin = self.origin(select, column) if in_scope and not star else None
+            if origin is None and in_scope and not star:
+                self.reading.untraced.add(column.name.lower())
+            origins.append(origin)
+        if not any(origins):
+            return
+
+        # The copy walks in the same order as the original, which is how each
+        # copied column finds its origin; the model's own tree is not touched.
+        rendered = node.copy()
+        copies = list(rendered.find_all(exp.Column))
+        for copied, origin in zip(copies, origins, strict=True):
+            if isinstance(copied.this, exp.Star):
+                continue
+            name = origin.column if origin is not None else copied.name
+            replacement = exp.column(name.lower())
+            if copied is rendered:
+                rendered = replacement
+            else:
+                copied.replace(replacement)
+        expression = self.shape.text(rendered)
+
+        literals = _compared_literals(node)
+        seen: set[tuple[str, str]] = set()
+        for column, origin in zip(columns, origins, strict=True):
+            if origin is None:
+                continue
+            key = (origin.relation, origin.column.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            self.reading.usages.append(
+                Usage(
+                    relation=origin.relation,
+                    column=origin.column,
+                    clause=clause,
+                    expression=expression,
+                    literals=(
+                        literals[1] if literals and literals[0] is column else None
+                    ),
+                )
+            )
+
+
+def _conjuncts(node: Any) -> list[Any]:
+    """The top-level ``AND`` terms of a predicate, parentheses unwrapped."""
+
+    from sqlglot import expressions as exp
+
+    stack, out = [node], []
+    while stack:
+        current = stack.pop()
+        if isinstance(current, exp.And):
+            stack.extend((current.expression, current.this))
+        elif isinstance(current, exp.Paren):
+            stack.append(current.this)
+        else:
+            out.append(current)
+    return out
+
+
+def _compared_literals(node: Any) -> tuple[Any, list[str | Decimal]] | None:
+    """``(column, literals)`` when ``node`` compares a bare column to literals.
+
+    ``=``, ``<>``, ``IN`` and their negations only. A column wrapped in a
+    function, a comparison against another column or a subquery, and a NULL
+    test are not a value the domain could contain, so they return None.
+    """
+
+    from sqlglot import expressions as exp
+
+    while isinstance(node, (exp.Not, exp.Paren)):
+        node = node.this
+    if isinstance(node, (exp.EQ, exp.NEQ)):
+        sides = (node.this, node.expression)
+        for column, other in (sides, sides[::-1]):
+            if isinstance(column, exp.Column) and not isinstance(column.this, exp.Star):
+                value = _literal(other)
+                return (column, [value]) if value is not None else None
+        return None
+    if isinstance(node, exp.In) and isinstance(node.this, exp.Column):
+        if node.args.get("query") is not None or not node.expressions:
+            return None
+        values = [_literal(item) for item in node.expressions]
+        if any(value is None for value in values):
+            return None
+        return node.this, values  # type: ignore[return-value]
+    return None
+
+
+def _literal(node: Any) -> str | Decimal | None:
+    from decimal import InvalidOperation
+
+    from sqlglot import expressions as exp
+
+    if isinstance(node, exp.Neg) and isinstance(node.this, exp.Literal):
+        value = _literal(node.this)
+        return -value if isinstance(value, Decimal) else None
+    if not isinstance(node, exp.Literal):
+        return None
+    if node.is_string:
+        return str(node.this)
+    try:
+        return Decimal(str(node.this))
+    except InvalidOperation:
+        return None
 
 
 # --- cache reads --------------------------------------------------------------------
@@ -998,6 +1171,130 @@ def _domain(
     return entry
 
 
+# --- precedent and literals ---------------------------------------------------------
+
+
+def _precedent(
+    model: str,
+    reading: _Reading,
+    files: Mapping[str, str],
+    model_paths: list[str],
+    cache: DexCache | None,
+    index: ReferenceIndex,
+    dialect: str,
+    vars: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """What the project's other models do with each column this one uses."""
+
+    from .precedent import usage_of
+
+    own: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for usage in reading.usages:
+        entry = {"usage": usage.clause, "expression": usage.expression}
+        uses = own.setdefault((usage.relation, usage.column.lower()), [])
+        if entry not in uses:
+            uses.append(entry)
+    found = usage_of(
+        [(relation, column) for relation, column in own],
+        files,
+        model_paths,
+        cache,
+        dialect=dialect,
+        vars=vars,
+        index=index,
+        exclude=model,
+    )
+    out = []
+    for key in sorted(own):
+        answer = found[key]
+        out.append({"column": answer.pop("column"), "this_model": own[key], **answer})
+    return out
+
+
+def _literal_warnings(
+    model: str, reading: _Reading, cache: DexCache | None
+) -> list[str]:
+    """A compared literal the column's complete, exact domain never holds.
+
+    Silent unless the domain can prove absence: profiled, no PII flag at any
+    confidence (the rule the drafted domain already follows, and stricter than
+    the firewall's threshold), and nothing elided. The profiler builds a domain
+    from an exact distinct count over the whole relation, so ``elided == 0`` is
+    the complete domain as of that profile. A warning, never a refusal: a filter
+    on a value that does not exist yet is sometimes the intent.
+    """
+
+    out: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for usage in reading.usages:
+        if not usage.literals:
+            continue
+        profile = _column(dataset_for(cache, usage.relation), usage.column)
+        if profile is None or profile.pii is not None:
+            continue
+        domain = profile.value_domain
+        if domain is None or domain.elided or not domain.values:
+            continue
+        values = [item.value for item in domain.values]
+        source = f"{usage.relation}.{usage.column}"
+        for literal in usage.literals:
+            key = (usage.relation, usage.column.lower(), repr(literal))
+            if key in seen:
+                continue
+            seen.add(key)
+            present = _held(literal, values)
+            if present is None or present:
+                continue
+            shown = f"'{literal}'" if isinstance(literal, str) else str(literal)
+            message = (
+                f"'{model}' compares {source} to {shown}, which none of its "
+                f"{len(values)} profiled values is"
+            )
+            close = _closest(literal, values)
+            if close:
+                message += (
+                    "; "
+                    + ", ".join(f"'{value}'" for value in close)
+                    + " matches it ignoring case and whitespace"
+                )
+            else:
+                message += (
+                    "; check the literal, or keep it if the value is expected to "
+                    "appear later"
+                )
+            out.append(message)
+    return out
+
+
+def _held(literal: str | Decimal, values: list[Any]) -> bool | None:
+    """Whether ``values`` holds ``literal``, or None when the types differ and
+    the comparison would prove nothing (a string literal against a number
+    column is cast by the warehouse, not by dex)."""
+
+    if isinstance(literal, str):
+        strings = [v for v in values if isinstance(v, str)]
+        if len(strings) != len(values):
+            return None
+        return literal in strings
+    numbers = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+            return None
+        numbers.append(Decimal(str(value)))
+    return literal in numbers
+
+
+def _closest(literal: str | Decimal, values: list[Any], limit: int = 3) -> list[str]:
+    if not isinstance(literal, str):
+        return []
+
+    def fold(text: str) -> str:
+        return " ".join(text.split()).casefold()
+
+    wanted = fold(literal)
+    return [v for v in values if isinstance(v, str) and fold(v) == wanted][:limit]
+
+
 # --- what is missing ------------------------------------------------------------------
 
 
@@ -1042,9 +1339,22 @@ def _warnings(
                 out.append(f"'{model}' declares no grain")
         elif name == "population":
             if reading.filtered:
+                hint = ""
+                filtering = {"where", "having", "qualify"}
+                counted = [
+                    f"{p['column']} ({p['readers']})"
+                    for p in drafted.get("precedent", [])
+                    if p["readers"]
+                    and any(use["usage"] in filtering for use in p["this_model"])
+                ]
+                if counted:
+                    hint = (
+                        "; drafted.precedent shows how the project's other models "
+                        f"treat {', '.join(counted)}"
+                    )
                 out.append(
                     f"'{model}' declares no population rule; its SQL filters on "
-                    f"{', '.join(reading.filtered)}"
+                    f"{', '.join(reading.filtered)}{hint}"
                 )
             else:
                 out.append(f"'{model}' declares no population rule (which rows are in)")

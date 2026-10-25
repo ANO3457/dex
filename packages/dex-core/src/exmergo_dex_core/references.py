@@ -284,6 +284,32 @@ class ReferenceIndex:
 
         return [ref for ref in self._indeterminate if ref.kind == kind]
 
+    def readers_of(self, relation: str) -> list[str]:
+        """Files in this project that read ``relation`` through ``ref()`` or
+        ``source()``, sorted.
+
+        ``relation`` is matched the way a model's SQL is rendered for reading:
+        by the last argument, so ``orders`` is read by ``ref('orders')``,
+        ``ref('pkg', 'orders')`` and ``source('raw', 'orders')`` alike. An
+        unresolved call is not here; :meth:`indeterminate_for` has it.
+        """
+
+        wanted = relation.lower()
+        paths = set()
+        for (kind, name), references in self._by_name.items():
+            if kind == "source":
+                if name.rsplit(".", 1)[-1].lower() != wanted:
+                    continue
+            elif name.lower() != wanted:
+                continue
+            paths.update(
+                reference.path
+                for reference in references
+                if reference.form in ("ref_call", "source_call")
+                and reference.package is None
+            )
+        return sorted(paths)
+
     def parents_of(self, node: str) -> set[str]:
         """What ``node`` reads directly, as resolved ``ref()`` targets."""
 
@@ -1734,12 +1760,18 @@ def run(
     *,
     kind: str | None = None,
     full: bool = False,
+    usage: bool = False,
 ) -> ReferencesResult:
     """``transform references``: where each of ``names`` is used.
 
     Repo-only and free on every connector. It reads the project's files, opens no
     connection, and needs no dialect engine, which is why the CLI routes it ahead
     of the gate the rest of the authoring surface passes through.
+
+    ``usage`` also reports *how* each qualified column is used: the other
+    models' filters, ``CASE`` conditions and aggregations over it, grouped and
+    counted, which is the precedent ``transform plan`` drafts (#494). It reads
+    the exploration cache, when there is one, only to expand a ``select *``.
     """
 
     if kind is not None and kind not in KINDS:
@@ -1748,9 +1780,13 @@ def run(
             f"Use one of: {', '.join(KINDS)}; or omit --kind to report every "
             "kind each name is used as"
         )
-    report = find_references(
-        load_project(engine.project_dir()), names, kind=kind, full=full
-    )
+    if usage:
+        _check_usage_request(names, kind)
+    view = load_project(engine.project_dir())
+    index = ReferenceIndex(view)
+    report = find_references(view, names, kind=kind, full=full, index=index)
+    if usage:
+        _add_usage(engine, view, index, names, report, full=full)
     return ReferencesResult(
         completeness=report.completeness,
         limits=report.limits,
@@ -1763,12 +1799,88 @@ def run(
     )
 
 
+def _check_usage_request(names: list[str], kind: str | None) -> None:
+    if kind not in (None, "column"):
+        raise RequestError(
+            "--usage reports how a column is used, so it takes no other --kind; "
+            "drop --kind, or pass --kind column"
+        )
+    bare = [name for name in names if "." not in name]
+    if bare:
+        raise RequestError(
+            f"--usage needs the relation each column belongs to, and "
+            f"{', '.join(repr(n) for n in bare)} names none: write it as "
+            "model.column (or source_table.column), since a column of the same "
+            "name on another relation is a different column"
+        )
+
+
+def _add_usage(
+    engine: DexEngine,
+    view: DbtProjectView,
+    index: ReferenceIndex,
+    names: list[str],
+    report: ReferenceReport,
+    *,
+    full: bool,
+) -> None:
+    """Attach each qualified column's precedent to its target, and fold the
+    limits of that reading into the report's completeness."""
+
+    from .cache import mask_overridden
+    from .config import pii_override_paths
+    from .storage import CacheUnreadableError, readable_cache
+    from .transform.precedent import usage_of
+
+    limits = list(report.limits)
+    dialect = None
+    connector = engine.connector or engine.config.connector
+    if connector:
+        from .adapters import get_dialect
+
+        dialect = get_dialect(connector)
+    try:
+        cache = readable_cache(engine.store)
+    except CacheUnreadableError:
+        cache = None
+    if cache is not None:
+        cache = mask_overridden(cache, pii_override_paths(engine.config.pii_overrides))
+
+    files = {path: source.content for path, source in view.files.items()}
+    for name in names:
+        relation, _, column = name.rpartition(".")
+        relation = relation.rsplit(".", 1)[-1]
+        found = usage_of(
+            [(relation, column)],
+            files,
+            view.model_paths,
+            cache,
+            dialect=dialect,
+            vars=view.vars,
+            index=index,
+            full=full,
+        )[(relation, column.lower())]
+        limits.extend(found.pop("limits"))
+        found.pop("completeness")
+        target = next(t for t in report.targets if t["name"] == name)
+        target["usage"] = found
+    if dialect is None and any(t["usage"]["readers"] for t in report.targets):
+        limits.append(
+            "no connector is configured, so model SQL was read in sqlglot's "
+            "default dialect"
+        )
+    limits = list(dict.fromkeys(limits))
+    report.limits = limits
+    report.completeness = "complete" if not limits else "incomplete"
+
+
 def cmd_references(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
     result = run(
         engine,
         list(args.names),
         kind=getattr(args, "kind", None),
         full=getattr(args, "full", False),
+        usage=getattr(args, "usage", False),
     )
     hints = (
         {"next": 'propose the edits with `transform plan "<intent>"`'}
