@@ -771,3 +771,166 @@ def test_a_scope_naming_nothing_prices_nothing(tmp_path: Path):
     adapter = _Estimator()
     assert price_verification(adapter, tmp_path, scope=set()) == (0.0, [])
     assert adapter.sql == []
+
+
+# --- declared facts (#496) ----------------------------------------------------
+
+
+def _declared_manifest(project: Path, *, relation: str = "wh.dbt_dev.fct_orders"):
+    _artifacts(
+        project,
+        nodes={
+            "model.p.fct_orders": {
+                "name": "fct_orders",
+                "resource_type": "model",
+                "relation_name": relation,
+                "config": {
+                    "materialized": "table",
+                    "meta": {
+                        "dex": {
+                            "grain": ["order_id", "line"],
+                            "population": {
+                                "filters": [
+                                    {"column": "status", "excludes": ["cancelled"]}
+                                ]
+                            },
+                        }
+                    },
+                },
+                "columns": {
+                    "share": {
+                        "name": "share",
+                        "config": {"meta": {"dex": {"unit": "fraction"}}},
+                    }
+                },
+            }
+        },
+        results=[{"unique_id": "model.p.fct_orders", "status": "success"}],
+    )
+
+
+@dataclass
+class _Maintain:
+    grain_min_rows: int = 100
+
+
+@dataclass
+class _FactsConfig:
+    query: _Query = field(default_factory=_Query)
+    maintain: _Maintain = field(default_factory=_Maintain)
+    pii_overrides: list = field(default_factory=list)
+
+
+class _FactsEngine:
+    config = _FactsConfig()
+
+
+def test_a_build_checks_what_its_models_declare(tmp_path: Path):
+    """End to end on a real relation: the declared exclusion is missing from the
+    SQL, the share is a percentage, and the composite grain has a duplicate."""
+
+    duckdb = pytest.importorskip("duckdb")
+    from exmergo_dex_core.adapters.duckdb import DuckDBAdapter
+
+    path = tmp_path / "wh.duckdb"
+    conn = duckdb.connect(str(path))
+    conn.execute("CREATE SCHEMA dbt_dev")
+    conn.execute(
+        "CREATE TABLE dbt_dev.fct_orders AS SELECT i AS order_id, 1 AS line, "
+        "CASE WHEN i < 3 THEN 'cancelled' ELSE 'paid' END AS status, "
+        "i * 10.0 AS share FROM range(10) t(i) UNION ALL SELECT 0, 1, 'paid', 0.5"
+    )
+    conn.close()
+    _declared_manifest(tmp_path)
+    adapter = DuckDBAdapter(path)
+    try:
+        result = verify_build(
+            _FactsEngine(),
+            tmp_path,
+            _summary([_node("model.p.fct_orders")]),
+            resolve_adapter=lambda: adapter,
+        )
+    finally:
+        adapter.close()
+    codes = sorted(f.code for f in result.findings)
+    assert codes == ["grain_broken", "population_contradicted", "unit_out_of_range"]
+    population = next(f for f in result.findings if f.code == "population_contradicted")
+    assert population.data["contradicting_rows"] == 3
+    grain = next(f for f in result.findings if f.code == "grain_broken")
+    assert grain.data["source"] == "declaration"
+    assert "grain" not in result.suppressed
+    assert "unit" not in result.suppressed
+    assert "population" not in result.suppressed
+    assert "declares a column additive" in result.suppressed["additivity"]
+
+
+def test_a_failed_build_suppresses_the_declared_facts_and_says_why(tmp_path: Path):
+    _declared_manifest(tmp_path)
+    result = _sweep(tmp_path, _summary([_node("model.p.fct_orders")], success=False))
+    for finding_class in ("grain", "unit", "additivity", "population"):
+        assert "did not complete" in result.suppressed[finding_class]
+
+
+def test_a_build_with_nothing_declared_names_each_class(tmp_path: Path):
+    _artifacts(
+        tmp_path,
+        nodes={
+            "model.shop.fct_orders": {"name": "fct_orders", "resource_type": "model"}
+        },
+        results=[{"unique_id": "model.shop.fct_orders", "status": "success"}],
+    )
+    result = _sweep(tmp_path, _summary([_node("model.shop.fct_orders")]))
+    assert "this build ran" in result.suppressed["unit"]
+    assert "this build ran" in result.suppressed["population"]
+    assert "unique test" in result.suppressed["grain"]
+
+
+def test_declared_facts_are_priced_with_the_build(tmp_path: Path):
+    from exmergo_dex_core.transform.verify import price_declared_facts
+
+    _declared_manifest(tmp_path)
+    adapter = _Estimator()
+    adapter.cost_gate = object()
+    price, notes = price_declared_facts(adapter, tmp_path, scope={"model.p.fct_orders"})
+    assert price == 1024.0 and notes == []
+    (sql,) = adapter.sql
+    assert sql.startswith("SELECT COUNT(*) AS dex_rows")
+    assert '"wh"."dbt_dev"."fct_orders"' in sql
+
+
+def test_a_cold_dev_target_prices_the_declared_facts_later(tmp_path: Path):
+    from exmergo_dex_core.transform.verify import price_declared_facts
+
+    _declared_manifest(tmp_path)
+    adapter = _Estimator(raises=RuntimeError("Not found: Dataset wh:dbt_dev"))
+    adapter.cost_gate = object()
+    price, notes = price_declared_facts(adapter, tmp_path, scope={"model.p.fct_orders"})
+    assert price == 0.0
+    assert "declared-fact checks upfront" in notes[0]
+    assert "priced again after the build" in notes[0]
+
+
+def test_declared_facts_that_do_not_fit_come_back_as_an_offer():
+    from exmergo_dex_core.guards.cost_guard import CostGate
+    from exmergo_dex_core.transform.verify import _facts_handshake
+
+    class _Adapter:
+        name = "bigquery"
+        dialect = "bigquery"
+        paradigm = Paradigm.BYTES_SCANNED
+        cost_gate = CostGate(
+            paradigm=Paradigm.BYTES_SCANNED,
+            ceiling=1_000.0,
+            session_ceiling=None,
+            session_spent=0.0,
+            confirmed=True,
+            connector="bigquery",
+            command="transform build",
+        )
+
+    offer = _facts_handshake(_Adapter())(50_000.0, 2)
+    assert offer is not None
+    assert offer.data["phase"] == "declared_facts"
+    assert offer.data["per_table_bytes"] == {"(declared facts)": 50_000.0}
+    assert offer.data["statement_count"] == 2
+    assert "--verify --confirm --budget" in offer.data["hint"]

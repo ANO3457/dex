@@ -386,9 +386,18 @@ dex maintain verify [<selector>]  -> is the project correct right now, no .dex/s
                                      count made exact where counting bills nothing; a relation the
                                      warehouse keeps no count for (any view) is priced as one batched
                                      aggregate and returned as an offer beside findings already final.
-                                     A project that fails to compile is reported first and suppresses
-                                     every other check; data.suppressed names each finding class that
-                                     did not run and why
+                                     Grain: the grain a declaration states first, then a unique test,
+                                     a unique_combination_of_columns test, a primary entity, or a
+                                     naming guess, one source per model. Declared facts, checked with
+                                     aggregate-only statements: unit_out_of_range (a fraction outside
+                                     0..1, a percent wholly inside it, with the observed min and max),
+                                     additivity_contradicted (an additive column the cumulative
+                                     detector reads as a running total), population_contradicted (an
+                                     excluded value still present, as a count), each class priced into
+                                     the same single offer on a metered connector. A project that fails
+                                     to compile is reported first and suppresses every other check;
+                                     data.suppressed names each finding class that did not run and why,
+                                     declared-fact classes (unit, additivity, population) included
 dex viz preview                   -> emit the dbt semantic model to the Viz preview (not yet implemented;
                                      the Viz integration arrives later)
 ```
@@ -938,8 +947,19 @@ default, or a filter or operator after it is refused. A key naming a location
   in `warnings` names the count so a caller reading warnings alone still learns
   they are there. A build that failed partway still reports the build-status
   half, which is when "which node failed, and what did it take down with it" is
-  worth most; row population is suppressed there, because a half-built dev
-  target is a mix of this run's output and the last one's.
+  worth most; row population and the declared facts are suppressed there,
+  because a half-built dev target is a mix of this run's output and the last
+  one's.
+
+  **Declared facts.** The sweep checks what each built model's declaration
+  says (#496): `unit_out_of_range`, `additivity_contradicted` and
+  `population_contradicted`, exactly as `maintain verify` reports them, plus a
+  declared grain no `unique` test in the build already checks (a composite
+  grain always), reported as `grain_broken` with `source: declaration`. A
+  single-column declared grain renders as a `unique` test, which the build
+  itself runs, and `null_rule: never` renders as `not_null`, so neither is
+  checked twice. Every class that did not run is named in `suppressed`
+  (`grain`, `unit`, `additivity`, `population`).
 
   `no_relation` is never reported from a build: dbt's run results are
   authoritative for the nodes it just ran, and a node it reports as `success`
@@ -948,7 +968,9 @@ default, or a filter or operator after it is refused. A key naming a location
   **Cost.** The row counts a verdict needs are priced during the build's own
   pricing pass, off the manifest the free `dbt compile` wrote, and folded into
   the same estimate under a `(row counts)` entry in the per-table breakdown, so
-  one `--budget` covers both phases. Only relations the warehouse keeps no row
+  one `--budget` covers both phases. The declared-fact statements are priced the
+  same way under `(declared facts)`, and gated after the build as their own
+  phase of the same reservation, never as a second budget. Only relations the warehouse keeps no row
   count for cost anything, which is any view, and a view is dbt's default
   materialization; a table's count is free metadata. On a connector with no
   cost gate every count is made exact instead, because doing so bills nothing.

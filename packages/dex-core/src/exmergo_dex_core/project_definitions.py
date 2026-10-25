@@ -116,7 +116,11 @@ class ProjectDefinitions(BaseModel):
     maps model names to their declared grain column; ``metric_models`` lists
     models reachable from any metric. ``declared_composite_keys`` carries
     multi-column grain declarations -- something a column-level test structurally
-    cannot express. ``built_relation_names`` is bare table names (lowered) the
+    cannot express. ``declared_grains`` maps a model label to the grain its
+    declaration states (for dbt, ``config.meta.dex.grain``, #491): one column or
+    several, the model's own statement of what one row is rather than a test's,
+    and the first source `maintain verify` checks a grain from (#496).
+    ``built_relation_names`` is bare table names (lowered) the
     project builds or sources, from files alone (populated even with no compiled
     artifact, unlike ``model_relations``) -- explore's orphan-relation
     down-ranking reads this, so a format that declares relations without building
@@ -138,6 +142,7 @@ class ProjectDefinitions(BaseModel):
     model_relations: dict[str, str] = Field(default_factory=dict)
     source_relations: dict[str, str] = Field(default_factory=dict)
     primary_entities: dict[str, str] = Field(default_factory=dict)
+    declared_grains: dict[str, list[str]] = Field(default_factory=dict)
     metric_models: list[str] = Field(default_factory=list)
     built_relation_names: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

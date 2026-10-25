@@ -171,7 +171,8 @@ is not described here.
   migrate and rewrite the model files dex owns.
 - On `maintain verify`, read `data.suppressed` before reading an empty
   `data.findings` as a clean bill. A project that does not compile suppresses
-  every other check. Row population is conservative by design, so a quiet answer
+  every other check. A `unit`, `additivity` or `population` suppression means
+  that declaration was not checked, not that it held. Row population is conservative by design, so a quiet answer
   is weaker evidence than a finding, and `warnings` names the models that could
   not be lined up.
 - For a change you just made, use `transform build --verify` (same sweep, scoped

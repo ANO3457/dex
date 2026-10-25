@@ -1336,6 +1336,28 @@ def _parse_relation_ref(value: Any) -> str | None:
     return None
 
 
+def declared_grain(entry: Any) -> list[str] | None:
+    """The grain a model's declaration states (``config.meta.dex.grain``, #491).
+
+    Read the same way from a YAML entry and from a compiled manifest node,
+    since dbt carries a model's ``config.meta`` onto the node in that shape;
+    top-level ``meta`` is read too, overlaid by ``config.meta`` as dbt merges
+    them. Anything but a non-empty list of column names is no declaration.
+    """
+
+    from .guards.pii_meta import entry_meta
+
+    dex = entry_meta(entry).get("dex")
+    grain = dex.get("grain") if isinstance(dex, dict) else None
+    if (
+        isinstance(grain, list)
+        and grain
+        and all(isinstance(column, str) and column for column in grain)
+    ):
+        return list(grain)
+    return None
+
+
 def _declared_from_manifest(manifest: dict[str, Any], defs: ProjectDefinitions) -> None:
     """Declared FKs and column tests from compiled test nodes, physically
     resolved through each node's ``relation_name``. Every access is guarded:
@@ -1370,6 +1392,9 @@ def _declared_from_manifest(manifest: dict[str, Any], defs: ProjectDefinitions) 
         # project but not physically resolvable, so they stay out of relations.
         if isinstance(relation, str) and relation:
             relations[label] = model_relations[label] = strip_relation_quoting(relation)
+        grain = declared_grain(node)
+        if grain:
+            defs.declared_grains[label] = grain
     for uid, node in sources.items():
         if not isinstance(node, dict):
             continue
@@ -1556,6 +1581,9 @@ def _declared_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
             if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
                 continue
             model = entry["name"]
+            grain = declared_grain(entry)
+            if grain:
+                defs.declared_grains[model] = grain
             for test in entry.get("tests") or entry.get("data_tests") or []:
                 if not isinstance(test, dict):
                     continue

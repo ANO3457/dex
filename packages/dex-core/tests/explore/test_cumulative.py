@@ -239,6 +239,22 @@ def test_probe_statements_transpiles_to_postgres_and_stays_select_only():
     assert "balances" in sql
 
 
+def test_probe_statements_use_lag_in_frame_on_clickhouse():
+    """ClickHouse has no LAG, and its lagInFrame fills a partition's first row
+    with 0 rather than NULL unless told otherwise, which would count every
+    entity's first row as an observation."""
+
+    from exmergo_dex_core.guards.sql_guard import assert_select_only
+
+    candidate = CumulativeCandidate("account_id", "snapshot_date", ["balance"])
+    dataset = Dataset(identifier="app.balances", columns=[])
+    [sql] = probe_statements([(dataset, candidate)], "clickhouse")
+    assert "LAG(" not in sql.upper().replace("LAGINFRAME(", "")
+    assert 'lagInFrame(toNullable("balance"), 1, NULL)' in sql
+    assert "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW" in sql
+    assert_select_only(sql, dialect="clickhouse")
+
+
 def test_probe_statements_is_identity_on_duckdb():
     candidate = CumulativeCandidate("account_id", "snapshot_date", ["balance"])
     dataset = Dataset(identifier="db.main.balances", columns=[])

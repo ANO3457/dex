@@ -191,6 +191,15 @@ def verify_build(
     scope = set(built)
     result = BuildVerification(ran=True, scope=sorted(built.values()))
 
+    # Both halves below need the adapter, and only the first may open it: a
+    # second open would rebuild the gate holding this command's reservation.
+    opened: list[Adapter] = []
+
+    def adapter_once() -> Adapter:
+        if not opened:
+            opened.append(resolve_adapter())
+        return opened[0]
+
     findings, notes = verify_mod.build_status_findings(project_dir)
     result.warnings.extend(notes)
     if notes:
@@ -205,11 +214,11 @@ def verify_build(
         "dbt's run results are authoritative for the nodes this build ran"
     )
 
-    reason = _row_population(
-        engine, project_dir, summary, scope, resolve_adapter, result
-    )
+    reason = _row_population(engine, project_dir, summary, scope, adapter_once, result)
     if reason is not None:
         result.suppressed["row_population"] = reason
+
+    _declared_facts(engine, project_dir, summary, scope, adapter_once, result)
 
     result.findings = drift_mod.rank_findings(findings + result.findings)
     if len(result.findings) > MAX_FINDINGS:
@@ -325,6 +334,195 @@ def _row_population(
     result.warnings.extend(measured.notes + finding_notes)
     result.offer = measured.offer
     return None
+
+
+def _declared_facts(
+    engine: DexEngine,
+    project_dir: Path,
+    summary: dict[str, Any],
+    scope: set[str],
+    resolve_adapter: Callable[[], Adapter],
+    result: BuildVerification,
+) -> None:
+    """What the built models' declarations say, checked against what dbt wrote
+    (#496): unit, additivity, population, and a declared grain no ``unique``
+    test in this build covers.
+
+    Writes findings, warnings, suppressions and any deferred offer onto
+    ``result``. The statements are gated as a phase of the build, like the row
+    counts, so a caller who confirmed the build's estimate (which priced these
+    upfront, see :func:`price_declared_facts`) is not asked again.
+    """
+
+    from ..errors import DexError
+    from ..guards.cost_guard import CostGuardError
+    from ..maintain import declared_facts as facts_mod
+
+    def suppress(reason: str, *, grain: bool = True) -> None:
+        for finding_class in facts_mod.CLASSES:
+            result.suppressed.setdefault(finding_class, reason)
+        if grain:
+            result.suppressed.setdefault("grain", reason)
+
+    if not summary.get("success"):
+        suppress(
+            "the build did not complete, so its relations are a mix of this "
+            "run's output and the last one's; a declaration checked against "
+            "that says nothing"
+        )
+        return
+    if not scope:
+        suppress("this build ran no models")
+        return
+
+    models, plan_notes = facts_mod.plan(project_dir, scope=scope)
+    result.warnings.extend(plan_notes)
+    if plan_notes:
+        suppress(plan_notes[0])
+        return
+    grain_models = [m for m in models if facts_mod.grain_untested(m)]
+    if not grain_models:
+        result.suppressed["grain"] = (
+            "no model this build ran declares a grain that a unique test in this "
+            "build does not already check"
+        )
+    if not models:
+        for finding_class in facts_mod.CLASSES:
+            result.suppressed[finding_class] = facts_mod.nothing_declared(
+                finding_class, "this build ran"
+            )
+        return
+
+    try:
+        adapter = resolve_adapter()
+    except CostGuardError:
+        raise
+    except DexError as exc:
+        suppress(f"warehouse unreachable: {exc}")
+        return
+    try:
+        live = adapter.list_objects()
+    except CostGuardError:
+        raise
+    except Exception as exc:
+        from ..envelope import redact
+
+        suppress(
+            redact(
+                "the relations this build wrote could not be listed "
+                f"({type(exc).__name__}: {exc})"
+            )
+        )
+        return
+
+    try:
+        prepared = facts_mod.prepare(
+            adapter, models, [meta.identifier for meta in live], check_grain=True
+        )
+        facts = facts_mod.findings(
+            adapter,
+            prepared,
+            where="this build ran",
+            timeout_seconds=engine.config.query.timeout_seconds,
+            handshake=_facts_handshake(adapter),
+            pii_overrides=_pii_overrides(engine),
+            min_rows=engine.config.maintain.grain_min_rows,
+        )
+    except CostGuardError:
+        raise
+    except Exception as exc:
+        from ..envelope import redact
+
+        suppress(
+            redact(
+                f"the declared facts could not be checked ({type(exc).__name__}: {exc})"
+            )
+        )
+        return
+
+    result.findings.extend(facts.findings)
+    result.warnings.extend(facts.notes)
+    for finding_class, reason in facts.suppressed.items():
+        result.suppressed[finding_class] = reason
+    if grain_models and facts.offer is not None:
+        result.suppressed["grain"] = "checking it is a scan, offered above"
+    if facts.offer is not None and result.offer is None:
+        result.offer = facts.offer
+
+
+def _pii_overrides(engine: DexEngine):
+    from ..config import pii_override_paths
+
+    return pii_override_paths(engine.config.pii_overrides)
+
+
+def price_declared_facts(
+    adapter: Adapter, project_dir: Path, *, scope: set[str]
+) -> tuple[float, list[str]]:
+    """What the declared-fact checks this build will need would cost, priced
+    before it runs and folded into the build's estimate the way
+    :func:`price_verification` folds the row counts, so one confirmed budget
+    covers the build and every check that judges it.
+
+    Best-effort for the same reason: on the first build the relations are not
+    there to dry-run against, so this returns zero and a note, and the phase
+    check after the build prices the statements against the confirmed budget.
+    """
+
+    from ..maintain import declared_facts as facts_mod
+
+    estimator = getattr(adapter, "query_estimate", None)
+    if estimator is None:
+        return 0.0, []
+    try:
+        models, _ = facts_mod.plan(project_dir, scope=scope)
+        if not models:
+            return 0.0, []
+        prepared = facts_mod.prepare(adapter, models, None, check_grain=True)
+        estimate, _count = facts_mod.cost(adapter, prepared)
+        return estimate, []
+    except Exception as exc:
+        from ..envelope import redact
+
+        return 0.0, [
+            redact(
+                "could not price this build's declared-fact checks upfront "
+                f"({type(exc).__name__}: {exc}); they are priced again after the "
+                "build and offered if they do not fit the confirmed budget"
+            )
+        ]
+
+
+def _facts_handshake(adapter: Adapter):
+    """The declared-fact statements as a phase of the build, exactly as
+    :func:`_count_handshake` gates the row counts: extend the reservation the
+    command already holds, and offer rather than refuse when they do not fit."""
+
+    from .. import command_args
+
+    def ask(estimate: float, statement_count: int):
+        return command_args.phase_handshake(
+            "transform build",
+            adapter,
+            estimate,
+            phase="declared_facts",
+            per_table_key="(declared facts)",
+            extra={"statement_count": statement_count},
+            skip=statement_count == 0,
+            notes=[
+                "the build is complete and its spend is settled; this estimate "
+                "buys only the checks of what its models declare"
+            ],
+            hint=lambda cost, unit, budget: (
+                f"{statement_count} aggregate statement(s) check what this build's "
+                f"models declare, estimated at {cost:.0f} {unit} beyond what remains "
+                "of the confirmed budget. The build itself is done and billed; "
+                f"re-run with --verify --confirm --budget {budget} to build and "
+                "judge in one pass"
+            ),
+        )
+
+    return ask
 
 
 def _count_handshake(adapter: Adapter):

@@ -3936,17 +3936,21 @@ def _price_build(
             # scan can be priced here and confirmed with the build rather than
             # asked about again once the build has already spent.
             from .build import compiled_model_ids
-            from .verify import price_verification
+            from .verify import price_declared_facts, price_verification
 
-            scan, scan_notes = price_verification(
-                adapter,
-                Path(project),
-                scope=compiled_model_ids(Path(project)),
-            )
+            scope = compiled_model_ids(Path(project))
+            scan, scan_notes = price_verification(adapter, Path(project), scope=scope)
             notes = [*notes, *scan_notes]
             if scan:
                 estimate += scan
                 per_node = {**per_node, "(row counts)": scan}
+            facts, facts_notes = price_declared_facts(
+                adapter, Path(project), scope=scope
+            )
+            notes = [*notes, *facts_notes]
+            if facts:
+                estimate += facts
+                per_node = {**per_node, "(declared facts)": facts}
         upper_bounds: dict[str, str] = {}
         if getattr(adapter, "prunes_dynamic_bounds_at_run_time", False):
             from .build import dynamic_bound_nodes
