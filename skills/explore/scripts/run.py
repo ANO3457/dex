@@ -590,8 +590,8 @@ def main() -> int:
                 errors=[
                     "dex runs its engine through uv, which was not found on "
                     "PATH. Install it with `brew install uv` or `pipx install uv` "
-                    "(other platforms: "
-                    "https://docs.astral.sh/uv/getting-started/installation/), "
+                    "(other platforms: see the installation page in uv's "
+                    "documentation), "
                     "then re-run. An agent relays this to the user rather than "
                     "running an installer itself."
                 ],
