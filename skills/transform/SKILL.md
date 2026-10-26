@@ -96,11 +96,11 @@ fetches the engine's dependencies from PyPI or your configured index.
 
 ## Transforming, step by step
 
-1. **No dbt project yet?** Offer `transform init "<name>" --connector <c>` before
+1. **No dbt project yet?** Offer `transform init "<name>" --connector <c>` (scaffolds into `<name>/` by default, or the current directory with `--in-place`) before
    anything else. Ask the user for the name and **confirm the connector with
    them**: init never defaults one. Do not hand-write the skeleton. Read
    `${CLAUDE_SKILL_DIR}/references/init-and-dev-target.md` for per-connector
-   setup, `--layered-schemas`, and the namespace warning.
+   setup, `--in-place`, `--layered-schemas`, and the namespace warning.
 2. **Find every use first** when a change has to land in more than one place:
    `transform references <name> [more...]`, free on every connector. Read
    `data.completeness`; when it is `incomplete`, open each site under
