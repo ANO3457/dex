@@ -442,7 +442,7 @@ def _child_env() -> dict[str, str]:
 # The first uv release whose vendored CA roots exclude the emSign ones withdrawn
 # after the eMudhra key incident. An older uv still installs dex, so this is a
 # warning and never a refusal: it is the user's toolchain, and the fix is theirs
-# to run. See https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576
+# to run. SECURITY.md links the advisory.
 _UV_CA_FLOOR = (0, 13, 4)
 
 
