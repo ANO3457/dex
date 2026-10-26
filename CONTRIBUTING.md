@@ -3,6 +3,10 @@
 Thanks for contributing. This guide covers local setup and the checks every
 pull request must pass.
 
+## Contribution policy
+
+**We do not accept paid open-source contributions.**
+
 ## Support the project
 
 If dex is useful to you, star the repository. Stars are how other analytics
