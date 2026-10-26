@@ -157,8 +157,11 @@ compute_unit_hours = seconds * compute_units_per_hour / 3600
 ```
 
 The capacity read is cached for one command and fails closed when it is denied,
-empty, malformed, partial, or inconsistent. dex never substitutes a configured
-replica count, a guessed tier, or a public price. When
+empty, malformed, partial, or inconsistent. A service resuming from idle answers
+on one replica before the others join, so an unproved read is retried for about
+15 seconds before the refusal, which then names the server's reason; a denied
+grant refuses at once. dex never substitutes a configured replica count, a
+guessed tier, or a public price. When
 `compute_unit_price_usd` is present, estimates and settled spend also carry a USD
 translation using that supplied rate.
 
