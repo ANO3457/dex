@@ -257,7 +257,7 @@ recorded in a local ledger ([cost controls](https://docs.exmergo.com/dex/guardra
 Self-hosted databases bill no dollars and are still gated, because an unbounded
 scan on a production Postgres primary is a real cost too.
 
-**Coming next:** Starburst Galaxy, Azure Synapse, Microsoft Fabric.
+**Coming next:** MotherDuck, Starburst Galaxy, Microsoft Fabric.
 
 ## Semantic layers
 
@@ -276,7 +276,7 @@ query by name rather than inventing semantics. See the
 [Ossie page](https://docs.exmergo.com/dex/semantic-layers/ossie) and the
 [Ossie tutorial](https://docs.exmergo.com/dex/guides/ossie-semantic-layer).
 
-**Coming next:** Cube.
+**Coming next:** Cube, Snowflake Semantic Views, Looker / LookML, and Databricks Metric Views.
 
 ## See it on a real project
 
