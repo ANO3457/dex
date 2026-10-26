@@ -20,6 +20,7 @@ re-spending) on its own.
 
 from __future__ import annotations
 
+import difflib
 from collections.abc import Iterable
 from typing import NamedTuple
 
@@ -136,6 +137,18 @@ def resolve_scope(names: list[str], identifiers: Iterable[str]) -> set[str]:
                 )
             resolved.update(matches)
     return resolved
+
+
+def _rename_similarity(old: str, new: str) -> float:
+    """Score name similarity for candidate renames, prioritizing shared word tokens."""
+    score = difflib.SequenceMatcher(None, old, new).ratio()
+    old_parts = set(old.split("_"))
+    new_parts = set(new.split("_"))
+    if old_parts & new_parts:
+        score += 1.0
+    elif old in new or new in old:
+        score += 0.5
+    return score
 
 
 def schema_drift(
@@ -255,23 +268,49 @@ def schema_drift(
         )
         # A drop and an add of the same type is what a rename looks like from
         # metadata; surfaced as a hint so reconcile and the human can decide.
-        findings.extend(
-            DriftFinding(
-                axis="schema",
-                code="possible_rename",
-                identifier=identifier,
-                column=came,
-                severity="low",
-                detail=(
-                    f"{gone} -> {came} on {identifier} may be a "
-                    f"rename (same type {old_cols[gone].data_type})"
-                ),
-                data={"renamed_from": gone, "renamed_to": came},
+        # When multiple candidates match, emit one finding ranked by similarity.
+        for gone in dropped:
+            same_type = [
+                came
+                for came in added
+                if old_cols[gone].data_type == new_cols[came].data_type
+            ]
+            if not same_type:
+                continue
+            ranked = sorted(
+                same_type,
+                key=lambda c: (_rename_similarity(gone, c), c),
+                reverse=True,
             )
-            for gone in dropped
-            for came in added
-            if old_cols[gone].data_type == new_cols[came].data_type
-        )
+            best = ranked[0]
+            if len(ranked) > 1:
+                candidates_str = ", ".join(ranked)
+                detail = (
+                    f"{gone} -> {candidates_str} on {identifier} may be a "
+                    f"rename (same type {old_cols[gone].data_type})"
+                )
+                data = {
+                    "renamed_from": gone,
+                    "renamed_to": best,
+                    "candidates": ranked,
+                }
+            else:
+                detail = (
+                    f"{gone} -> {best} on {identifier} may be a "
+                    f"rename (same type {old_cols[gone].data_type})"
+                )
+                data = {"renamed_from": gone, "renamed_to": best}
+            findings.append(
+                DriftFinding(
+                    axis="schema",
+                    code="possible_rename",
+                    identifier=identifier,
+                    column=best,
+                    severity="low",
+                    detail=detail,
+                    data=data,
+                )
+            )
         for name in sorted(old_cols.keys() & new_cols.keys()):
             old, new = old_cols[name], new_cols[name]
             if old.data_type != new.data_type:

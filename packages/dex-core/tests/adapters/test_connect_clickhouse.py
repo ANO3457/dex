@@ -34,7 +34,8 @@ from exmergo_dex_core.adapters.clickhouse import (
 )
 from exmergo_dex_core.config import ClickHouseTarget, DexConfig
 from exmergo_dex_core.connect import new_cost_gate, paradigm_for
-from exmergo_dex_core.envelope import Paradigm
+from exmergo_dex_core.envelope import Paradigm, error_for
+from exmergo_dex_core.errors import StatementStage, WarehouseQueryError
 from exmergo_dex_core.guards.cost_guard import (
     ConfirmationRequiredError,
     CostGate,
@@ -42,6 +43,7 @@ from exmergo_dex_core.guards.cost_guard import (
     utc_day_start,
 )
 from exmergo_dex_core.storage import MemoryStore
+from exmergo_dex_core.values_free import withhold_error
 
 
 def _gate(**kwargs) -> CostGate:
@@ -642,6 +644,104 @@ def test_run_query_rejects_writes(fake_clickhouse_connection):
 
 
 # --- error translation ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("door", ["query", "catalog"])
+def test_a_server_refusal_is_typed_and_trimmed(
+    fake_clickhouse_connection, monkeypatch, door
+):
+    adapter = make_adapter(fake_clickhouse_connection)
+    original = server_error(63, "Unknown aggregate function\nSELECT private_value")
+
+    def refuse(*args, **kwargs):
+        raise original
+
+    if door == "catalog":
+        monkeypatch.setattr(fake_clickhouse_connection, "query", refuse)
+    else:
+        fake_clickhouse_connection.row_resolver = refuse
+
+    with pytest.raises(WarehouseQueryError) as refused:
+        if door == "catalog":
+            adapter.list_objects()
+        else:
+            adapter.run_query(
+                "SELECT 1 FROM shop.customers", max_rows=1, timeout_seconds=30
+            )
+
+    assert refused.value.__cause__ is original
+    assert refused.value.stage is StatementStage.RUN
+    assert str(refused.value).endswith("[63]")
+    assert "private_value" not in str(refused.value)
+
+    envelope = error_for(withhold_error(refused.value))
+    assert envelope.data == {"stage": "run", "code": "warehouse_refused"}
+    assert "Unknown aggregate function" not in str(envelope.errors)
+
+
+def test_a_driver_refusal_without_a_code_is_still_typed(fake_clickhouse_connection):
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    adapter = make_adapter(fake_clickhouse_connection)
+    original = DatabaseError("Server rejected statement")
+
+    def refuse(sql):
+        raise original
+
+    fake_clickhouse_connection.row_resolver = refuse
+    with pytest.raises(
+        WarehouseQueryError, match="Server rejected statement"
+    ) as refused:
+        adapter.run_query(
+            "SELECT 1 FROM shop.customers", max_rows=1, timeout_seconds=30
+        )
+    assert refused.value.__cause__ is original
+
+
+def test_a_client_programming_error_is_not_a_warehouse_refusal(
+    fake_clickhouse_connection,
+):
+    adapter = make_adapter(fake_clickhouse_connection)
+    original = TypeError("client bug")
+
+    def fail(sql):
+        raise original
+
+    fake_clickhouse_connection.row_resolver = fail
+    with pytest.raises(TypeError) as failed:
+        adapter.run_query(
+            "SELECT 1 FROM shop.customers", max_rows=1, timeout_seconds=30
+        )
+    assert failed.value is original
+
+
+def test_a_clickhouse_grain_refusal_does_not_stop_other_models(
+    fake_clickhouse_connection,
+):
+    from exmergo_dex_core.maintain.verify import GrainCandidate, grain_findings
+
+    adapter = make_adapter(fake_clickhouse_connection)
+
+    def resolve(sql):
+        if "customers" in sql:
+            raise server_error(63, "Unknown aggregate function")
+        return FakeResult(rows=[{"n_total": 1000, "d_0": 998}], seconds=0.1)
+
+    fake_clickhouse_connection.row_resolver = resolve
+    findings, notes = grain_findings(
+        adapter,
+        {
+            name: [GrainCandidate(columns=["id"], source="unique_test")]
+            for name in ("customers", "events")
+        },
+        {"customers": "shop.customers", "events": "shop.events"},
+        ["shop.customers", "shop.events"],
+        {"customers", "events"},
+    )
+    assert [finding.identifier for finding in findings] == ["events"]
+    assert len(notes) == 1
+    assert "could not be measured for customers" in notes[0]
+    assert "Unknown aggregate function" in notes[0]
 
 
 def test_server_errors_translate_to_named_refusals(fake_clickhouse_connection):

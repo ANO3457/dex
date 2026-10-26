@@ -3023,6 +3023,11 @@ def diagram(
 
     rendered = diagram_mod.render_er_mermaid(cache, full=full)
     if not rendered.entity_count:
+        if not full and cache.ranked_datasets(profiled_only=True, connected_only=False):
+            raise CacheRequiredError(
+                "the exploration cache holds profiled objects but no edges: "
+                "run `explore diagram --full` to draw the unjoined objects"
+            )
         raise CacheRequiredError(
             "the exploration cache holds no object that can be drawn: run "
             "`explore map` (or `explore profile <object>`) so objects carry "
@@ -4456,10 +4461,12 @@ def _relationship_notes(
             notes.append("no declared relationships resolved against this connection")
         elif defs is not None and not defs.present and defs.project_dir:
             notes.append("no declared relationships (dbt project present but unused)")
-        else:
+        elif defs is not None and defs.present and not defs.foreign_keys:
             notes.append(
-                "no declared relationships (no dbt project or no declared foreign keys)"
+                "no declared relationships (dbt project declares no foreign keys)"
             )
+        else:
+            notes.append("no declared relationships (no dbt project)")
     if fk_columns and not inferred:
         notes.append(
             "no id-shaped column matched a parent table by name; joins may exist "
