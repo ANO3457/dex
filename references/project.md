@@ -370,6 +370,13 @@ leaving it out, because each entry then claims a column is unique on its own, wh
 is a stronger claim than the one you made and the one that gets acted on. The
 conformance suite checks both shapes.
 
+`model_declarations` is optional in the same spirit. It maps a model to what its
+own declaration says (grain, population, and each column's role, unit,
+additivity and `references`), and `explore --use-project` reports it on the
+relation the model builds and turns each `references` into a declared join. A
+format with no declarations leaves it empty, and exploration then reports
+nothing rather than a guessed declaration.
+
 ## What reconcile writes into a declaration
 
 Your file is one a person wrote and nothing regenerates, so dex splices it: the bytes

@@ -2009,7 +2009,7 @@ def test_relationships_envelope_reports_declared_join(tmp_path: Path, capsys):
         and r["to_dataset"] == "wh.main.customers"
         for r in data["relationships"]
     )
-    assert any("match declared tests" in n for n in data["notes"])
+    assert any("match declared joins" in n for n in data["notes"])
 
 
 def test_relationships_envelope_yaml_fallback_and_note(tmp_path: Path, capsys):

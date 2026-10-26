@@ -43,6 +43,10 @@ from ..cache import (
     CACHE_SCHEMA_VERSION,
     ColumnProfile,
     Dataset,
+    DatasetDeclaration,
+    DeclaredColumn,
+    DeclaredFilter,
+    DeclaredRows,
     DexCache,
     Relationship,
     RelationshipKind,
@@ -123,7 +127,7 @@ from .results import (
     RankedObject,
     RelationshipsResult,
 )
-from .summary import summarize_map, summarize_skipped
+from .summary import MAX_DECLARED_COLUMNS, summarize_map, summarize_skipped
 
 if TYPE_CHECKING:
     from ..engine import DexEngine
@@ -806,6 +810,16 @@ def profile(
                     "awaits confirmation (see hint)"
                 )
 
+    if use_project:
+        datasets, declaration_notes = _apply_declarations(
+            datasets,
+            defs,
+            high_null_fraction=config.profile_high_null_fraction,
+            values_free=values_free,
+        )
+        notes.extend(declaration_notes)
+        if not show_all_columns:
+            notes.extend(_declared_column_cap_notes(datasets, "--columns all"))
     if values_free:
         # A fresh full entry was served as it is cached; the scanned ones are
         # already withheld. Copies, so the cache document is not touched.
@@ -998,6 +1012,16 @@ def relationships(
 
     identifiers = [d.identifier for d in datasets]
     declared, declared_notes = rel_mod.declared_relationships(defs, identifiers)
+    declaration_edges, declaration_edge_notes = rel_mod.declaration_relationships(
+        defs, identifiers
+    )
+    declared, declaration_already_declared = _fold_semantic_edges(
+        declared, declaration_edges, adopt_declared_by=True
+    )
+    declared_notes.extend(declaration_edge_notes)
+    declared_notes.extend(
+        _declaration_join_notes(declaration_edges, declaration_already_declared)
+    )
     native_edges, native_edge_notes = _native_semantic_edges(
         engine,
         use_project,
@@ -1140,7 +1164,7 @@ def relationships(
     notes.extend(defs.notes)
     if confirmed:
         notes.append(
-            f"{confirmed} inferred join(s) match declared tests; kept as declared"
+            f"{confirmed} inferred join(s) match declared joins; kept as declared"
         )
     if verify and inferred and verify_pending is None and verify_warning is None:
         notes.append(
@@ -2374,6 +2398,16 @@ def map(
     # about this warehouse, and both channels are read on the same terms.
     identifiers = [m.identifier for m in metas]
     declared, declared_notes = rel_mod.declared_relationships(defs, identifiers)
+    declaration_edges, declaration_edge_notes = rel_mod.declaration_relationships(
+        defs, identifiers
+    )
+    declared, declaration_already_declared = _fold_semantic_edges(
+        declared, declaration_edges, adopt_declared_by=True
+    )
+    declared_notes.extend(declaration_edge_notes)
+    declared_notes.extend(
+        _declaration_join_notes(declaration_edges, declaration_already_declared)
+    )
     native_edges, native_edge_notes = _native_semantic_edges(
         engine,
         use_project,
@@ -2559,7 +2593,7 @@ def map(
     notes.extend(text for _rel, text in orphan_findings)
     if confirmed:
         notes.append(
-            f"{confirmed} inferred join(s) match declared tests; kept as declared"
+            f"{confirmed} inferred join(s) match declared joins; kept as declared"
         )
     metric_hint_count = len(hints) - len(config.ranking_hints)
     if metric_hint_count > 0:
@@ -2674,14 +2708,28 @@ def map(
     # second. Two orderings derived from one cache inside one envelope would be a
     # bug, and rank alone does not break ties.
     top = sorted(datasets, key=lambda d: (-(d.rank_score or 0.0), d.identifier))[:5]
-    view = summarize_map(cache, detail=detail)
+    # The declaration overlay (#498) reads the repository, not the warehouse, so
+    # it runs over the composed set on a copy after the cache is saved: an object
+    # served from the cache is annotated as accurately as one just profiled, and
+    # nothing a declaration says is ever written into the cache.
+    displayed = cache
+    if use_project and defs.model_declarations:
+        displayed = cache.model_copy(deep=True)
+        displayed.datasets, declaration_notes = _apply_declarations(
+            displayed.datasets,
+            defs,
+            high_null_fraction=config.profile_high_null_fraction,
+            values_free=values_free,
+        )
+        notes.extend(declaration_notes)
+    view = summarize_map(displayed, detail=detail)
     notes.extend(view.notes)
     if values_free:
-        handed_back = cache.model_copy(deep=True)
+        handed_back = displayed.model_copy(deep=True)
         for dataset in handed_back.datasets:
             withhold_values(dataset)
     else:
-        handed_back = cache
+        handed_back = displayed
     result = MapResult(
         cache=handed_back,
         cache_path=locator,
@@ -3851,6 +3899,179 @@ def _compose_semantic_catalogs(
     )
 
 
+def _apply_declarations(
+    datasets: list[Dataset],
+    defs: dbt_project.ProjectDefinitions,
+    *,
+    high_null_fraction: float,
+    values_free: bool,
+) -> tuple[list[Dataset], list[str]]:
+    """Copies of ``datasets`` carrying the declaration of the model on each (#498).
+
+    The model's declaration (#491) is the richest statement the project makes
+    about its own relations: what one row is, which rows are in, what each
+    column means. Under ``--use-project`` each dataset a declared model resolves
+    to gets it as ``declaration``, and the declared grain becomes the reported
+    ``grain``, ahead of a semantic primary entity or a composite test, because
+    it is the model's own statement of what one row is. ``candidate_keys`` stays
+    measurement-only, so the claim and the evidence sit side by side, and
+    ``grain_status`` says how they compare. A data-quality note states where the
+    grain came from whenever it differs from the measured one.
+
+    Applied at output time to copies and never written to the cache, unlike
+    :func:`_annotate_grain`'s refinements. A profile is served from the cache for
+    hours, a declaration is edited in the repository at any moment, and a
+    declaration baked into a cached profile would outlive its removal. Reading
+    it again on every run is free: it is the repository, not the warehouse.
+
+    Population values are repository text, but they are column values all the
+    same: in values-free mode, and for a filter on a column profiling flagged as
+    personal data, the values and the free-text rule are withheld and named in
+    ``withheld_fields``.
+    """
+
+    if not defs.model_declarations:
+        return datasets, []
+    identifiers = [d.identifier for d in datasets]
+    by_identifier: dict[str, Any] = {}
+    for model, declaration in sorted(defs.model_declarations.items()):
+        ident, _ambiguous = rel_mod.resolve_declared(
+            declaration.relation, model, identifiers
+        )
+        if ident is not None:
+            by_identifier.setdefault(ident.lower(), declaration)
+
+    out: list[Dataset] = []
+    applied = 0
+    for dataset in datasets:
+        declaration = by_identifier.get(dataset.identifier.lower())
+        if declaration is None:
+            out.append(dataset)
+            continue
+        copy = dataset.model_copy(deep=True)
+        copy.declaration = _dataset_declaration(copy, declaration, values_free)
+        if copy.columns:
+            copy.findings = rel_mod.profile_findings(
+                copy, high_null_fraction=high_null_fraction
+            )
+        out.append(copy)
+        applied += 1
+
+    notes: list[str] = []
+    if applied:
+        notes.append(
+            f"{applied} object(s) carry their model's declaration from the project "
+            "(see declaration on each); a declared grain is reported as grain, with "
+            "candidate_keys still measured and grain_status comparing the two"
+        )
+    return out, notes
+
+
+def _declared_column_cap_notes(datasets: list[Dataset], lift: str) -> list[str]:
+    """The note counting declared columns the payload's per-object cap cuts."""
+
+    cut = sum(
+        max(0, len(d.declaration.columns) - MAX_DECLARED_COLUMNS)
+        for d in datasets
+        if d.declaration is not None
+    )
+    if not cut:
+        return []
+    return [
+        f"{cut} declared column(s) are not listed: each declaration reports at most "
+        f"{MAX_DECLARED_COLUMNS} columns, with the rest counted in its "
+        f"elided_column_count; {lift} lists every one"
+    ]
+
+
+def _dataset_declaration(
+    dataset: Dataset, declaration: Any, values_free: bool
+) -> DatasetDeclaration:
+    """``declaration`` as reported on ``dataset``, with its grain applied to it."""
+
+    live = {c.name.lower(): c for c in dataset.columns}
+    withheld: list[str] = []
+    population = None
+    if declaration.population is not None:
+        flagged = {c.name.lower() for c in dataset.columns if c.pii is not None}
+        rule = declaration.population.rule
+        if rule is not None and values_free:
+            rule = None
+            withheld.append("population.rule")
+        filters: list[DeclaredFilter] = []
+        for item in declaration.population.filters:
+            hide = values_free or item.column.lower() in flagged
+            if hide and "population.filters[].values" not in withheld:
+                withheld.append("population.filters[].values")
+            filters.append(
+                DeclaredFilter(
+                    column=item.column,
+                    includes=None if hide else item.includes,
+                    excludes=None if hide else item.excludes,
+                )
+            )
+        population = DeclaredRows(rule=rule, filters=filters)
+
+    grain = declaration.grain
+    status = None
+    if grain:
+        status = _apply_declared_grain(dataset, grain, live)
+
+    return DatasetDeclaration(
+        model=declaration.model,
+        source=declaration.source,
+        grain=list(grain) if grain else None,
+        grain_status=status,
+        population=population,
+        columns=[
+            DeclaredColumn(name=name, **meaning.model_dump())
+            for name, meaning in declaration.columns.items()
+        ],
+        withheld_fields=withheld,
+    )
+
+
+def _apply_declared_grain(
+    dataset: Dataset, grain: list[str], live: dict[str, ColumnProfile]
+) -> str:
+    """Report ``grain`` as ``dataset``'s grain where its columns exist; how it
+    compares with measurement."""
+
+    if not dataset.columns:
+        return "unprofiled"
+    missing = [c for c in grain if c.lower() not in live]
+    if missing:
+        dataset.data_quality.append(
+            f"declared grain ({', '.join(grain)}) names column(s) not in this "
+            f"relation ({', '.join(missing)}); not applied"
+        )
+        return "missing_columns"
+    resolved = [live[c.lower()].name for c in grain]
+    wanted = {c.lower() for c in resolved}
+    measured = [*dataset.composite_keys, *dataset.candidate_keys]
+    if any({c.lower() for c in key} == wanted for key in measured):
+        status = "proven"
+    elif len(resolved) == 1 and live[resolved[0].lower()].is_unique is False:
+        status = "contradicted"
+        dataset.data_quality.append(
+            f"{resolved[0]} is the model's declared grain but profiling found "
+            "duplicates"
+        )
+    else:
+        status = "unmeasured"
+    if [c.lower() for c in dataset.grain or []] != [c.lower() for c in resolved]:
+        origin = (
+            f"measured grain was {', '.join(dataset.grain)}"
+            if dataset.grain
+            else "measurement found no key of its own"
+        )
+        dataset.data_quality.append(
+            f"grain {', '.join(resolved)} comes from the model's declaration ({origin})"
+        )
+    dataset.grain = resolved
+    return status
+
+
 def _annotate_semantic_exposure(datasets: list[Dataset], catalog) -> int:
     """Mark each dataset with the semantic models that sit on it. Returns how many
     were exposed.
@@ -3942,7 +4163,10 @@ def _native_semantic_edges(
 
 
 def _fold_semantic_edges(
-    declared: list[Relationship], semantic: list[Relationship]
+    declared: list[Relationship],
+    semantic: list[Relationship],
+    *,
+    adopt_declared_by: bool = False,
 ) -> tuple[list[Relationship], int]:
     """Semantic edges added to the declared set, deduped against it.
 
@@ -3951,6 +4175,11 @@ def _fold_semantic_edges(
     same tier, so an edge in both is one edge; which of the two named it first is
     not a fact about the warehouse, and doubling it would inflate the connectivity
     ranking the same way a doubled declared/inferred pair would.
+
+    ``adopt_declared_by`` is for a model declaration's joins (#498): the #491
+    writer renders a ``relationships`` test for every ``references`` it writes,
+    so the usual case is a test edge with no ``declared_by`` of its own, and the
+    declaration's name is the provenance worth keeping on the one edge left.
     """
 
     known = {_relationship_edge_key(rel) for rel in declared}
@@ -3968,10 +4197,31 @@ def _fold_semantic_edges(
                 set(existing.declaration_sources) | set(rel.declaration_sources)
             )
             existing.declaration_sources = sources
+            if adopt_declared_by and existing.declared_by is None:
+                existing.declared_by = rel.declared_by
             continue
         known.add(_relationship_edge_key(rel))
         merged.append(rel)
     return merged, already
+
+
+def _declaration_join_notes(
+    edges: list[Relationship], already_declared: int
+) -> list[str]:
+    """What model declarations (#498) added to the declared joins."""
+
+    if not edges:
+        return []
+    notes = [
+        f"{len(edges)} declared join(s) come from model declarations "
+        "(a column's `references`); see declared_by on each"
+    ]
+    if already_declared:
+        notes.append(
+            f"{already_declared} of them are also declared by a relationships "
+            "test; counted once, with both sources in declaration_sources"
+        )
+    return notes
 
 
 def _semantic_join_notes(
@@ -4454,14 +4704,24 @@ def _relationship_notes(
         f"inference examined {fk_columns} id-shaped column(s) "
         f"across {len(datasets)} profiled object(s)"
     ]
+    # A model declaration's `references` (#498) states a foreign key as surely
+    # as a relationships test does.
+    declares_keys = defs is not None and (
+        bool(defs.foreign_keys)
+        or any(
+            meaning.references
+            for declaration in defs.model_declarations.values()
+            for meaning in declaration.columns.values()
+        )
+    )
     if not declared:
-        if defs is not None and defs.present and defs.foreign_keys:
+        if defs is not None and defs.present and declares_keys:
             # The project declares foreign keys, but none resolved here; the
             # per-join notes from resolution say which and why.
             notes.append("no declared relationships resolved against this connection")
         elif defs is not None and not defs.present and defs.project_dir:
             notes.append("no declared relationships (dbt project present but unused)")
-        elif defs is not None and defs.present and not defs.foreign_keys:
+        elif defs is not None and defs.present and not declares_keys:
             notes.append(
                 "no declared relationships (dbt project declares no foreign keys)"
             )

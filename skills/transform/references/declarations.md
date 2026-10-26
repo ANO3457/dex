@@ -270,6 +270,16 @@ A population filter's values are compared as text when the declared values and
 the column's type disagree. A unit's range is withheld for a column that looks
 like personal data.
 
+## Read back by `explore --use-project`
+
+`explore profile` and `explore map` with `--use-project` return each declared
+model's declaration as `declaration` on the relation it builds: grain (with
+`grain_status` comparing it with the measured keys), population, and each
+column's role, unit, additivity and `references`. A `references` is also a
+declared join, `declared_by: declaration <model>.<column>`. It is read from the
+YAML on every run and never cached, so a later session reads the rule the
+project records rather than one remembered from the conversation that wrote it.
+
 ## `data.decisions`
 
 The plan, apply and build envelopes carry `data.decisions`: every assumption

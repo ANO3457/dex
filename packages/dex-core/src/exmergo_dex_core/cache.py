@@ -160,6 +160,62 @@ class ColumnProfile(BaseModel):
     temporal_largest_gap: int | None = None
 
 
+class DeclaredColumn(BaseModel):
+    """One column's meaning as its model's declaration states it (#498)."""
+
+    name: str
+    role: str | None = None
+    unit: str | None = None
+    additivity: str | None = None
+    references: str | None = None
+
+
+class DeclaredFilter(BaseModel):
+    """One filter of a declared population. ``includes``/``excludes`` are None
+    where the declaration states none or where they were withheld."""
+
+    column: str
+    includes: list[str | int | float | bool] | None = None
+    excludes: list[str | int | float | bool] | None = None
+
+
+class DeclaredRows(BaseModel):
+    """Which rows a model keeps, as its declaration states it."""
+
+    rule: str | None = None
+    filters: list[DeclaredFilter] = Field(default_factory=list)
+
+
+class DatasetDeclaration(BaseModel):
+    """The project's declaration of the model built on this relation (#498).
+
+    Folded in by ``explore --use-project`` at output time and never cached: a
+    declaration is the repository's current word, so it is read again on every
+    run rather than served from a profile that may predate an edit to it.
+
+    ``grain_status`` compares the declared grain with what measurement found:
+    ``proven`` (a measured key is exactly the declared grain), ``contradicted``
+    (a single declared column profiled with duplicates), ``unmeasured``
+    (nothing measured either way, the usual case for a composite grain),
+    ``missing_columns`` (the relation lacks a declared column, so the grain was
+    not applied), or ``unprofiled``. None where no grain is declared.
+    ``withheld_fields`` names declaration fields left out because they carry
+    values (values-free mode, or a filter on a PII-flagged column).
+    """
+
+    model: str
+    source: str
+    grain: list[str] | None = None
+    grain_status: (
+        Literal["proven", "contradicted", "unmeasured", "missing_columns", "unprofiled"]
+        | None
+    ) = None
+    population: DeclaredRows | None = None
+    columns: list[DeclaredColumn] = Field(default_factory=list)
+    elided_column_count: int = 0
+    withheld_fields: list[str] = Field(default_factory=list)
+
+
 class Dataset(BaseModel):
     """A physical object in the warehouse (table or view), fully namespaced.
 
@@ -210,6 +266,10 @@ class Dataset(BaseModel):
     #: again, so it is never served as though it were complete. Defaults to
     #: False, so a cache written before it reads as complete, which it is.
     values_withheld: bool = False
+    #: The project's declaration of this relation's model (#498), set only on the
+    #: copies ``explore --use-project`` returns and excluded from every dump, so
+    #: the cache document never carries it.
+    declaration: DatasetDeclaration | None = Field(default=None, exclude=True)
 
     def notable_columns(
         self,
