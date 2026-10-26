@@ -43,6 +43,12 @@ from ..dbt_project import (
     semantic_yaml_entries,
     yaml_documents,
 )
+from ..guards.pii_meta import entry_meta
+
+#: The ``config.meta`` namespace a declaration lives under. The same string as
+#: ``transform.declarations.DEX_META_KEY``, restated rather than imported so
+#: reading a baseline does not load the declaration writer.
+DEX_META_KEY = "dex"
 
 SNAPSHOT_SCHEMA_VERSION = 1
 
@@ -123,6 +129,34 @@ class SourceTable(BaseModel):
     path: str | None = None
 
 
+class DeclarationFingerprint(BaseModel):
+    """What one model declares about its meaning, as one hash per field (#497).
+
+    A declaration (#491) is the model's ``description`` and its
+    ``config.meta.dex`` (grain, population, assumptions), and per column the
+    column's ``description`` and its own ``config.meta.dex`` (role, additivity,
+    unit, and the rest). ``fields`` and ``columns`` map each field that is set to
+    a hash of its canonical form, so drift can name the field that changed
+    without the baseline holding the declaration itself: a population filter's
+    values are authored text, but they are still values, and the snapshot holds
+    none (see the module docstring).
+
+    Every key under ``meta.dex`` is a field, not only the ones #491 defines, so a
+    declaration field added later is fingerprinted without a change here. A
+    column with nothing declared is absent from ``columns`` rather than present
+    and empty, and a model with nothing declared anywhere is absent from
+    :attr:`TransformLayer.declarations`.
+
+    ``path`` is the YAML file the entry was read from: provenance for the
+    finding, never opened, and excluded from comparison so moving an entry to
+    another file is not a change to what it says.
+    """
+
+    path: str | None = None
+    fields: dict[str, str] = Field(default_factory=dict)
+    columns: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+
 class TransformLayer(BaseModel):
     """The transformation layer's fingerprint: file hashes, model names, and the
     source declarations that bind the project to warehouse objects.
@@ -149,6 +183,15 @@ class TransformLayer(BaseModel):
     excluded from every comparison, so a changed note is never drift. Anything dex
     must *decide* from belongs in a project tier, which is checkable, rather than
     in prose the engine would have to trust.
+
+    ``declarations`` is each declared model's :class:`DeclarationFingerprint`.
+    ``None`` means *not captured*: every baseline pinned before #497, and any
+    format that does not read declarations. ``{}`` means captured, and nothing
+    is declared. The two are kept apart for the reason
+    ``SemanticLayerSnapshot.relationships_and_keys_captured`` gives: read as
+    empty, an old baseline would report every declaration in the project as
+    newly added, or a project with none as clean, when the axis was never
+    checked at all.
     """
 
     files: dict[str, str] = Field(default_factory=dict)
@@ -157,6 +200,7 @@ class TransformLayer(BaseModel):
     sources: list[SourceTable] = Field(default_factory=list)
     model_sources: dict[str, list[str]] = Field(default_factory=dict)
     model_refs: dict[str, list[str]] = Field(default_factory=dict)
+    declarations: dict[str, DeclarationFingerprint] | None = None
     notes: list[str] = Field(default_factory=list)
 
 
@@ -407,7 +451,8 @@ def transform_layer(view: DbtProjectView) -> TransformLayer:
             model_refs[model] = ref_calls
     models.sort()
     sources: list[SourceTable] = []
-    for parsed, path in yaml_documents(view):
+    documents = yaml_documents(view)
+    for parsed, path in documents:
         for src in parsed.get("sources") or []:
             if not isinstance(src, dict) or not src.get("name"):
                 continue
@@ -434,7 +479,44 @@ def transform_layer(view: DbtProjectView) -> TransformLayer:
         sources=sources,
         model_sources=model_sources,
         model_refs=model_refs,
+        declarations=declaration_fingerprints(documents),
     )
+
+
+def declaration_fingerprints(
+    documents: list[tuple[dict[str, Any], str]],
+) -> dict[str, DeclarationFingerprint]:
+    """Each declared model's per-field fingerprint, from the project's YAML.
+
+    Read from every ``models:`` entry, where #491 renders a declaration, through
+    the same ``meta`` precedence dbt applies (``config.meta`` over a top-level
+    ``meta``), so a key a human moved is read where they put it. A model entry
+    that appears in two files (which dbt refuses) is read from the first path in
+    sorted order, so the fingerprint does not depend on file-system order.
+    """
+
+    out: dict[str, DeclarationFingerprint] = {}
+    for parsed, path in sorted(documents, key=lambda document: document[1]):
+        for entry in parsed.get("models") or []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            if entry["name"] in out:
+                continue
+            fields = _declared_fields(entry)
+            columns: dict[str, dict[str, str]] = {}
+            for column in entry.get("columns") or []:
+                if not isinstance(column, dict) or not isinstance(
+                    column.get("name"), str
+                ):
+                    continue
+                column_fields = _declared_fields(column)
+                if column_fields:
+                    columns[column["name"]] = column_fields
+            if fields or columns:
+                out[entry["name"]] = DeclarationFingerprint(
+                    path=path, fields=fields, columns=columns
+                )
+    return out
 
 
 def semantic_layer_snapshot(view: DbtProjectView) -> SemanticLayerSnapshot:
@@ -462,6 +544,64 @@ semantic_layer = semantic_layer_snapshot
 
 def _definition_hash(entry: dict[str, Any]) -> str:
     return content_hash(json.dumps(entry, sort_keys=True, default=str))
+
+
+def _declared_fields(entry: dict[str, Any]) -> dict[str, str]:
+    """One model or column entry's declared fields, each hashed canonically.
+
+    The ``description`` plus every key under ``meta.dex``. A field written but
+    empty (``description: ""``, ``grain: []``) declares nothing and is left out,
+    which is how #493's ``declared`` reader treats it too.
+    """
+
+    stated: dict[str, Any] = {}
+    description = entry.get("description")
+    if isinstance(description, str) and description.strip():
+        stated["description"] = description
+    dex = entry_meta(entry).get(DEX_META_KEY)
+    if isinstance(dex, dict):
+        for key, value in dex.items():
+            if value not in (None, "", [], {}):
+                stated[str(key)] = value
+    return {
+        field: content_hash(
+            json.dumps(_canonical(field, value), sort_keys=True, default=str)
+        )
+        for field, value in stated.items()
+    }
+
+
+#: Lists whose order says nothing. A grain is a set of columns, and a population
+#: is the conjunction of its filters, each over a set of values; reordering any
+#: of them in the YAML restates the same declaration. Every other list keeps its
+#: order, because dex cannot know an order is meaningless in a field it does not
+#: define.
+_UNORDERED = {("grain",), ("population", "filters"), ("assumptions",)}
+_UNORDERED_VALUES = {"includes", "excludes"}
+
+
+def _canonical(field: str, value: Any, path: tuple[str, ...] = ()) -> Any:
+    """``value`` with formatting and ordering that carry no meaning removed.
+
+    Whitespace inside a string is collapsed, so a description reflowed from a
+    plain scalar into a folded block (``>``) is not a change. Mapping order is
+    already discarded by the ``sort_keys`` dump that follows.
+    """
+
+    path = path or (field,)
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical(field, item, (*path, str(key)))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        items = [_canonical(field, item, path) for item in value]
+        if path in _UNORDERED or path[-1] in _UNORDERED_VALUES:
+            items.sort(key=lambda item: json.dumps(item, sort_keys=True, default=str))
+        return items
+    return value
 
 
 def _semantic_model_def(entry: dict[str, Any], path: str) -> SemanticModelDef:

@@ -415,6 +415,241 @@ def transform_drift(
     return findings
 
 
+#: How much a change to one declared field can move what a model's numbers
+#: mean (#497). Which rows count, what one row is, and how a measure adds up
+#: change every number read off the model; a column's role, its references or
+#: its NULL rule change how it may be used; a description changes only the
+#: words. A field dex does not define is ranked in the middle, because dex
+#: cannot tell how much it matters.
+_DECLARATION_WEIGHT = {
+    "population": "high",
+    "grain": "high",
+    "additivity": "high",
+    "unit": "high",
+    "aggregation": "high",
+    "description": "low",
+}
+
+
+def _declaration_weight(field: str) -> str:
+    return _DECLARATION_WEIGHT.get(field, "medium")
+
+
+def declaration_drift_status(
+    current_transform: TransformLayer | None, snap: Snapshot
+) -> tuple[bool, str | None]:
+    """Whether :func:`declaration_drift` can compare the two sides, and why not.
+
+    A side that never recorded its declarations is *unchecked*, never clean: an
+    absent fingerprint read as an empty one would report every declaration in
+    the project as newly added, or a project with none as unchanged.
+    """
+
+    baseline = snap.transform_layer
+    if baseline is None and current_transform is None:
+        return False, "there is no transformation project to read declarations from"
+    if baseline is None:
+        return False, (
+            "the baseline has no transformation-layer fingerprint; re-run "
+            "`maintain snapshot` to baseline the project's declarations"
+        )
+    if current_transform is None:
+        return False, "the current transformation project could not be read"
+    if baseline.declarations is None:
+        return False, (
+            "the baseline was pinned before declarations were fingerprinted; "
+            "re-run `maintain snapshot` (or `maintain snapshot --project-only`, "
+            "which leaves the warehouse baseline as it is) to baseline them"
+        )
+    if current_transform.declarations is None:
+        return False, "this project format does not read model declarations"
+    return True, None
+
+
+def declaration_drift(
+    current_transform: TransformLayer | None,
+    snap: Snapshot,
+    semantic: SemanticLayer | None = None,
+) -> list[DriftFinding]:
+    """A declaration added, removed, or changed since the baseline (#497).
+
+    A declaration records what a model means, so changing one changes what its
+    numbers mean even when the SQL file is untouched, which ``model_changed``
+    cannot see. Compared per model and per column, and per field within each:
+
+    - ``declaration_added`` / ``declaration_removed``: a model or a column that
+      declares something now and declared nothing then, or the reverse. A model
+      whose whole declaration is gone is one finding, naming its columns, rather
+      than one per column.
+    - ``declaration_changed``: one field of a declaration that exists on both
+      sides, set, cleared or changed (``data.change``), so a reader is told it
+      was the population and not the description.
+
+    Severity follows :data:`_DECLARATION_WEIGHT` for a change. A cleared field
+    ranks one step lower, capped at ``medium``: the record of the decision is
+    gone, but the rule did not turn into a different one. A newly declared field
+    is ``low``: it records intent the model already had. Returns nothing when
+    :func:`declaration_drift_status` says the sides are not comparable.
+
+    ``semantic`` traces each finding to the metrics built on the model, the way
+    ``annotate_impacts`` does for warehouse findings.
+    """
+
+    comparable, _ = declaration_drift_status(current_transform, snap)
+    if not comparable or snap.transform_layer is None or current_transform is None:
+        return []
+    base = snap.transform_layer.declarations or {}
+    cur = current_transform.declarations or {}
+    present = set(current_transform.models)
+
+    findings: list[DriftFinding] = []
+
+    def finding(
+        code: str,
+        model: str,
+        column: str | None,
+        severity: str,
+        detail: str,
+        data: dict,
+    ) -> None:
+        findings.append(
+            DriftFinding(
+                axis="semantic",
+                code=code,
+                identifier=model,
+                column=column,
+                severity=severity,
+                detail=detail,
+                data={"model": model}
+                | ({"column": column} if column is not None else {})
+                | data,
+                impacted_metrics=_metrics_on_model(semantic, model, column),
+            )
+        )
+
+    def subject(model: str, column: str | None) -> str:
+        if column is None:
+            return f"model '{model}'"
+        return f"column '{column}' of model '{model}'"
+
+    def removed_severity(fields: Iterable[str]) -> str:
+        weights = {_declaration_weight(f) for f in fields}
+        return "medium" if weights & {"high", "medium"} else "low"
+
+    for model in sorted(cur.keys() - base.keys()):
+        declared = cur[model]
+        finding(
+            "declaration_added",
+            model,
+            None,
+            "low",
+            f"{subject(model, None)} has a declaration for the first time since "
+            "the baseline",
+            {
+                "fields": sorted(declared.fields),
+                "columns": sorted(declared.columns),
+                "path": declared.path,
+            },
+        )
+    for model in sorted(base.keys() - cur.keys()):
+        declared = base[model]
+        column_fields = {f for fields in declared.columns.values() for f in fields}
+        still_built = model in present
+        finding(
+            "declaration_removed",
+            model,
+            None,
+            removed_severity(set(declared.fields) | column_fields),
+            f"{subject(model, None)} no longer declares what it means"
+            + ("" if still_built else ", and the model itself was removed"),
+            {
+                "fields": sorted(declared.fields),
+                "columns": sorted(declared.columns),
+                "model_present": still_built,
+                "path": declared.path,
+            },
+        )
+
+    for model in sorted(base.keys() & cur.keys()):
+        before, after = base[model], cur[model]
+        targets: list[tuple[str | None, dict[str, str] | None, dict[str, str] | None]]
+        targets = [(None, before.fields or None, after.fields or None)]
+        targets += [
+            (column, before.columns.get(column), after.columns.get(column))
+            for column in sorted(before.columns.keys() | after.columns.keys())
+        ]
+        for column, was, now in targets:
+            if was is None and now is None:
+                continue
+            if was is None:
+                finding(
+                    "declaration_added",
+                    model,
+                    column,
+                    "low",
+                    f"{subject(model, column)} now declares "
+                    f"{_field_list(now)}, where the baseline declared nothing",
+                    {"fields": sorted(now), "path": after.path},
+                )
+                continue
+            if now is None:
+                finding(
+                    "declaration_removed",
+                    model,
+                    column,
+                    removed_severity(was),
+                    f"{subject(model, column)} no longer declares {_field_list(was)}",
+                    {"fields": sorted(was), "model_present": True, "path": before.path},
+                )
+                continue
+            for field in sorted(was.keys() | now.keys()):
+                if was.get(field) == now.get(field):
+                    continue
+                if field not in was:
+                    change, severity = "added", "low"
+                    verb = "now declares"
+                elif field not in now:
+                    change, severity = "removed", removed_severity([field])
+                    verb = "no longer declares"
+                else:
+                    change, severity = "changed", _declaration_weight(field)
+                    verb = "changed its declared"
+                finding(
+                    "declaration_changed",
+                    model,
+                    column,
+                    severity,
+                    f"{subject(model, column)} {verb} {field.replace('_', ' ')} "
+                    "since the baseline",
+                    {"field": field, "change": change, "path": after.path},
+                )
+    return findings
+
+
+def _field_list(fields: Iterable[str]) -> str:
+    return ", ".join(field.replace("_", " ") for field in sorted(fields))
+
+
+def _metrics_on_model(
+    semantic: SemanticLayer | None, model: str, column: str | None
+) -> list[str]:
+    """The metrics a declaration change on ``model`` (or one column of it) can
+    move: every metric over a semantic model built on it, or, for a column only
+    some measures read, the metrics over those measures."""
+
+    if semantic is None:
+        return []
+    measures: set[str] = set()
+    for sm in semantic.semantic_models:
+        if sm.model_ref != model:
+            continue
+        if column is None or column in sm.structural_columns():
+            measures.update(sm.measures)
+        else:
+            measures.update(name for name, col in sm.measures.items() if col == column)
+    return _metrics_from_measures(semantic, measures)
+
+
 def uncomparable_volume(
     current: list[Dataset], snap: Snapshot, scope: set[str] | None = None
 ) -> list[str]:

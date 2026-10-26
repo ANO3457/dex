@@ -22,6 +22,16 @@ fingerprints of the dbt project and of the semantic layer.
   relationships with every ordered column pair. Whether that side was captured is
   itself recorded, so a baseline written before it reports the relationship axis
   as unchecked rather than clean.
+- Each dbt model's **declaration** is fingerprinted per model and per column: the
+  model's and each column's `description`, and every key under their
+  `config.meta.dex` (grain, population, assumptions; a column's role, additivity,
+  unit, aggregation, null rule, references). One hash per field, never the
+  declared text, so a population filter's values do not land in `.dex/`. Hashes
+  are taken over a canonical form: reflowing a description, reordering a grain or
+  a filter's values, or moving the entry to another YAML file is not a change.
+  `data.transform_layer.declared_model_count` says how many models were
+  fingerprinted (`0` is a project that declares nothing, which is a baseline;
+  `null` is a format that does not read declarations).
 - Without a cache it captures a metadata-only baseline and says so. It warns
   when the cache it pinned is thin (objects without column detail) or older than
   the profile freshness window, because either makes "accept current state" only
@@ -98,6 +108,36 @@ dimensions whose set of values widened or narrowed underneath their metrics.
 
 The cardinality half needs a semantic model that names a transformation model.
 Ossie names none, so on an Ossie layer this command is free and offers no scan.
+
+**Declaration drift** is the third free focus of this axis. A declaration
+records what a model means, so changing it changes what the model's numbers
+mean with the SQL untouched, which the schema axis's `model_changed` cannot see.
+Each finding names the model (`identifier`, `data.model`), the column where it
+is one, and the field:
+
+- `declaration_changed`: one field of a declaration present on both sides was
+  changed, newly set, or cleared (`data.field`, `data.change` of `changed`,
+  `added` or `removed`). A changed population, grain, additivity, unit or
+  aggregation is `high`; a role, references, null rule, assumptions, or a
+  `meta.dex` key dex does not define is `medium`; a description is `low`. A
+  cleared field ranks one step lower, capped at `medium`, and a newly set one is
+  `low`.
+- `declaration_added` / `declaration_removed`: a model or a column that declares
+  something now and declared nothing at the baseline, or the reverse, with the
+  fields under `data.fields`. A model whose whole declaration is gone is one
+  finding listing its columns, and `data.model_present: false` says the model
+  itself was removed too.
+
+Each one names under `impacted_metrics` the metrics over a semantic model built
+on that model. `data.declaration_drift` says whether this focus ran:
+`{"checked": true, "baseline_declared_models", "declared_models"}`, or
+`{"checked": false, "reason"}` with a warning. A baseline pinned before
+declarations were fingerprinted is unchecked, never clean and never every
+declaration newly added; `maintain snapshot --project-only` baselines them
+without re-measuring the warehouse, which is also how an intended declaration
+change is accepted. `maintain reconcile` answers these findings with advisories
+only: a declaration is a human's decision, so dex never rewrites one to match the
+baseline.
 
 The baseline records which vendor read the layer, and for SLayer the release and
 model format version. A change in any of them is reported first

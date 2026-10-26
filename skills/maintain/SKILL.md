@@ -108,8 +108,8 @@ fetches the engine's dependencies from PyPI or your configured index.
    never in `findings`.
 3. **Drill into one axis** when a finding needs depth: `maintain schema`
    (structure), `maintain volume` (row counts), `maintain grain` (key uniqueness,
-   declared grains, fanout), or `maintain semantic` (definitions and dangling
-   references). Each takes optional `<objects>`.
+   declared grains, fanout), or `maintain semantic` (definitions, dangling
+   references, and changed model declarations). Each takes optional `<objects>`.
 4. **Reconcile.** `maintain reconcile [<class>]` stores the proposed edits as a
    plan and prints a `plan_id`. Read each proposal's `kind` (rules below), then
    apply with `transform apply <plan-id>`. A human edit made since detection
@@ -159,6 +159,12 @@ is not described here.
   back as `definition_removed`. Nothing was removed: the file could not be read.
   Never reconcile those as removals; the fix is the file rewritten in the
   current `version` with `semantic slayer update` (transform skill).
+- `declaration_changed`, `_added` and `_removed` mean what a model *says it
+  means* moved (its population, grain, a column's additivity or unit), even
+  with its SQL unchanged. Relay the field named in `data.field` and the metrics
+  under `impacted_metrics`; the change is a person's decision, so ask whether it
+  was intended rather than proposing to revert it. `data.declaration_drift`
+  with `checked: false` is unchecked, not clean.
 - `join_cardinality_exceeded` means a join's declared arity does not hold, so
   measures across it are inflated. A join declaring no cardinality is in
   `warnings` as unchecked, not passed: relay it as undetermined, and suggest
