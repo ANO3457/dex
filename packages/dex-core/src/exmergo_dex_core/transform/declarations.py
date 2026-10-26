@@ -388,7 +388,9 @@ def _check(
     if declaration.population is not None:
         _check_filters(model, declaration.population, cache, pii_overrides)
 
-    warnings.extend(_partial_intent(declaration, produced))
+    declared_columns = _declared_column_roles(files, declaration.model)
+    declared_columns.update(name.lower() for name in declaration.columns)
+    warnings.extend(_partial_intent(declaration, produced, declared_columns))
     return warnings
 
 
@@ -492,19 +494,46 @@ def _check_filters(
             )
 
 
-def _partial_intent(declaration: Declaration, produced: set[str] | None) -> list[str]:
+def _declared_column_roles(files: Mapping[str, str], model: str) -> set[str]:
+    """Column names that already have a role in the model's YAML declaration."""
+    declared: set[str] = set()
+
+    for entry in _entries(files, {model}):
+        for column in entry.get("columns") or []:
+            if not isinstance(column, dict) or not isinstance(column.get("name"), str):
+                continue
+
+            column_dex = entry_meta(column).get(DEX_META_KEY)
+            if isinstance(column_dex, dict) and column_dex.get("role"):
+                declared.add(column["name"].lower())
+
+    return declared
+
+
+def _partial_intent(
+    declaration: Declaration,
+    produced: set[str] | None,
+    declared_columns: set[str] | None = None,
+) -> list[str]:
     # A missing model-level field (description, grain, population, assumptions)
     # is warned once per field by `drafting`, which reads the post-change YAML
     # and so also counts what the entry declared before this payload.
     warnings = []
+
     if produced is not None:
-        declared = {c.lower() for c in declaration.columns}
-        undeclared = sorted(c for c in produced if c not in declared)
+        declared = (
+            {column.lower() for column in declaration.columns}
+            if declared_columns is None
+            else {column.lower() for column in declared_columns}
+        )
+        undeclared = sorted(column for column in produced if column not in declared)
+
         if undeclared:
             warnings.append(
                 f"'{declaration.model}' produces column(s) {', '.join(undeclared)} "
                 "with no declared role"
             )
+
     for index, assumption in enumerate(declaration.assumptions):
         absent = [
             field
@@ -516,6 +545,7 @@ def _partial_intent(declaration: Declaration, produced: set[str] | None) -> list
                 f"'{declaration.model}' assumption {index + 1} has no "
                 f"{', '.join(absent)}"
             )
+
     return warnings
 
 

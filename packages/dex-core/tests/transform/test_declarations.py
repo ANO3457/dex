@@ -354,6 +354,31 @@ def test_missing_intent_warns_and_never_refuses():
     assert any("with no declared role" in w for w in warnings)
 
 
+def test_partial_declaration_uses_existing_column_roles_for_warnings():
+    [existing] = parse_declarations([FULL])
+    existing_schema = render(None, existing)
+    files = _project(existing_schema)
+
+    [partial] = parse_declarations(
+        [
+            {
+                "model": "fct_orders",
+                "assumptions": [
+                    {
+                        "decision": "How order totals are interpreted",
+                        "chosen": "Use the existing business definition",
+                        "evidence": "data",
+                    }
+                ],
+            }
+        ]
+    )
+
+    _edits, warnings = apply_declarations([partial], _view(files), [])
+
+    assert not any("with no declared role" in warning for warning in warnings)
+
+
 # --- decisions ------------------------------------------------------------------
 
 
