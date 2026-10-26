@@ -39,12 +39,33 @@ keep it dependency-free.
 python -m evals skills/explore               # full suite: triggering + quality + uplift
 python -m evals skills/explore --triggering  # triggering only (cheaper)
 python -m evals skills/explore --json        # machine-readable report
+python -m evals skills/explore --case 7 --case 8  # only those quality cases
 ```
 
-The default backend drives Claude Code headless, so it needs the `claude` CLI and
-a workspace with the dex plugin installed. The command exits non-zero unless the
-suite passes (clean triggering and no regression versus baseline), so the same
-invocation works locally and as a release gate.
+The default backend drives Claude Code headless, so it needs the `claude` CLI. The
+command exits non-zero unless the suite passes (clean triggering and no regression
+versus baseline), so the same invocation works locally and as a release gate.
+
+**Which plugin a run evaluates.** The skill arm loads the dex plugin from
+`--plugin-dir`, which defaults to this checkout, so a branch is evaluated with its
+own skill text. Every run prints the path on stderr. Pass `--plugin-dir <path>` to
+evaluate another copy. The baseline arm of the uplift check passes no plugin flag,
+so it still sees whatever dex plugin the machine has installed. `--corpus` runs
+use `--plugin-dir` too.
+
+**Running a few cases.** `--case ID` (repeatable) runs only those output-quality
+cases, with the skill on, and skips triggering and the uplift baseline. The ids
+are the `id` fields in the suite's `evals.json`; an unknown id is an error. It
+exits non-zero unless every selected case passes.
+
+**Running from inside a Claude Code session.** A session exports `CLAUDECODE`,
+`CLAUDE_CODE_SESSION_ID` and other `CLAUDE*` variables that describe it, and a
+`claude -p` child that inherits them has answered as part of the parent session.
+The backend therefore starts each child without any `CLAUDE*` variable except
+the ones it needs to log in: `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, and
+`CLAUDE_CODE_USE_*`/`CLAUDE_CODE_SKIP_*` (provider selection). `ANTHROPIC_*`
+variables pass through unchanged. Running from inside a session needs nothing
+extra.
 
 ## The cross-skill triggering corpus
 
@@ -85,4 +106,5 @@ runs as measuring drift from that number rather than pass/fail).
   protocols driven by the `claude` CLI. A non-Claude agent is a second backend
   behind the same protocols, with no change to the core.
 - `__main__.py` is the CLI.
-- `tests/` covers the scoring core with fake backends (no model, free, in CI).
+- `tests/` covers the scoring core with fake backends, and the CLI and live
+  backend with `subprocess.run` patched out (no model, free, in CI).
