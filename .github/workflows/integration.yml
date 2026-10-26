@@ -130,8 +130,15 @@ jobs:
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_INTEGRATION_SA }}
+      # Every new client re-fetches a GitHub OIDC token for federation, so a
+      # timeout at GitHub's token endpoint fails whichever test was mid-auth
+      # (runs 40327780740, 40328565107). Rerun only that failure, once; any
+      # other failure, or the same one twice, still fails the job.
       - name: Live BigQuery integration suite
-        run: uv run pytest tests/integration -q -m bigquery
+        run: >-
+          uv run --with pytest-rerunfailures==16.7
+          pytest tests/integration -q -m bigquery
+          --reruns 1 --only-rerun "Unable to retrieve Identity Pool subject token"
 
   snowflake:
     if: github.repository == 'exmergo/dex'
@@ -288,8 +295,17 @@ jobs:
             const token = (await response.json()).access_token
             core.setSecret(token)
             core.exportVariable('DATABRICKS_TOKEN', token)
+      # Each SDK Config re-fetches a GitHub OIDC token (github-oidc above), so
+      # a timeout at GitHub's token endpoint fails whichever test was mid-auth.
+      # Inside Config() the engine sees only that no credential resolved, so
+      # that message is rerun too. Once, and only these (see the bigquery job).
       - name: Live Databricks integration suite
-        run: uv run pytest tests/integration -q -m databricks
+        run: >-
+          uv run --with pytest-rerunfailures==16.7
+          pytest tests/integration -q -m databricks
+          --reruns 1
+          --only-rerun "Cannot get GitHub OIDC token"
+          --only-rerun "environment variables are set but no credential resolved"
 
   redshift:
     if: github.repository == 'exmergo/dex'

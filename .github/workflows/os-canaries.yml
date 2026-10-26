@@ -67,6 +67,13 @@ jobs:
   macos:
     runs-on: macos-latest
     timeout-minutes: 90
+    env:
+      # A version request alone can select the runner's Homebrew Python. Its
+      # OpenSSL 4 build has no ssl.PROTOCOL_TLSv1, which Snowflake 4.8.0's
+      # vendored urllib3 still references at import. Use uv's managed build
+      # throughout setup, sync, tests and their isolated packaging subprocesses.
+      # Track the upstream fix as SNOW-4232077; see CONTRIBUTING.md.
+      UV_MANAGED_PYTHON: "true"
     defaults:
       run:
         working-directory: packages/dex-core
@@ -78,5 +85,22 @@ jobs:
           python-version: "3.14"
       - name: Sync (every optional capability + dev extras)
         run: uv sync --locked --extra all --extra dev --python 3.14
+      - name: Interpreter and TLS stack under test
+        run: |
+          uv run --no-sync python - <<'PY'
+          import importlib.metadata
+          import ssl
+          import sys
+
+          print("Python:", sys.version, flush=True)
+          print("Executable:", sys.executable, flush=True)
+          print("Base executable:", sys._base_executable, flush=True)
+          print("OpenSSL:", ssl.OPENSSL_VERSION, flush=True)
+          print("PROTOCOL_TLSv1 present:", hasattr(ssl, "PROTOCOL_TLSv1"), flush=True)
+          print("snowflake-connector-python:", importlib.metadata.version("snowflake-connector-python"), flush=True)
+          import snowflake.connector
+
+          print("Snowflake connector import: OK", flush=True)
+          PY
       - name: Tier-1 unit tests
         run: uv run --no-sync pytest -q

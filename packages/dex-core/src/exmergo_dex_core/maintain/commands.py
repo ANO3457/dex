@@ -603,6 +603,11 @@ def snapshot(engine: DexEngine, *, project_only: bool = False) -> SnapshotResult
                 file_count=len(transform_layer.files),
                 model_count=len(transform_layer.models),
                 source_count=len(transform_layer.sources),
+                declared_model_count=(
+                    len(transform_layer.declarations)
+                    if transform_layer.declarations is not None
+                    else None
+                ),
             )
             if transform_layer is not None
             else None
@@ -1416,6 +1421,11 @@ def semantic_drift(engine: DexEngine, objects: list[str] | None = None) -> Drift
         ),
         scope_names,
     )
+    declared, declaration_status, declaration_warnings = _declaration_drift(
+        current_transform, current_semantic, snap, scope_names
+    )
+    free_findings.extend(declared)
+    warnings.extend(declaration_warnings)
     checks = drift_mod.cardinality_plan(
         current_semantic, snap, _semantic_names(scope_names) if scope_names else None
     )
@@ -1454,9 +1464,11 @@ def semantic_drift(engine: DexEngine, objects: list[str] | None = None) -> Drift
         # The free half is complete and real, so it returns as the answer it is,
         # with the scanning half offered on top rather than gating it.
         result = _drift_result(by_axis, snap, store, warnings=warnings)
+        result.declaration_drift = declaration_status
         result.pending_offer = offer
         return result
     result = _drift_result(by_axis, snap, store, warnings=warnings)
+    result.declaration_drift = declaration_status
     return command_args.stamp_spend(result, adapter)
 
 
@@ -1543,6 +1555,17 @@ def check(engine: DexEngine, objects: list[str] | None = None) -> DriftResult:
         if project_available
         else []
     )
+    if project_available:
+        declared, declaration_status, declaration_warnings = _declaration_drift(
+            current_transform, current_semantic, snap, scope_names
+        )
+        semantic_findings.extend(declared)
+        warnings.extend(declaration_warnings)
+    else:
+        declaration_status = {
+            "checked": False,
+            "reason": f"the semantic axis was skipped (no project: {no_project})",
+        }
 
     # Rebuilt rather than carried over from `_read_layers`: that one asks for the
     # baseline tier, and a format narrower than it still declares a grain worth
@@ -1610,6 +1633,7 @@ def check(engine: DexEngine, objects: list[str] | None = None) -> DriftResult:
             store, snap, connector, {a: (f, scope_names) for a, f in by_axis.items()}
         )
         result = _drift_result(axis_results, snap, store, warnings=warnings)
+        result.declaration_drift = declaration_status
         result.pending_offer = offer
         return result
 
@@ -1638,6 +1662,7 @@ def check(engine: DexEngine, objects: list[str] | None = None) -> DriftResult:
         store, snap, connector, {a: (f, scope_names) for a, f in by_axis.items()}
     )
     result = _drift_result(axis_results, snap, store, warnings=warnings)
+    result.declaration_drift = declaration_status
     return command_args.stamp_spend(result, adapter)
 
 
@@ -2167,6 +2192,41 @@ def _qualify_uniqueness_findings(
 
 def _final_note(note: str) -> bool:
     return "FINAL" in note and "MergeTree" in note
+
+
+def _declaration_drift(
+    current_transform: TransformLayer | None,
+    current_semantic: SemanticLayer | None,
+    snap: snapshot_mod.Snapshot,
+    scope_names: list[str],
+) -> tuple[list[drift_mod.DriftFinding], dict[str, object], list[str]]:
+    """The declaration focus of the semantic axis (#497): its findings, whether
+    it ran, and the warning that says so when it did not.
+
+    Free on every connector: both sides are read from the repository and the
+    snapshot. The status rides the envelope as ``data.declaration_drift``
+    whether or not it ran, because an empty ``findings`` from a baseline that
+    never recorded declarations is not a clean bill, and a caller must be able
+    to tell the two apart without parsing a warning. The warning is left out
+    where there is no transformation project on either side, since there is
+    nothing there that could have been declared.
+    """
+
+    checked, reason = drift_mod.declaration_drift_status(current_transform, snap)
+    baseline = snap.transform_layer
+    status: dict[str, object] = {"checked": checked}
+    if checked:
+        status["baseline_declared_models"] = len(baseline.declarations or {})
+        status["declared_models"] = len(current_transform.declarations or {})
+        findings = _semantic_scope(
+            drift_mod.declaration_drift(current_transform, snap, current_semantic),
+            scope_names,
+        )
+        return findings, status, []
+    status["reason"] = reason
+    if baseline is None and current_transform is None:
+        return [], status, []
+    return [], status, [f"declaration drift was not checked: {reason}"]
 
 
 def _semantic_names(scope_names: list[str]) -> set[str]:

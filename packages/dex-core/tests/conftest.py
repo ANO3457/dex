@@ -286,7 +286,7 @@ def fake_pg_connection():
 
 
 @pytest.fixture
-def fake_clickhouse_connection():
+def fake_clickhouse_connection(monkeypatch):
     """The standard populated fake ClickHouse client (see
     tests/fakes/clickhouse.py).
 
@@ -308,6 +308,8 @@ def fake_clickhouse_connection():
         FakeClickHouseTable,
         FakeGrant,
     )
+
+    from exmergo_dex_core.adapters.clickhouse import ClickHouseAdapter
 
     tables = [
         FakeClickHouseTable(
@@ -350,7 +352,11 @@ def fake_clickhouse_connection():
         FakeGrant(user_name="dbt_dev", access_type="INSERT", database="dbt_dev"),
         FakeGrant(user_name="dbt_dev", access_type="SELECT", database="dbt_dev"),
     ]
-    return FakeClickHouseConnection(tables=tables, grants=grants)
+    connection = FakeClickHouseConnection(tables=tables, grants=grants)
+    # The Cloud capacity probe waits between re-reads; here the waits are
+    # recorded on the fake instead of slept through.
+    monkeypatch.setattr(ClickHouseAdapter, "_sleep", connection.slept.append)
+    return connection
 
 
 @pytest.fixture

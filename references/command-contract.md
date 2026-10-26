@@ -353,7 +353,9 @@ dex maintain snapshot [--project-only]
                                   -> capture/refresh the known-good baseline in .dex/snapshot.json;
                                      --project-only re-fingerprints only project layers and carries the
                                      existing warehouse baseline and its timestamps forward without opening
-                                     a warehouse connection
+                                     a warehouse connection; each model's declaration (descriptions and
+                                     config.meta.dex, per model and per column) is fingerprinted as one
+                                     hash per field, counted in transform_layer.declared_model_count
 dex maintain check                -> sweep every drift axis vs the snapshot; ranked report (read-only;
                                      two-phase on billed connectors: free axes now, one estimate for scans)
 dex maintain schema [<objects>]   -> structural drift: columns/tables added, dropped, retyped, renamed;
@@ -366,8 +368,12 @@ dex maintain grain [<objects>]    -> cardinality/identity drift: lost key unique
                                      fanout, the grains the project declares re-verified, and declared
                                      join arity measured (join_cardinality_exceeded)
                                      (aggregates; gated by --confirm --budget on billed connectors)
-dex maintain semantic [<objects>] -> definition drift and dangling refs (free) + categorical dimension
-                                     cardinality change (a scan; gated on billed connectors)
+dex maintain semantic [<objects>] -> definition drift and dangling refs (free) + declaration drift
+                                     (declaration_added|removed|changed naming the model, column and
+                                     field, population/grain/additivity/unit ranked above a description;
+                                     free; data.declaration_drift says whether it was checked) +
+                                     categorical dimension cardinality change (a scan; gated on billed
+                                     connectors)
 dex maintain reconcile [<class>]  -> propose the edits that reconcile detected drift, as a stored plan
                                      of diffs tagged mechanical/advisory (applied with transform apply);
                                      a SLayer layer's own removals as a second plan, semantic_plan_id
@@ -1120,6 +1126,23 @@ name the objects, and `snapshot` reports `column_detail_count` beside
 warn when the baseline was pinned from a cache older than
 `profile_freshness_hours`, judged on the capture time recorded in the baseline
 rather than on which file was written last, so re-pinning cannot silence it.
+
+**A changed declaration is drift, even with the SQL untouched.** A model's
+declaration ([#491](https://github.com/exmergo/dex/issues/491)) records which
+rows belong, what one row is and how each measure adds up, so changing it
+changes what the model's numbers mean. `maintain snapshot` fingerprints it per
+model and per column, one hash per field over a canonical form, so reflowing a
+description or reordering a grain is not a change and no declared value lands
+in `.dex/`. `maintain semantic` and `maintain check` report
+`declaration_changed` (one field, with `data.change` of `changed`, `added` or
+`removed`), `declaration_added` and `declaration_removed` on the semantic axis.
+A change to the population, grain, additivity, unit or aggregation is `high`,
+a description `low`. The comparison reads the repository and the snapshot
+only, so it is free on every connector. `data.declaration_drift.checked` says
+whether it ran: a baseline pinned before declarations were fingerprinted, or a
+project format that does not read them, is `false` with a `reason` and a
+warning, never an empty, clean-looking result. `maintain snapshot
+--project-only` baselines the declarations without re-measuring the warehouse.
 
 **`explore semantic` queries the semantic layer; `transform` and the `semantic`
 group author it, and `maintain semantic` detects drift in it.** Three backends

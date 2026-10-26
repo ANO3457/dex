@@ -22,6 +22,16 @@ fingerprints of the dbt project and of the semantic layer.
   relationships with every ordered column pair. Whether that side was captured is
   itself recorded, so a baseline written before it reports the relationship axis
   as unchecked rather than clean.
+- Each dbt model's **declaration** is fingerprinted per model and per column: the
+  model's and each column's `description`, and every key under their
+  `config.meta.dex` (grain, population, assumptions; a column's role, additivity,
+  unit, aggregation, null rule, references). One hash per field, never the
+  declared text, so a population filter's values do not land in `.dex/`. Hashes
+  are taken over a canonical form: reflowing a description, reordering a grain or
+  a filter's values, or moving the entry to another YAML file is not a change.
+  `data.transform_layer.declared_model_count` says how many models were
+  fingerprinted (`0` is a project that declares nothing, which is a baseline;
+  `null` is a format that does not read declarations).
 - Without a cache it captures a metadata-only baseline and says so. It warns
   when the cache it pinned is thin (objects without column detail) or older than
   the profile freshness window, because either makes "accept current state" only
@@ -51,7 +61,7 @@ changes; declared sources the warehouse no longer honors; a model added,
 removed, or content-changed since the baseline. Free.
 
 Under `semantic.vendor: slayer` the SLayer models are also held to the warehouse
-by SLayer's own `validate-models` rules, run on the metadata dex captured and
+by SLayer's own `validate-models` rules, run on the metadata Dex captured and
 never through a SLayer datasource: `declared_column_missing`,
 `declared_type_conflict` (SLayer's type buckets: number, string, boolean,
 temporal), `declared_relation_missing` (a table gone since the baseline), and
@@ -106,6 +116,36 @@ dimensions whose set of values widened or narrowed underneath their metrics.
 
 The cardinality half needs a semantic model that names a transformation model.
 Ossie names none, so on an Ossie layer this command is free and offers no scan.
+
+**Declaration drift** is the third free focus of this axis. A declaration
+records what a model means, so changing it changes what the model's numbers
+mean with the SQL untouched, which the schema axis's `model_changed` cannot see.
+Each finding names the model (`identifier`, `data.model`), the column where it
+is one, and the field:
+
+- `declaration_changed`: one field of a declaration present on both sides was
+  changed, newly set, or cleared (`data.field`, `data.change` of `changed`,
+  `added` or `removed`). A changed population, grain, additivity, unit or
+  aggregation is `high`; a role, references, null rule, assumptions, or a
+  `meta.dex` key Dex does not define is `medium`; a description is `low`. A
+  cleared field ranks one step lower, capped at `medium`, and a newly set one is
+  `low`.
+- `declaration_added` / `declaration_removed`: a model or a column that declares
+  something now and declared nothing at the baseline, or the reverse, with the
+  fields under `data.fields`. A model whose whole declaration is gone is one
+  finding listing its columns, and `data.model_present: false` says the model
+  itself was removed too.
+
+Each one names under `impacted_metrics` the metrics over a semantic model built
+on that model. `data.declaration_drift` says whether this focus ran:
+`{"checked": true, "baseline_declared_models", "declared_models"}`, or
+`{"checked": false, "reason"}` with a warning. A baseline pinned before
+declarations were fingerprinted is unchecked, never clean and never every
+declaration newly added; `maintain snapshot --project-only` baselines them
+without re-measuring the warehouse, which is also how an intended declaration
+change is accepted. `maintain reconcile` answers these findings with advisories
+only: a declaration is a human's decision, so Dex never rewrites one to match the
+baseline.
 
 The baseline records which vendor read the layer, and for SLayer the release and
 model format version. A change in any of them is reported first
@@ -175,7 +215,7 @@ proposed as though nothing declared it.
 - `mechanical`: on a dex-scaffolded staging model it edits each drifted column
   into the model and nothing else: one projection added to or removed from the
   list the model names its columns in, and one entry in whichever YAML file
-  already declares the model (a shared `models/schema.yml` included; dex never
+  already declares the model (a shared `models/schema.yml` included; Dex never
   writes a second declaration beside it, and never invents a test). The model is
   never regenerated, so a hand-written cast, rename or filter survives. On a
   project format that places a declaration but authors no staging model, it
@@ -190,14 +230,14 @@ proposed as though nothing declared it.
   that test where the test would be wrong: if a model declares a composite grain
   covering the column, no column-level `unique` is proposed on it, and the warning
   names the combination.
-- Type changes: nothing dex writes declares a type, and the type it holds is the
+- Type changes: nothing Dex writes declares a type, and the type it holds is the
   connector's own spelling (Snowflake reports `NUMBER(38,0)` and `NUMBER(10,2)`
   both as `FIXED`), so the proposal names both spellings.
 
 ## SLayer layers (`semantic.vendor: slayer`)
 
 Every axis runs on a SLayer layer, and none opens a SLayer datasource or SLayer
-storage: each reads the configured model files and the metadata dex captured
+storage: each reads the configured model files and the metadata Dex captured
 through its own connection. The wrapper installs the `[slayer]` extra for every
 `maintain` command where the vendor is `slayer`; without it a command refuses
 with `reason: prerequisite` and names the install.
@@ -205,7 +245,7 @@ with `reason: prerequisite` and names the install.
 | Axis | On SLayer |
 |---|---|
 | `snapshot` | fingerprints each model (minus the values SLayer caches), each saved measure, each declared key, and each join with its ordered pairs and `cardinality`; records the vendor, the SLayer release and the model format version |
-| `schema` | adds the four `declared_*` codes, SLayer's `validate-models` rules on dex's metadata. A model backed by `sql` or `source_queries` is named as not compared |
+| `schema` | adds the four `declared_*` codes, SLayer's `validate-models` rules on Dex's metadata. A model backed by `sql` or `source_queries` is named as not compared |
 | `volume` | unchanged: it reads the warehouse, not the layer |
 | `grain` | measures every `primary_key` (a composite one whole) and `unique` column, and every join's declared `cardinality` (`join_cardinality_exceeded`); a join with none is named in `warnings` as unchecked |
 | `semantic` | definition drift free as everywhere; the dimension-cardinality half needs a `model_ref`, which SLayer has none of, so it is free and offers no scan |

@@ -345,6 +345,24 @@ def _advisory(finding: DriftFinding) -> Proposal:
             "should be unique, or declare the cardinality the data has. dex "
             "proposes no edit, because which of the two is right is a decision"
         ),
+        # A declaration is the project's own record of a decision, so there is
+        # nothing to rewrite here: the change is either the decision someone
+        # meant to make or one to revert by hand, and only a human knows which.
+        "declaration_changed": (
+            "a declared rule changed since the baseline: confirm the model's SQL "
+            "and the metrics on it agree with the new declaration, or revert the "
+            "YAML; once it is intended, re-run `maintain snapshot --project-only` "
+            "to accept it"
+        ),
+        "declaration_added": (
+            "the model records new intent: confirm it describes what the SQL "
+            "does, then re-run `maintain snapshot --project-only` to accept it"
+        ),
+        "declaration_removed": (
+            "the record of these decisions is gone: restore the declaration, or "
+            "if dropping it is intended, re-run `maintain snapshot "
+            "--project-only` to accept it"
+        ),
         "semantic_vendor_changed": (
             "the semantic layer moved to another vendor since the baseline; "
             "once the move is the state you vouch for, re-run `maintain "

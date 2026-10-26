@@ -48,14 +48,14 @@ exist.
 | `references` | `<model>.<column>`, a model, seed or snapshot the project has |
 | `evidence` | `request` (what the user asked for), `contract` (the project's declared columns, tests or metric filters), `precedent` (how sibling models decide the same thing), `data` (what profiling showed), `default` (the conventional analytics-engineering choice) |
 
-A field dex does not know is refused by name, so a typo cannot silently drop
+A field Dex does not know is refused by name, so a typo cannot silently drop
 part of a declaration.
 
 ## What it renders into
 
 The declaration is written into the model's **existing** YAML entry, wherever in
 the project it lives. A model with no entry gets one beside its SQL, named for
-it, which is where the scaffold puts one. dex never writes a second entry for a
+it, which is where the scaffold puts one. Dex never writes a second entry for a
 model, which dbt refuses.
 
 | Declared | Written as |
@@ -225,7 +225,7 @@ the post-change declaration, and what this plan changed between them.
 
 `preexisting: true` marks a rule that already disagreed before this plan and
 that this edit touches. `status: unchecked` (with `reason`, and no `stale`) is a
-rule the plan touched that dex could not read the SQL for: a macro or jinja
+rule the plan touched that Dex could not read the SQL for: a macro or jinja
 predicate, a function around the column (`lower(status) <> 'x'`), a subquery, a
 set operation, or a grain no key proves. It never claims the rule was removed.
 Comparison is on sqlglot's reading of the SQL, so a reformat, an alias rename,

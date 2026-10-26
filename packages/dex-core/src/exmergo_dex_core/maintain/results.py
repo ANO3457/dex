@@ -36,12 +36,17 @@ class LayerFingerprint(BaseModel):
     source_count: int | None = None
     semantic_model_count: int | None = None
     metric_count: int | None = None
+    #: Models whose declaration was fingerprinted (#497). ``None`` when the
+    #: format does not read declarations, so the next run reports the
+    #: declaration axis as unchecked; ``0`` when it does and none are declared.
+    declared_model_count: int | None = None
 
     def transform_data(self) -> dict[str, Any]:
         return {
             "file_count": self.file_count,
             "model_count": self.model_count,
             "source_count": self.source_count,
+            "declared_model_count": self.declared_model_count,
         }
 
     def semantic_data(self) -> dict[str, Any]:
@@ -113,9 +118,14 @@ class DriftResult(Result):
     snapshot_created_at: str | None = None
     warehouse_from: str = ""
     drift_path: str = ""
+    #: Whether the semantic axis's declaration focus compared the two sides
+    #: (#497), and why not when it did not. ``None`` on a command that does not
+    #: run that focus, which leaves the key out of the payload rather than
+    #: reporting a check that was never attempted.
+    declaration_drift: dict[str, Any] | None = None
 
     def data(self) -> dict[str, Any]:
-        return {
+        payload = {
             "findings": [f.model_dump(mode="json") for f in self.findings],
             "finding_count": len(self.findings),
             "axes_run": sorted(self.by_axis),
@@ -132,6 +142,9 @@ class DriftResult(Result):
             },
             "drift_path": self.drift_path,
         }
+        if self.declaration_drift is not None:
+            payload["declaration_drift"] = self.declaration_drift
+        return payload
 
 
 class VerifyResult(Result):
