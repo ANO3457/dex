@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from typing import Any
 
 from ..config import ClickHouseTarget
@@ -295,6 +296,10 @@ class ClickHouseAdapter:
     # model of the scan and still a model, on both deployments.
     estimate_quality = EstimateQuality.APPROXIMATE
     dialect = DIALECT
+    # Seconds between capacity re-reads while a waking service's replicas join;
+    # about 15s in all before the probe refuses.
+    _CAPACITY_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0)
+    _sleep = staticmethod(time.sleep)
 
     def __init__(
         self,
@@ -421,6 +426,24 @@ class ClickHouseAdapter:
         if self._capacity is not None:
             return self._capacity
         self._assert_deployment()
+        # A service waking from idle answers on one replica before the others
+        # have joined, so clusterAllReplicas fails or answers in part for a few
+        # seconds. That is not a capacity anyone can bill against, so the probe
+        # is re-read on a short, bounded schedule and still refuses at the end;
+        # a denied grant is not going to change and refuses at once.
+        for delay in self._CAPACITY_RETRY_DELAYS:
+            try:
+                self._capacity = self._measure_capacity()
+                return self._capacity
+            except ClickHouseConnectionError as exc:
+                server_error = getattr(exc.__cause__, "__cause__", None)
+                if getattr(server_error, "code", None) == _ACCESS_DENIED_CODE:
+                    raise
+            self._sleep(delay)
+        self._capacity = self._measure_capacity()
+        return self._capacity
+
+    def _measure_capacity(self) -> dict[str, object]:
         try:
             rows = self._catalog(
                 "SELECT hostName() AS replica, toFloat64(value) AS memory_bytes, "
@@ -430,7 +453,11 @@ class ClickHouseAdapter:
                 "ORDER BY replica"
             )
         except Exception as exc:
-            raise ClickHouseConnectionError(_CAPACITY_REFUSAL) from exc
+            # The server's reason, already trimmed by the translation, so a
+            # refusal that is not about grants does not read as one.
+            raise ClickHouseConnectionError(
+                f"{_CAPACITY_REFUSAL}; the probe failed: {exc}"
+            ) from exc
         if not rows:
             raise ClickHouseConnectionError(
                 f"{_CAPACITY_REFUSAL}; the probe returned no rows"
@@ -471,14 +498,13 @@ class ClickHouseAdapter:
             raise ClickHouseConnectionError(
                 f"{_CAPACITY_REFUSAL}; the derived compute rate was invalid"
             )
-        self._capacity = {
+        return {
             "replica_count": len(replicas),
             "total_memory_gib": round(total_memory_gib, 6),
             "compute_units_per_hour": round(compute_units_per_hour, 6),
             "source": _CAPACITY_SOURCE,
             "approximate": True,
         }
-        return self._capacity
 
     def _require_cloud_capacity(self) -> None:
         if self.target.deployment == "cloud":

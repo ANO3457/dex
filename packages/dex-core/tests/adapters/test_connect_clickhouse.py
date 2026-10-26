@@ -947,6 +947,47 @@ def test_cloud_capacity_denial_fails_closed(fake_clickhouse_connection):
     )
     with pytest.raises(ClickHouseConnectionError, match="capacity could not be proved"):
         adapter.profile_estimate(["shop.events"])
+    # A grant does not appear by waiting, so the denial is not re-read.
+    assert fake_clickhouse_connection.slept == []
+
+
+def test_cloud_capacity_waits_out_a_waking_service(fake_clickhouse_connection):
+    """A service resuming from idle answers on one replica before the others
+    have joined: clusterAllReplicas fails, then answers in part, then whole.
+    The probe re-reads through that and measures the whole service."""
+
+    fake_clickhouse_connection.cloud_mode = "1"
+    fake_clickhouse_connection.capacity_rows = [
+        {"replica": "r1", "memory_bytes": 8 * 1024**3, "expected_replicas": 2},
+        {"replica": "r2", "memory_bytes": 8 * 1024**3, "expected_replicas": 2},
+    ]
+    fake_clickhouse_connection.capacity_warmup = [
+        server_error(279, "All connection tries failed"),
+        fake_clickhouse_connection.capacity_rows[:1],
+    ]
+    adapter = make_adapter(
+        fake_clickhouse_connection, target=ClickHouseTarget(deployment="cloud")
+    )
+    assert adapter.capabilities()["compute"]["replica_count"] == 2
+    assert fake_clickhouse_connection.slept == [1.0, 2.0]
+
+
+def test_cloud_capacity_refusal_names_the_servers_reason(fake_clickhouse_connection):
+    """A probe that never settles still refuses, and says why rather than
+    pointing only at grants the identity already holds."""
+
+    fake_clickhouse_connection.cloud_mode = "1"
+    fake_clickhouse_connection.capacity_warmup = [
+        server_error(279, "All connection tries failed") for _ in range(5)
+    ]
+    adapter = make_adapter(
+        fake_clickhouse_connection, target=ClickHouseTarget(deployment="cloud")
+    )
+    with pytest.raises(
+        ClickHouseConnectionError, match=r"the probe failed: .*All connection tries"
+    ):
+        adapter.capabilities()
+    assert fake_clickhouse_connection.slept == [1.0, 2.0, 4.0, 8.0]
 
 
 def test_cloud_estimate_and_spend_translate_compute_and_usd(
