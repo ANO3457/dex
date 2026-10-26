@@ -1,4 +1,7 @@
-<img width="1920" height="1080" alt="Video 2" src="https://github.com/user-attachments/assets/f9c8c052-32fb-4b2f-8b89-a6f484b55035" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/preview-dark.png" />
+  <img alt="dex: analytics engineering for your coding agent. Explore, transform, maintain." src="assets/preview-light.png" />
+</picture>
 
 # dex
 
@@ -78,8 +81,8 @@ What you get:
 - **Transform** your dbt project and semantic layer. Models, tests, docs, and metrics arrive as reviewable plans and build only on a dev target.
 - **Maintain** it as the world changes. Schema, volume, grain, and metric-definition drift, each with a proposed fix.
 
-Read-only against your data. Cost quoted before any spend. Every change is a diff
-you review. Works in Claude Code, Codex, or any agent that loads Agent Skills.
+Your source data is never written to, and builds run on a dev target only. Cost
+quoted before any spend. Every change is a diff you review. Works in Claude Code, Codex, or any agent that loads Agent Skills.
 
 ## Why
 
@@ -158,7 +161,8 @@ type contradicts their content, and two designed PII false positives. See the
 flowchart LR
   Agent[Coding agent] --> Skills[dex skills]
   Skills --> Engine[exmergo-dex-core engine]
-  Engine -->|read-only SQL, cost-capped| Warehouse[(Your warehouse)]
+  Engine -->|SELECT-only SQL, cost-capped| Warehouse[(Your warehouse)]
+  Engine -->|dbt builds, dev target only| Warehouse
   Engine -->|one sanitized JSON envelope| Agent
   Engine -->|plans as diffs| Repo[Your repository: dbt project + semantic layer]
   Engine <--> Cache[.dex/ cache and snapshot]
@@ -232,7 +236,7 @@ but it is local spend history, so there is no reason to commit it.
 
 ### What dex will never do
 
-- **Write to your data.** Warehouse access is read-only, and generated SQL is SELECT-only.
+- **Write to your source data.** dex's own SQL is SELECT-only. The only writes to your warehouse are the dbt builds you confirm, on a dev target.
 - **Put personal data in your agent's context.** PII is flagged by column, category, and confidence, and never surfaced. Only a human clears a flag. ([PII policy](https://docs.exmergo.com/dex/guardrails/pii-policy))
 - **Spend before quoting.** A metered scan returns an estimate and runs only with your confirmation and a budget. ([cost controls](https://docs.exmergo.com/dex/guardrails/cost-controls))
 - **Change your project behind your back.** Every edit is a diff, and a human edit made since planning is never overwritten. ([source of truth](https://docs.exmergo.com/dex/concepts/source-of-truth))
@@ -342,7 +346,7 @@ treat these scores as guide posts. ([evaluation](https://docs.exmergo.com/dex/re
 ## What dex sends where
 
 - **On install**, `uv` downloads the pinned engine (and a Python 3.11 to 3.14 if you have none) from PyPI or your configured index.
-- **Your warehouse** gets read-only SQL, with credentials from your existing credential chain.
+- **Your warehouse** gets SELECT-only SQL from dex, plus the dbt builds you confirm on a dev target, with credentials from your existing credential chain.
 - **dbt Cloud** is contacted only if you enable the hosted semantic layer.
 - **dbt-core**, when dex runs it, sends dbt Labs its own anonymous usage statistics unless you turn them off. `transform deps` downloads the packages your `packages.yml` declares.
 - **Your repository** holds dex's state in `.dex/`. dbt writes its usual `target/` and `logs/`.
