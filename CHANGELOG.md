@@ -14,6 +14,101 @@ pending fragments into a new section below. See
 
 <!-- towncrier release notes start -->
 
+## [1.16.2] - 2026-10-26
+
+### Added
+
+- **`recompute_outcome` and `verify_build_evidence` guard `BuildEvidence` contracts.**
+  `BuildEvidence` validates that its stated outcome matches what its nodes, coverage,
+  plan drift, and artifact freshness establish, refusing contradictory documents. Hosts
+  can call `recompute_outcome` to independently derive an outcome from evidence or a raw
+  document, and `verify_build_evidence` to validate consistency and assert an expected
+  verdict. `BuildEvidenceError` is raised on invalid documents or outcome mismatches. ([#826](https://github.com/exmergo/dex/pull/826))
+- **`maintain` reports a changed declaration as drift, even when the SQL is
+  untouched.** A declaration records which rows a model keeps, what one row is and
+  how each measure adds up, so changing one changes what the model's numbers mean.
+  `maintain snapshot` now fingerprints each model's declaration (its descriptions
+  and `config.meta.dex`, per model and per column) as one hash per field, and
+  reports the count as `data.transform_layer.declared_model_count`. `maintain
+  semantic` and `maintain check` report `declaration_changed`, naming the model,
+  the column and the field, plus `declaration_added` and `declaration_removed`.
+  A population, grain, additivity, unit or aggregation change ranks above a
+  description change. Reflowing a description, reordering a grain or moving the
+  entry to another file is not a change. The check reads only the repository and
+  the snapshot, so it is free on every connector. `data.declaration_drift` says
+  whether it ran. A baseline pinned before this release reports it as unchecked,
+  with a warning, rather than as clean: re-run `maintain snapshot --project-only`
+  to baseline declarations without re-measuring the warehouse. `maintain
+  reconcile` answers these findings with advisories and never rewrites a
+  declaration.
+- `transform build --verify` and `maintain verify` now check what a model's
+  declaration says against the relation dbt built. A declared grain is the first
+  grain source, so a composite grain is checked with no `dbt_utils` test. Three new
+  findings: `unit_out_of_range` (a `fraction` outside 0 to 1, or a `percent` whose
+  values all sit within 0 to 1, stating the observed minimum and maximum),
+  `additivity_contradicted` (a column declared `additive` that the cumulative
+  detector reads as a running total), and `population_contradicted` (a value a
+  population filter excludes still present, stated as a count). Every check is an
+  aggregate-only statement, free on DuckDB and priced into the same single estimate
+  or offer on a billed connector. `data.suppressed` names `unit`, `additivity` and
+  `population` whenever one could not run, so a declaration that was not checked
+  never reads as one that held.
+
+### Changed
+
+- **A key that only lost uniqueness because a tenant arrived reads `medium`.**
+  `maintain check` and `maintain grain` used to report `key_lost_uniqueness` at
+  `high` whenever a single-column key from the baseline stopped being unique, even
+  when it was never the grain and the rows had only been added along another
+  column, such as a second repository on a per-repository, per-day table. When the
+  key is not the grain and is still unique together with a column the baseline
+  read as constant, the finding now reads `medium`, its detail says so, and
+  `data.still_unique_as` names the combination. A real duplicate repeats that
+  combination, so it stays `high`, as does a lost grain. A host that gates on
+  `high` stops blocking on the first case. Either way, a lost key that is not the
+  grain now says whether the grain still holds, in `data.grain_holds` and the
+  detail, read from the count the axis already takes; that alone never lowers the
+  severity. The extra combinations are planned and
+  priced with the axis: on BigQuery they ride the table's one batched statement,
+  and elsewhere they run only for a table where a key was lost. ([#823](https://github.com/exmergo/dex/pull/823))
+
+### Fixed
+
+- **`transform init` keeps comments and unread keys in an existing `.dex/config.yml`.**
+  When a repo already has a config, init amends only the keys it sets through the
+  same in-place editor as `dex config set`, so comments, key order, unread keys,
+  and an explicit `null` (for example `cluster.sample_seed`) survive. A repo with
+  no config still gets a fresh file from `save_config`. ([#824](https://github.com/exmergo/dex/pull/824))
+- **`transform plan` drops a Dex-scaffolded empty `.gitkeep` when the first model lands.**
+  When a plan upserts the first real file into `models/staging`, `intermediate`, or
+  `marts` and that folder still holds only an empty `.gitkeep` from `transform init`,
+  the plan includes a delete for the keeper so apply removes it under the same
+  guard. ([#825](https://github.com/exmergo/dex/pull/825))
+- **`dex config unset` can remove duplicate occurrences of keys.** When a key is written more than once in `.dex/config.yml`, `dex config unset <key>` removes the earlier occurrence that YAML ignored and keeps the winning value. `dex config unset --duplicate` cleans up duplicate occurrences across the file without changing effective settings. ([#827](https://github.com/exmergo/dex/pull/827))
+- **`explore diagram` suggests `--full` when objects have no edges.** When the exploration cache contains profiled datasets but no relationships, running `explore diagram` now advises running with `--full` to render unjoined objects, instead of reporting that no drawable objects exist. ([#846](https://github.com/exmergo/dex/pull/846))
+- **`maintain drift` ranks `possible_rename` candidates by name similarity.** When multiple added columns of the same type could match a dropped column, drift detection now produces a single finding with candidate renames ranked by token and string similarity rather than reporting unranked combinations. ([#847](https://github.com/exmergo/dex/pull/847))
+- **ClickHouse statement refusals use the shared warehouse error type.** Server
+  errors outside the existing named connection and budget refusals now raise
+  `WarehouseQueryError`, retaining the server code and query stage with a bounded
+  diagnostic. A refused grain measurement no longer aborts verification of the
+  other models, and values-free mode reports `warehouse_refused` while withholding
+  the server's message. ([#852](https://github.com/exmergo/dex/pull/852))
+- **Measure warnings identify the fields still missing.** `transform plan` now names only the absent aggregation, additivity, or unit for each measure and groups measures missing the same fields. The per-column `data.declarations.<model>.missing` paths are unchanged. ([#853](https://github.com/exmergo/dex/pull/853))
+- **`explore map` and `explore relationships` no longer suggest a dbt project is missing when it was found. With `--use-project`, a repository whose dbt project declares no foreign keys used to get the note "no declared relationships (no dbt project or no declared foreign keys)". The note now says "no declared relationships (dbt project declares no foreign keys)", and "no declared relationships (no dbt project)" is kept for a repository without one. ([#863](https://github.com/exmergo/dex/pull/863))
+- **Reconcile finds tests on staging models whose names already start with `stg_`.** Grain drift on `stg_orders` previously looked for `stg_stg_orders.yml` and incorrectly advised adding a `unique` test. It now reads the existing staging declaration and leaves an already-failing uniqueness test unchanged. ([#864](https://github.com/exmergo/dex/pull/864))
+- Fixed false "no declared role" warnings when partially redeclaring a model whose existing YAML declaration already defines column roles. ([#865](https://github.com/exmergo/dex/pull/865))
+- **ClickHouse Cloud's capacity probe waits out a waking service.** A service
+  resuming from idle answers `clusterAllReplicas` in part, or not at all, for a few
+  seconds, and every billed command refused with advice to grant access the
+  identity already held. The probe now re-reads for about 15 seconds before
+  refusing, the refusal names the server's own reason, and a denied grant still
+  refuses at once.
+- `explore profile --check-cumulative` runs on ClickHouse. The detector's probe
+  used `LAG`, which ClickHouse does not have, so the check failed there; it now
+  uses `lagInFrame` over an explicit frame, with a NULL default so an entity's
+  first row is not counted as an observation.
+
+
 ## [1.16.1] - 2026-10-25
 
 ### Added
