@@ -39,6 +39,7 @@ from ..config import (
     load_config,
     save_config,
 )
+from ..config_document import ABSENT, ConfigDocument
 from ..dbt_project import (
     PROFILES_FILE,
     PROJECT_FILE,
@@ -193,7 +194,7 @@ def init_project(
     diffs = [file_diff(rel, None, content) for rel, content in files.items()]
     for rel, content in files.items():
         write_project_file(root / rel, content)
-    save_config(config, root)
+    _persist_init_config(config, root, config_path, old_config)
     diffs.append(
         file_diff(config_rel, old_config, config_path.read_text(encoding="utf-8"))
     )
@@ -209,6 +210,63 @@ def init_project(
         created=created,
         diffs=diffs,
     )
+
+
+# Attributes init writes back onto an existing connector block. A model
+# default the profile never assigned stays off this list, so loading the file
+# cannot grow it (``clickhouse.deployment``, ``trino.deployment``).
+_INIT_CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
+    "duckdb": ("path",),
+    "bigquery": ("project", "dev_dataset", "location"),
+    "snowflake": ("dev_database", "dev_schema"),
+    "databricks": ("dev_catalog", "dev_schema"),
+    "postgres": ("dev_schema",),
+    "redshift": ("dev_schema",),
+    "clickhouse": ("dev_database",),
+    "trino": ("dev_schema",),
+}
+
+
+def _persist_init_config(
+    config: DexConfig,
+    root: Path,
+    config_path: Path,
+    old_config: str | None,
+) -> None:
+    """Write the keys ``init`` sets into ``.dex/config.yml``.
+
+    A repo with no config keeps ``save_config``: there is nothing to preserve. A
+    repo that already has one is amended through ``ConfigDocument`` (the same
+    in-place editor ``dex config set`` uses), so comments, key order, unread
+    keys, and explicit nulls survive. Only the keys ``init`` itself changes are
+    touched. Those are the project pointers and the connector fields named in
+    ``_INIT_CONFIG_FIELDS``.
+    """
+
+    if old_config is None:
+        save_config(config, root)
+        return
+
+    document = ConfigDocument.read(config_path)
+    amendments: list[tuple[str, Any]] = [
+        ("connector", config.connector),
+        ("dbt_project_dir", config.dbt_project_dir),
+        ("dbt_target", config.dbt_target),
+    ]
+    block = getattr(config, config.connector, None)
+    if block is not None:
+        for field in _INIT_CONFIG_FIELDS[config.connector]:
+            value = getattr(block, field)
+            if value is not None:
+                amendments.append((f"{config.connector}.{field}", value))
+    for key, value in amendments:
+        if value is None:
+            continue
+        current = document.written(key)
+        if current is not ABSENT and current == value:
+            continue
+        document = document.with_value(key, value)
+    document.write(config_path)
 
 
 # --- per-connector profile renderers -------------------------------------------

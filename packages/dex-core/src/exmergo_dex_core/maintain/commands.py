@@ -49,6 +49,7 @@ from ..guards import dialect as dialect_guard
 from ..guards.dialect import DialectDependencyError
 from ..results import ConfirmationRequest, to_envelope
 from ..storage import Document, FilesystemStore, MaintainStore, readable_cache
+from . import declared_facts as facts_mod
 from . import drift as drift_mod
 from . import snapshot as snapshot_mod
 from . import verify as verify_mod
@@ -808,92 +809,101 @@ def cmd_grain(args: argparse.Namespace, engine: DexEngine) -> env.Envelope:
     return _drift_envelope(grain_drift(engine, getattr(args, "objects", None)))
 
 
-def _combined_scan_handshake(adapter, join_cost):
-    """Two handshakes, ``(row_ask, join_ask)``, sharing one cached decision
-    for row population's row-count scan and join contract's overlap probe
-    (#228), the two paid scans `maintain verify` can run.
+def _combined_scan_handshake(adapter, join_cost, facts_cost=None):
+    """Three handshakes, ``(row_ask, join_ask, facts_ask)``, sharing one cached
+    decision for the paid scans `maintain verify` can run: row population's
+    row counts, join contract's overlap probe (#228), and the declared-fact
+    checks (#496).
 
     ``VerifyResult.pending_offer`` holds exactly one offer. Without this,
-    whichever of the two axes asked second would silently discard the
-    first's price the moment both are deferred on a metered connector: the
-    caller would see one offer that named only one axis's cost, understating
-    what confirming would actually spend.
+    whichever axis asked last would silently discard the others' price the
+    moment more than one is deferred on a metered connector: the caller would
+    see one offer that named only one axis's cost, understating what
+    confirming would actually spend.
 
-    Two closures, not one shared between both callers: :func:`~..maintain.
-    verify.relation_counts` calls its handshake as ``ask(row_estimate,
-    row_relation_count)`` and :func:`~..maintain.verify.join_contract_
-    findings` calls its as ``ask(join_estimate, join_probe_count)`` -- the
-    same two-``float``-then-``int`` shape, but meaning a different axis's
-    numbers each time. One shared closure receiving both calls has no way to
-    tell which axis is on the line; trusting the second call's own arguments
-    as "the other axis's real numbers" while *also* asking ``join_cost()``
-    again double-counted whichever axis called second (#228's own review).
+    One closure per axis, not one shared between all callers: each axis calls
+    its handshake as ``ask(estimate, count)`` -- the same shape, but meaning a
+    different axis's numbers each time. One shared closure receiving every
+    call has no way to tell which axis is on the line; trusting a later call's
+    own arguments as "the other axis's real numbers" while *also* pricing that
+    axis again double-counted it (#228's own review).
 
-    ``row_ask`` always calls ``join_cost()`` (a zero-argument callable
-    pricing join contract's own axis, lazily) to learn the other axis's
-    contribution. ``join_ask`` does not: `verify()` calls row population
-    before join contract, so by the time ``join_ask`` runs, either
-    ``row_ask`` already ran (and cached the combined decision, which this
-    reads rather than asking again) or it never ran at all, which only
-    happens when row population had nothing to count -- a real, legitimate
-    zero contribution, not a number this needs to compute a second time.
+    `verify()` calls the axes in this order: row population, join contract,
+    declared facts. Whichever asks first prices every axis after it lazily
+    (``join_cost``, ``facts_cost``: zero-argument callables) and caches the
+    combined decision, which every later ask reads rather than asking again.
+    An axis before it never asked at all, which only happens when it had
+    nothing to scan -- a real, legitimate zero contribution, not a number this
+    needs to compute a second time.
     """
 
+    order = ("row_population", "join_contract", "declared_facts")
+    keys = {
+        "row_population": "(row counts)",
+        "join_contract": "(join overlap probes)",
+        "declared_facts": "(declared facts)",
+    }
+    lazy = {
+        "join_contract": join_cost,
+        "declared_facts": facts_cost if facts_cost is not None else (lambda: (0.0, 0)),
+    }
     cache: dict[str, object] = {}
 
-    def _resolve(
-        row_estimate: float, row_count: int, join_estimate: float, join_count: int
-    ):
+    def _resolve(numbers: dict[str, tuple[float, int]]):
         if "offer" in cache:
             return cache["offer"]
-        if not row_count and not join_count:
+        wanted = [axis for axis in order if numbers.get(axis, (0.0, 0))[1]]
+        if not wanted:
             cache["offer"] = None
             return None
-        per_table: dict[str, float] = {}
-        axes: list[str] = []
-        if row_count:
-            per_table["(row counts)"] = row_estimate
-            axes.append("row_population")
-        if join_count:
-            per_table["(join overlap probes)"] = join_estimate
-            axes.append("join_contract")
+        per_table = {keys[axis]: numbers[axis][0] for axis in wanted}
+        row_count = numbers.get("row_population", (0.0, 0))[1]
+        join_count = numbers.get("join_contract", (0.0, 0))[1]
+        facts_count = numbers.get("declared_facts", (0.0, 0))[1]
+        bought = f"{row_count} row count(s) and {join_count} join overlap probe(s)"
+        judged = "row loss, fanout, and a broken or sparse join"
+        if facts_count:
+            bought = (
+                f"{row_count} row count(s), {join_count} join overlap probe(s) "
+                f"and {facts_count} declared-fact check(s)"
+            )
+            judged = (
+                "row loss, fanout, a broken or sparse join, and a contradicted "
+                "declaration"
+            )
         offer = command_args.confirmation_request(
             "maintain verify",
             adapter,
-            row_estimate + join_estimate,
+            sum(numbers[axis][0] for axis in wanted),
             per_table=per_table,
-            axes=axes,
+            axes=wanted,
             notes=[
                 "the build-status, no-relation, column-contract and grain "
-                "findings in this envelope are final; the estimate buys "
-                f"{row_count} row count(s) and {join_count} join overlap "
-                "probe(s), which is what row loss, fanout, and a broken or "
-                "sparse join are judged from"
+                f"findings in this envelope are final; the estimate buys {bought}, "
+                f"which is what {judged} are judged from"
             ],
         )
         cache["offer"] = offer
         return offer
 
-    def row_ask(row_estimate: float, row_relation_count: int):
-        join_estimate, join_probe_count = join_cost()
-        return _resolve(
-            row_estimate, row_relation_count, join_estimate, join_probe_count
-        )
+    def asker(axis: str):
+        def ask(estimate: float, count: int):
+            if "offer" in cache:
+                return cache["offer"]
+            numbers = {axis: (estimate, count)}
+            for later in order[order.index(axis) + 1 :]:
+                numbers[later] = lazy[later]()
+            return _resolve(numbers)
 
-    def join_ask(join_estimate: float, join_probe_count: int):
-        if "offer" in cache:
-            return cache["offer"]
-        # row_ask never ran: row population's own to-count set was empty,
-        # so its contribution is legitimately zero, not an unknown to price.
-        return _resolve(0.0, 0, join_estimate, join_probe_count)
+        return ask
 
-    return row_ask, join_ask
+    return asker("row_population"), asker("join_contract"), asker("declared_facts")
 
 
 def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
     """Is the project correct right now, with no baseline required (#224).
 
-    Five finding classes. Build-status gaps (#225) read the compiled manifest
+    Six finding classes. Build-status gaps (#225) read the compiled manifest
     and the last run's ``run_results.json`` (failed nodes, nodes skipped by a
     failed parent), plus models the project declares that have no relation in
     the warehouse. Column contract (#230) compares a built relation's actual
@@ -902,12 +912,15 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
     compiled SQL for the relation it is built from and compares the two row
     counts, reporting a model that lost rows with nothing in its SQL to
     account for it, or one that fanned out on a join. Grain (#229) checks that
-    a model's intended grain -- a declared unique test, a semantic model's
-    declared primary entity, or (absent either) a free naming guess -- still
-    holds one row per key in the built relation. Join contract (#228) reads
-    every equality join a model's compiled SQL writes and measures the real
-    value overlap on each, reporting a join whose keys find almost nothing on
-    the other side, or fewer but still materially many.
+    a model's intended grain -- the grain its declaration states, a declared
+    unique test, a semantic model's declared primary entity, or (absent all of
+    them) a free naming guess -- still holds one row per key in the built
+    relation. Join contract (#228) reads every equality join a model's compiled
+    SQL writes and measures the real value overlap on each, reporting a join
+    whose keys find almost nothing on the other side, or fewer but still
+    materially many. Declared facts (#496) hold each declaration's unit,
+    additivity and population to the built relation
+    (:mod:`~.declared_facts`).
 
     Free wherever the answer is free, which is most of it: the manifest read
     touches no connection, the relation check, the column contract, and grain
@@ -944,6 +957,7 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
                 "column_contract": reason,
                 "grain": reason,
                 "join_contract": reason,
+                **dict.fromkeys(facts_mod.CLASSES, reason),
                 "compile": reason,
             },
             warnings=[f"maintain verify could not read the project format: {reason}"],
@@ -974,6 +988,7 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
             "row_population",
             "column_contract",
             "join_contract",
+            *facts_mod.CLASSES,
         ):
             suppressed[finding_class] = artifact_reason
         warnings.append(
@@ -995,6 +1010,7 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
                     "column_contract": reason,
                     "grain": reason,
                     "join_contract": reason,
+                    **dict.fromkeys(facts_mod.CLASSES, reason),
                 },
                 warnings=[
                     "build-status, no-relation, row-population, column-contract, "
@@ -1032,6 +1048,7 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
             suppressed["row_population"] = reason
             suppressed["column_contract"] = reason
             suppressed["join_contract"] = reason
+            suppressed.update(dict.fromkeys(facts_mod.CLASSES, reason))
     else:
         model_relations = dict(definitions.model_relations)
         if wanted:
@@ -1053,6 +1070,9 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
                 suppressed["row_population"] = f"warehouse unreachable: {exc}"
                 suppressed["column_contract"] = f"warehouse unreachable: {exc}"
                 suppressed["join_contract"] = f"warehouse unreachable: {exc}"
+                suppressed.update(
+                    dict.fromkeys(facts_mod.CLASSES, f"warehouse unreachable: {exc}")
+                )
         else:
             cost = command_args.preflight_cost(adapter)
             live = adapter.list_objects()
@@ -1062,8 +1082,21 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
                     model_relations, [o.identifier for o in live], already
                 )
             )
+            # A declared grain is counted with the other declared facts, in the
+            # one priced statement per relation; the grain axis keeps every
+            # other source, and the models no compiled manifest could carry.
+            facts_plan, facts_plan_notes = (
+                facts_mod.plan(project_dir, scope=wanted)
+                if project_dir is not None
+                else ([], [])
+            )
             grain_findings, grain_warnings, grain_reason = _grain_contract(
-                adapter, definitions, model_relations, live, scope=wanted
+                adapter,
+                definitions,
+                model_relations,
+                live,
+                scope=wanted,
+                counted_elsewhere={m.model for m in facts_plan if m.grain},
             )
             findings.extend(grain_findings)
             warnings.extend(grain_warnings)
@@ -1079,7 +1112,14 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
                 if column_reason is not None:
                     suppressed["column_contract"] = column_reason
 
-                row_ask, join_ask = _combined_scan_handshake(
+                prepared = facts_mod.prepare(
+                    adapter,
+                    facts_plan,
+                    [o.identifier for o in live],
+                    check_grain=True,
+                    tested_grain=True,
+                )
+                row_ask, join_ask, facts_ask = _combined_scan_handshake(
                     adapter,
                     lambda: verify_mod.join_contract_cost(
                         project_dir,
@@ -1088,6 +1128,7 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
                         [o.identifier for o in live],
                         scope=wanted,
                     ),
+                    lambda: facts_mod.cost(adapter, prepared),
                 )
                 row_findings, row_warnings, row_notes, row_reason, offer = (
                     _row_population(
@@ -1117,9 +1158,24 @@ def verify(engine: DexEngine, objects: list[str] | None = None) -> VerifyResult:
                 warnings.extend(join_warnings)
                 if join_reason is not None:
                     suppressed["join_contract"] = join_reason
-                # Both axes ask through the same shared cache, so a non-None
-                # offer from either names both; take whichever answered.
-                offer = offer or join_offer
+                facts = facts_mod.findings(
+                    adapter,
+                    prepared,
+                    timeout_seconds=engine.config.query.timeout_seconds,
+                    handshake=facts_ask,
+                    pii_overrides=pii_override_paths(engine.config.pii_overrides),
+                    min_rows=engine.config.maintain.grain_min_rows,
+                )
+                findings.extend(facts.findings)
+                warnings.extend(facts_plan_notes + facts.notes)
+                # No manifest is the more specific reason than "nothing declared".
+                for finding_class, reason in facts.suppressed.items():
+                    suppressed[finding_class] = (
+                        facts_plan_notes[0] if facts_plan_notes else reason
+                    )
+                # Every axis asks through the same shared cache, so a non-None
+                # offer from any names them all; take whichever answered.
+                offer = offer or join_offer or facts.offer
 
     if wanted:
         findings = [f for f in findings if (f.identifier or "").lower() in wanted]
@@ -1177,7 +1233,15 @@ def _column_contract(project_dir, adapter, model_relations, live, *, scope=None)
     return findings, plan_notes + finding_notes, None
 
 
-def _grain_contract(adapter, definitions, model_relations, live, *, scope=None):
+def _grain_contract(
+    adapter,
+    definitions,
+    model_relations,
+    live,
+    *,
+    scope=None,
+    counted_elsewhere: set[str] | None = None,
+):
     """The grain half of `maintain verify`, end to end (#229).
 
     No cost decision of its own, unlike row population beside it: a declared
@@ -1190,14 +1254,24 @@ def _grain_contract(adapter, definitions, model_relations, live, *, scope=None):
     ``columns:`` blocks at all -- a model's grain is either declared,
     guessable by name, or reported unknown, and all three are `grain_
     findings`'s own job to sort out.
+
+    ``counted_elsewhere`` names the models whose declared grain the declared-
+    fact statement counts (#496). The declaration still ranks first in
+    :func:`~.verify.grain_plan`, so those models take no other source here and
+    are left out entirely, rather than falling through to the naming guess.
     """
 
-    scoped_models = (
-        {name for name in model_relations if name.lower() in scope}
-        if scope is not None
-        else set(model_relations)
-    )
-    declared = verify_mod.grain_plan(definitions, scope=scope)
+    counted_elsewhere = counted_elsewhere or set()
+    scoped_models = {
+        name
+        for name in model_relations
+        if (scope is None or name.lower() in scope) and name not in counted_elsewhere
+    }
+    declared = {
+        model: candidates
+        for model, candidates in verify_mod.grain_plan(definitions, scope=scope).items()
+        if model not in counted_elsewhere
+    }
     findings, notes = verify_mod.grain_findings(
         adapter,
         declared,

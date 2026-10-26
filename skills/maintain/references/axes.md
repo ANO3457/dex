@@ -92,6 +92,14 @@ complete composite, never one column at a time. Aggregates only.
 - Below `maintain.grain_min_rows` rows (default 100), a uniqueness-regression
   finding is damped to `low`, and the damping is named in the finding's `data`
   (`severity_floor_applied`, `grain_min_rows`).
+- A single-column key that is not the grain, and is still unique together with
+  a column the baseline read as constant, reads `medium`: the rows were added
+  along that column (a second tenant, region or repository), and
+  `data.still_unique_as` names the combination. A real duplicate repeats that
+  combination too, so it stays `high`, and a lost grain always does. The same
+  finding says whether the dataset's grain still holds (`data.grain_holds`),
+  from the count the axis already takes; that alone never lowers the severity,
+  because a surrogate grain stays unique through a real duplicate.
 - Finding codes: `key_lost_uniqueness` (proven unique at baseline, not now),
   `declared_grain_not_unique` (declared, never held), and
   `join_cardinality_exceeded` (a join whose declared arity, SLayer's
@@ -147,7 +155,7 @@ definition changing.
 
 ## `maintain verify [<selector>]`: is the project right now
 
-Needs no baseline. Two classes of finding:
+Needs no baseline. The classes of finding:
 
 - **Build status**: nodes that failed; nodes skipped because a parent failed
   (naming the one that actually failed, through a chain of skipped parents);
@@ -164,6 +172,35 @@ Needs no baseline. Two classes of finding:
   generates its rows in SQL, such as `range(...)` or a `VALUES` clause, has no
   parent relation. That is named in `notes`. A real parent relation that is
   absent from the warehouse is still a warning.
+- **Column contract**: `column_missing`, `column_undeclared` and
+  `column_type_mismatch`, the built relation's columns against `schema.yml`.
+- **Grain**: `grain_broken`, from one source per model, in this order: the
+  grain the model's declaration states (`config.meta.dex.grain`, so a
+  composite grain is checked with no `dbt_utils` test), a `unique` test, a
+  `unique_combination_of_columns` test, a semantic model's primary entity,
+  then a naming guess. `data.source` says which one. A declared grain is
+  counted in the declared-fact statement below, so it is priced with it.
+- **Join contract**: `join_zero_overlap` and `join_orphans`, every equality
+  join's measured overlap.
+- **Declared facts** (#496), each an aggregate-only statement against the
+  built relation:
+  - `unit_out_of_range` (medium): a column declared `fraction` with values
+    outside 0 to 1, or declared `percent` whose values all sit within 0 to 1.
+    States the observed `min` and `max`; the second case is a question, not
+    proof, since genuinely small percentages land there too.
+  - `additivity_contradicted` (medium): a column declared `additive` that the
+    cumulative detector reads as a running total. The probe orders by the
+    declaration's own entity and time columns (a composite grain, or the
+    `foreign_key` and `time` roles).
+  - `population_contradicted` (high): a value a `population.filters` entry
+    excludes still present (for `includes`, any other value or NULL), as a
+    count and never as rows.
+
+  `null_rule: never` is not checked here: it renders as a `not_null` test.
+  `data.suppressed` names `unit`, `additivity` and `population` whenever one
+  did not run: nothing declares it, the relation is empty, the column is all
+  NULL or aggregated away, too few observations to call, or the scan is
+  offered.
 
 A project that does not compile is reported first and suppresses everything
 else. `data.suppressed` names every class that did not run and why.
@@ -239,6 +276,7 @@ Two things look like drift and are not:
 | `grain`, semantic dimension cardinality | scans; billed handshake on a metered connector |
 | `verify` build status | free (artifacts on disk) |
 | `verify` row counts | free object metadata, except a view, which keeps no count: those are batched into one aggregate-only statement, priced, and returned in `data.offer` |
+| `verify` declared facts | one aggregate statement per declared relation, plus one window probe per relation with an `additive` column; priced into the same single `data.offer` |
 
 On DuckDB there is no gate, so `verify` measures every count and its findings
 come back `exact`.

@@ -96,11 +96,11 @@ fetches the engine's dependencies from PyPI or your configured index.
 
 ## Transforming, step by step
 
-1. **No dbt project yet?** Offer `transform init "<name>" --connector <c>` before
+1. **No dbt project yet?** Offer `transform init "<name>" --connector <c>` (scaffolds into `<name>/` by default, or the current directory with `--in-place`) before
    anything else. Ask the user for the name and **confirm the connector with
    them**: init never defaults one. Do not hand-write the skeleton. Read
    `${CLAUDE_SKILL_DIR}/references/init-and-dev-target.md` for per-connector
-   setup, `--layered-schemas`, and the namespace warning.
+   setup, `--in-place`, `--layered-schemas`, and the namespace warning.
 2. **Find every use first** when a change has to land in more than one place:
    `transform references <name> [more...]`, free on every connector. Read
    `data.completeness`; when it is `incomplete`, open each site under
@@ -303,8 +303,8 @@ a field, flag, or macro you need is not described here.
   `data.session_ceiling_cap`. It counts as a committed daily limit. A refusal
   naming it can only be lifted by the host, never by a flag or a config change,
   so report it rather than work around it.
-- `--verify` is priced into the build's own estimate as a `(row counts)` line, so
-  never add a second budget for it. An `ok` envelope with `data.offer` means the
+- `--verify` is priced into the build's own estimate as `(row counts)` and
+  `(declared facts)` lines, so never add a second budget for it. An `ok` envelope with `data.offer` means the
   build is done and billed: relay the offer instead of re-running the build.
 - Verification findings never fail the build. Do not treat one as a failure or
   re-run to make it go away: relay the finding, its two counts, and the join it

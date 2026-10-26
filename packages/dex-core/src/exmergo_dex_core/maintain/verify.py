@@ -1,23 +1,25 @@
 """maintain verify: a baseline-free sweep answering "is this project correct
 right now", as opposed to drift's "what changed since the baseline" (#224).
 
-Five finding classes live here. Build-status gaps (#225) read the compiled
-manifest and the last run's ``run_results.json``: failed nodes, nodes skipped
-by a failed parent, models with no relation, and a project that does not
-compile. Column contract (#230) compares a built relation's actual columns
-against what its schema.yml declares, in both directions, plus a type check
-where a type is declared. Row population (#226) reads each model's compiled
-SQL to find the relation it is built *from*, and compares the two row counts:
-a model holding materially fewer rows than its driving parent, with nothing
-in its SQL that would account for the shortfall, has lost rows silently, and
-one holding materially more has fanned out on a join. Grain (#229) checks
-that a model's intended grain -- a declared ``unique`` test, a semantic
-model's declared primary entity, or (absent either) a free naming heuristic
--- still holds one row per key in the built relation. Join contract (#228)
-reads the same compiled SQL for every equality join a model writes, and
-measures the value overlap on each: a join whose keys find almost nothing on
-the other side is silently wrong in a way no dbt test catches, and is the
-most damaging defect this sweep can report.
+Five finding classes live here (a sixth, declared facts, lives in
+:mod:`.declared_facts`, sharing the grain finding below). Build-status gaps
+(#225) read the compiled manifest and the last run's ``run_results.json``:
+failed nodes, nodes skipped by a failed parent, models with no relation, and a
+project that does not compile. Column contract (#230) compares a built
+relation's actual columns against what its schema.yml declares, in both
+directions, plus a type check where a type is declared. Row population (#226)
+reads each model's compiled SQL to find the relation it is built *from*, and
+compares the two row counts: a model holding materially fewer rows than its
+driving parent, with nothing in its SQL that would account for the shortfall,
+has lost rows silently, and one holding materially more has fanned out on a
+join. Grain (#229) checks that a model's intended grain -- the grain its
+declaration states, a declared ``unique`` test, a semantic model's declared
+primary entity, or (absent all of them) a free naming heuristic -- still holds
+one row per key in the built relation. Join contract (#228) reads the same
+compiled SQL for every equality join a model writes, and measures the value
+overlap on each: a join whose keys find almost nothing on the other side is
+silently wrong in a way no dbt test catches, and is the most damaging defect
+this sweep can report.
 
 Detection is pure and reads only artifacts already on disk, with four
 exceptions, all metadata-only or bounded-and-deliberate by the adapter's own
@@ -466,7 +468,11 @@ def column_contract_findings(
 class GrainCandidate:
     """One model's intended grain, and where the claim came from (#229).
 
-    ``source`` is one of ``"unique_test"`` (a single column dbt's own
+    ``source`` is one of ``"declaration"`` (the grain the model's own
+    declaration states, ``config.meta.dex.grain``, #496: ranked first, because
+    it is the one statement of what a row *is* rather than a test of one
+    column, and it is the only source a composite grain has in a project with
+    no ``dbt_utils``), ``"unique_test"`` (a single column dbt's own
     ``unique``/``data_tests: unique`` declares), ``"unique_test_composite"``
     (``unique_combination_of_columns``, checked only when no single-column
     test exists for the same model: a column-level test is the narrower,
@@ -494,16 +500,18 @@ def grain_plan(
     ``dbt_project.py``'s own readers already did.
 
     A model absent from the returned mapping declares no grain at all by any
-    of the three sources; the findings step's own free naming heuristic and
+    of the four sources; the findings step's own free naming heuristic and
     "grain unknown" reporting cover it from there, since both need a live
     relation's actual columns, which ``ProjectDefinitions`` does not carry.
 
-    Priority is per model, not per candidate: every column independently
-    declared ``unique`` is checked (a model can have more than one, each its
-    own claim); a declared composite is checked only when the model has no
-    single-column unique test; the primary entity is checked only when the
-    model has neither. A model can therefore only ever produce candidates
-    from one of the three sources, never a mix.
+    Priority is per model, not per candidate: a model whose declaration
+    states a grain is checked on that grain alone (#496); otherwise every
+    column independently declared ``unique`` is checked (a model can have more
+    than one, each its own claim); a declared composite is checked only when
+    the model has no single-column unique test; the primary entity is checked
+    only when the model has none of those. A model can therefore only ever
+    produce candidates from one source, never a mix, so one duplicate is never
+    reported twice under two sources.
 
     ``scope`` is compared lowercase, the same convention
     :func:`column_contract_plan` follows and for the same reason: the caller
@@ -511,8 +519,13 @@ def grain_plan(
     """
 
     by_model: dict[str, list[GrainCandidate]] = {}
+    for model, columns in definitions.declared_grains.items():
+        if scope is not None and model.lower() not in scope:
+            continue
+        by_model[model] = [GrainCandidate(columns=list(columns), source="declaration")]
+    declared = set(by_model)
     for key in definitions.declared_keys:
-        if not key.unique:
+        if not key.unique or key.model in declared:
             continue
         if scope is not None and key.model.lower() not in scope:
             continue
@@ -537,6 +550,7 @@ def grain_plan(
 
 
 _GRAIN_SOURCE_PHRASE = {
+    "declaration": "declares one row per",
     "unique_test": "declares",
     "unique_test_composite": "declares the combination of",
     "primary_entity": "declares as its semantic layer's primary entity",
@@ -559,6 +573,13 @@ def _grain_broken_finding(
     approx = "" if exact else "approximately "
     columns_text = " and ".join(columns) if len(columns) < 3 else ", ".join(columns)
     unique_word = "unique" if len(columns) == 1 else "jointly unique"
+    # A declared grain already says what one row is; "unique" after it would
+    # say the same thing twice.
+    claim = (
+        f"{_GRAIN_SOURCE_PHRASE[source]} {columns_text}"
+        if source == "declaration"
+        else f"{_GRAIN_SOURCE_PHRASE[source]} {columns_text} {unique_word}"
+    )
     return DriftFinding(
         axis="grain",
         code="grain_broken",
@@ -567,8 +588,7 @@ def _grain_broken_finding(
         severity=severity,
         exact=exact,
         detail=(
-            f"'{model}' {_GRAIN_SOURCE_PHRASE[source]} {columns_text} "
-            f"{unique_word}, but the built relation has {approx}{duplicates} "
+            f"'{model}' {claim}, but the built relation has {approx}{duplicates} "
             f"duplicate row(s){note_suffix}"
         ),
         data={
@@ -864,8 +884,8 @@ def grain_findings(
         notes.append(
             "the grain could not be determined for "
             + ", ".join(sorted(unknown))
-            + ": no declared unique test, no declared primary entity, and no "
-            "id-shaped column was found"
+            + ": no declared grain, no declared unique test, no declared primary "
+            "entity, and no id-shaped column was found"
         )
     for model, missing in sorted(unresolved.items()):
         notes.append(

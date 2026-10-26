@@ -158,9 +158,14 @@ test over the smaller result.
   `warnings` names the count.
 - A failed build still reports which node failed and which were skipped because
   of it, usually a faster read than the dbt log.
+- It also checks what each built model declares: `unit_out_of_range`,
+  `additivity_contradicted`, `population_contradicted`, and a declared grain no
+  `unique` test in the build covers (`grain_broken`, `source: declaration`).
+  See declarations.md, "Checked against the built relation".
 - On a billed connector the sweep's row counts are a `(row counts)` line in the
-  build's estimate. A cold dev target that cannot be priced upfront is priced
-  again after the build, against the reservation it already holds.
+  build's estimate, and the declared-fact statements a `(declared facts)` line.
+  A cold dev target that cannot be priced upfront is priced again after the
+  build, against the reservation it already holds.
 
 ## `transform test --scaffold <model>`
 

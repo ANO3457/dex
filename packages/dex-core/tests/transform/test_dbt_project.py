@@ -529,6 +529,37 @@ def test_definitions_yaml_namespaced_composite_unique_key(dbt_project_dir: Path)
     assert composite.columns == ["id", "email"]
 
 
+def test_definitions_yaml_declared_grain(dbt_project_dir: Path):
+    """#496: a declaration's grain (`config.meta.dex.grain`) is read as its own
+    source, beside the tests, so `maintain verify` can rank it first."""
+
+    (dbt_project_dir / "models" / "staging" / "schema.yml").write_text(
+        "version: 2\n"
+        "models:\n"
+        "  - name: stg_customers\n"
+        "    config:\n"
+        "      meta:\n"
+        "        dex:\n"
+        "          grain: [id, email]\n",
+        encoding="utf-8",
+    )
+    defs = definitions(dbt_project_dir)
+    assert defs.declared_grains == {"stg_customers": ["id", "email"]}
+    assert defs.declared_composite_keys == []
+
+
+def test_definitions_manifest_declared_grain(dbt_project_dir: Path):
+    path = write_manifest(
+        dbt_project_dir, models={"stg_customers": '"dev"."main"."stg_customers"'}
+    )
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    node = manifest["nodes"]["model.dex_test.stg_customers"]
+    node["config"]["meta"] = {"dex": {"grain": ["id"]}}
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    defs = definitions(dbt_project_dir)
+    assert defs.declared_grains == {"stg_customers": ["id"]}
+
+
 _GRAIN = {"combination_of_columns": ["order_id", "line_number"]}
 _JOIN = {"to": "ref('stg_customers')", "field": "id"}
 
