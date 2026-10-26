@@ -127,7 +127,8 @@ class StatementStage(str, Enum):
     A code rather than prose because a host branches on it: an agent loop rewrites
     a statement after ``plan`` and has a different decision to make after
     ``run``. Only an adapter that can tell its two doors apart sets one (BigQuery
-    today), so an unset stage means the adapter did not say, never either value.
+    and ClickHouse today), so an unset stage means the adapter did not say, never
+    either value.
     It lives here, beside :class:`WarehouseQueryError`, for the reason that class
     does: the envelope reads it from the tier of imports that works on an install
     with no connector extra at all.

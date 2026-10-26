@@ -363,6 +363,19 @@ document written as `database.schema.table` reads cleanly and links to nothing o
 ClickHouse while linking on DuckDB. See
 [Apache Ossie compatibility](ossie-compatibility.md).
 
+## Statement refusals
+
+A server-side statement error raises `WarehouseQueryError`, with the server's
+numeric error code when available and `stage: run` for the query execution door.
+The diagnostic is limited to the first non-empty line and capped, as on the other
+connectors. `maintain verify` can therefore report a refused grain measurement
+against its model and continue checking the others. In values-free mode the
+server's message is withheld and the envelope reports `warehouse_refused`.
+
+The existing named errors for missing tables, insufficient grants, unreachable
+servers, timeouts and budget/read limits keep their behavior. An unexpected
+client-side programming error is not classified as a server refusal.
+
 ## Testing
 
 Offline, deterministic, and free: `tests/fakes/clickhouse.py` is a stateful fake

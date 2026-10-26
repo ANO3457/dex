@@ -56,7 +56,7 @@ from typing import Any
 
 from ..config import ClickHouseTarget
 from ..envelope import EstimateQuality, Paradigm
-from ..errors import ConnectorError
+from ..errors import ConnectorError, StatementStage
 from ..guards.cost_guard import CostGate, OverCeilingError
 from ..guards.sql_guard import assert_select_only
 from .base import (
@@ -83,6 +83,7 @@ from .base import (
     temporal_units_for,
     type_contradiction_aggregate_kwargs,
     type_contradiction_expressions,
+    warehouse_refusal,
     with_dev_target,
 )
 
@@ -1491,6 +1492,12 @@ class ClickHouseAdapter:
             return ConnectorError(
                 "the ClickHouse server could not be reached; the endpoint may "
                 "be down or unreachable from here"
+            )
+        if isinstance(exc, self._ch_exceptions.DatabaseError):
+            return warehouse_refusal(
+                str(exc),
+                code=str(code) if code is not None else None,
+                stage=StatementStage.RUN,
             )
         return exc
 
