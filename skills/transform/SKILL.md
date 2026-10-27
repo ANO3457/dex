@@ -127,9 +127,9 @@ fetches the engine's dependencies from PyPI or your configured index.
    still owed. Supply the intent, confirm or override each drafted fact in the
    `declarations` entry, and re-plan until `missing` holds only what you decided
    to leave open. For a declared mart, also read `data.semantic_proposal`: the
-   semantic model the declaration implies, already in the plan (`mode:
-   included`) or offered for `semantic plan --definitions-file` (`mode:
-   proposed`), with every gap it could not fill named.
+   semantic model the declaration implies, already in the plan
+   (`mode: included`) or offered for `semantic plan --definitions-file`
+   (`mode: proposed`), with every gap it could not fill named.
 5. **Read the plan** (rules below), then `transform apply <plan-id>`.
 6. **Build and verify:** `transform build --target dev --verify`.
 7. **Measure the tests** right after you author or scaffold them, and before
