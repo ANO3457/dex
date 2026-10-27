@@ -344,6 +344,7 @@ def plan(
     edit_target: str = "project",
     pii_overrides: Any = None,
     conventions: ConventionWarnings | None = None,
+    dialect: str | None = None,
 ) -> tuple[TransformPlan, list[dict[str, Any]], list[str]]:
     """Validate agent-authored edits and store them as a plan. Writes no source file.
 
@@ -380,6 +381,10 @@ def plan(
     directly gets the same reading a configured repo gets by default; switching
     one off is a choice a project makes, not something a caller falls into by
     not passing it.
+
+    ``dialect`` is the connector's sqlglot dialect, which
+    :func:`reserved_column_warnings` checks column names against. Absent, that
+    check is skipped.
     """
 
     if not edits:
@@ -569,6 +574,8 @@ def plan(
 
         warnings.extend(missing_macro_warnings(edits, view))
         warnings.extend(column_contract_warnings(edits, view))
+        if dialect is not None:
+            warnings.extend(reserved_column_warnings(edits, dialect))
 
         # The one plan-time check that reads a convention rather than a
         # declaration, and the only one a project can switch off, because it is
@@ -983,6 +990,55 @@ def column_contract_warnings(edits: list[PlanEdit], view: DbtProjectView) -> lis
             warnings.append(
                 f"{edit.path}: the SELECT list produces column(s) "
                 f"{', '.join(extra)} not declared in schema.yml for {model}"
+            )
+    return warnings
+
+
+def reserved_column_warnings(edits: list[PlanEdit], dialect: str) -> list[str]:
+    """Warn when a schema.yml in this plan puts generic tests on a column whose
+    name ``dialect`` reserves, without ``quote: true`` (issue #651).
+
+    dbt writes the column bare into the test's SQL, so the test fails to compile
+    on the first build. Both ``models:`` and ``sources:`` tables are read, since
+    the case that prompted this was a source column.
+    """
+
+    from ..reserved_words import reserved_column_names
+
+    warnings: list[str] = []
+    for edit in edits:
+        if edit.kind is not EditKind.SCHEMA_YML or edit.new_content is None:
+            continue
+        try:
+            parsed = yaml.safe_load(edit.new_content)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        # (table entry, how the warning names it): a source table by
+        # `source.table`, the way `source()` does.
+        tables = [(m, "") for m in parsed.get("models") or []]
+        for source in parsed.get("sources") or []:
+            if isinstance(source, dict):
+                prefix = f"{source.get('name')}."
+                tables += [(t, prefix) for t in source.get("tables") or []]
+        for table, prefix in tables:
+            if not isinstance(table, dict):
+                continue
+            tested = [
+                column["name"]
+                for column in table.get("columns") or []
+                if isinstance(column, dict)
+                and isinstance(column.get("name"), str)
+                and (column.get("tests") or column.get("data_tests"))
+                and column.get("quote") is not True
+            ]
+            name = f"{prefix}{table.get('name')}"
+            warnings.extend(
+                f"{edit.path}: column {column} of {name} is a reserved word in "
+                f"{dialect} and has tests but no `quote: true`; dbt writes it "
+                "unquoted, so the tests fail to compile"
+                for column in reserved_column_names(dialect, tested)
             )
     return warnings
 
