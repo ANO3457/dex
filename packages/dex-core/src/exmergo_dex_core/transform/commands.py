@@ -340,7 +340,9 @@ def plan(
         )
         for e in edits
     )
-    if (has_delete or parser_owned) and _has_dbt_project(engine):
+    semantic_proposal: dict[str, Any] | None = None
+    derivation_notes: list[str] = []
+    if _has_dbt_project(engine):
         # The secret-guard runs first, so an inlined credential is never handed
         # to the dbt subprocess.
         from ..dbt_project import load as load_project
@@ -373,28 +375,40 @@ def plan(
         # hard gate; the parse below is the authoritative backstop.
         if has_delete:
             plans_mod.validate_deletions(view, edits)
-        blocker = _unparseable_reason(view, edits)
-        parse_result = (
-            {"available": False, "reason": blocker}
-            if blocker
-            else shadow_parse(project, edits, target=engine.config.dbt_target)
-        )
-        if not parse_result["available"]:
-            parse_notes.append(parse_result["reason"])
-        elif not parse_result["success"]:
-            raise DbtParseError(
-                _failure_message("dbt parse failed", parse_result["messages"]),
-                warnings=parse_result["messages"][1:],
-            )
-        elif parse_result["messages"]:
-            parse_notes = [f"dbt: {m}" for m in parse_result["messages"]]
+        # After the guards above, because a derivation is checked by dbt's
+        # parse of a copy of the project with these edits in it.
+        derived = _derive_semantic(engine, view, edits)
+        edits = derived.edits
+        semantic_proposal = derived.proposal
+        derivation_notes = derived.warnings
+        if has_delete or parser_owned or derived.parse is not None:
+            if derived.parse is not None:
+                # The derivation's own parse covered exactly these edits.
+                parse_result = derived.parse
+            elif blocker := _unparseable_reason(view, edits):
+                parse_result = {"available": False, "reason": blocker}
+            else:
+                parse_result = shadow_parse(
+                    project, edits, target=engine.config.dbt_target
+                )
+            if not parse_result["available"]:
+                parse_notes.append(parse_result["reason"])
+            elif not parse_result["success"]:
+                raise DbtParseError(
+                    _failure_message("dbt parse failed", parse_result["messages"]),
+                    warnings=parse_result["messages"][1:],
+                )
+            elif parse_result["messages"]:
+                parse_notes = [f"dbt: {m}" for m in parse_result["messages"]]
 
     result = _make_plan(engine, intent, edits)
     result.warnings.extend(scaffold_notes)
     result.warnings.extend(declaration_notes)
     result.warnings.extend(parse_notes)
+    result.warnings.extend(derivation_notes)
     result.decisions = _plan_decisions(engine, edits, declarations)
     result.declarations = drafts or None
+    result.semantic_proposal = semantic_proposal
     _attribute_rows(engine, result, edits, requested=attribute_rows)
     _contradiction_warnings(result)
     return result
@@ -4359,6 +4373,10 @@ def _semantic_plan(
     # produce is a model's properties (`schema_yml`), not a semantic definition,
     # and before the parse below, so dbt reads the layer and the models together.
     edits, declaration_notes, drafts = _declare(engine, edits, declarations)
+    # A derivation is parsed by dbt whatever `--no-parse` says: the flag is the
+    # caller's call about their own YAML, not about YAML dex wrote for them.
+    derived = _derive_semantic(engine, view, edits)
+    edits = derived.edits
 
     # The authoritative gate: a plan that dbt cannot parse is never stored.
     # Skipped when the time-spine warning fires (dbt would refuse to parse for
@@ -4366,7 +4384,10 @@ def _semantic_plan(
     # when the caller opts out.
     parse_warning: str | None = None
     parse_deprecations: list[str] = []
-    if no_parse:
+    if derived.parse is not None:
+        # The derivation's own parse covered exactly these edits, and passed.
+        parse_deprecations = [f"dbt: {m}" for m in derived.parse["messages"]]
+    elif no_parse:
         pass
     elif spine_warning:
         parse_warning = "dbt parse skipped until the project has a time spine"
@@ -4410,10 +4431,56 @@ def _semantic_plan(
         result.warnings.append(parse_warning)
     result.warnings.extend(parse_deprecations)
     result.warnings.extend(declaration_notes)
+    result.warnings.extend(derived.warnings)
     result.decisions = _plan_decisions(engine, edits, declarations)
     result.declarations = drafts or None
+    result.semantic_proposal = derived.proposal
     _contradiction_warnings(result)
     return result
+
+
+def _derive_semantic(engine: DexEngine, view: Any, edits: list[PlanEdit]) -> Any:
+    """The semantic model each declared mart in ``edits`` implies (issue #499).
+
+    Free on every connector: it reads the post-change project and the stored
+    cache, and runs dbt's parse on a throwaway copy. See
+    :mod:`.semantic_derivation`.
+    """
+
+    from ..adapters import get_dialect
+    from ..storage import CacheUnreadableError
+    from . import declarations as declarations_mod
+    from . import semantic_derivation
+
+    models = declarations_mod.touched_models(edits)
+    if not models:
+        return semantic_derivation.Outcome(edits=edits)
+    try:
+        cache = readable_cache(engine.store)
+    except CacheUnreadableError:
+        cache = None
+    try:
+        return semantic_derivation.run(
+            view,
+            edits,
+            models,
+            project=engine.project_dir(),
+            marts_paths=engine.config.transform.marts_paths,
+            cache=cache,
+            dialect=get_dialect(engine.connector or engine.config.connector),
+            target=engine.config.dbt_target,
+            vendor=engine.config.semantic.vendor,
+        )
+    except Exception as exc:
+        # Total for the same reason drafting is: nothing was added to the plan
+        # yet, so a defect here costs the proposal and nothing else.
+        return semantic_derivation.Outcome(
+            edits=edits,
+            warnings=[
+                "no semantic model was derived: the derivation failed "
+                f"({type(exc).__name__}: {exc})"
+            ],
+        )
 
 
 def _has_seed(edits: list[PlanEdit]) -> bool:
