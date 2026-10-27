@@ -47,9 +47,13 @@ from .edits import ApplyResult, Conflict, Edit, EditOp, content_hash
 from .errors import ProjectError, RequestError
 from .metricflow_dialect import METRIC_TIME
 from .project_definitions import (
+    DeclaredColumnMeaning,
     DeclaredCompositeKey,
     DeclaredForeignKey,
     DeclaredKey,
+    DeclaredPopulation,
+    DeclaredPopulationFilter,
+    ModelDeclaration,
     ProjectDefinitions,
 )
 from .semantic_catalog import (
@@ -1229,7 +1233,40 @@ def definitions(
 
     if defs.manifest_loaded:
         _flag_stale_manifest(view, defs)
+    if not defs.manifest_loaded or defs.manifest_stale:
+        _declarations_from_yaml(view, defs)
     return defs
+
+
+def _declarations_from_yaml(view: DbtProjectView, defs: ProjectDefinitions) -> None:
+    """Model declarations (#491) straight from the schema YAML (#498).
+
+    Used without a manifest, and also over a stale one: a declaration is plain
+    YAML a human edits, so a manifest compiled before the edit would report a
+    removed population or a changed grain as though it still held. The YAML is
+    the repository's current word, so it replaces whatever the manifest said;
+    the relation still comes from the manifest where it resolved one. A model
+    entry in two files (which dbt refuses) is read from the first path in sorted
+    order, as the declaration fingerprint reads it.
+    """
+
+    declarations: dict[str, ModelDeclaration] = {}
+    for parsed, _path in sorted(yaml_documents(view), key=lambda d: d[1]):
+        for entry in parsed.get("models") or []:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                continue
+            model = entry["name"]
+            if model in declarations:
+                continue
+            declaration = declared_meaning(
+                entry,
+                model,
+                relation=defs.model_relations.get(model),
+                source="yaml",
+            )
+            if declaration is not None:
+                declarations[model] = declaration
+    defs.model_declarations = declarations
 
 
 def manifest_node_label(unique_id: str, node: dict[str, Any] | None = None) -> str:
@@ -1322,6 +1359,99 @@ def column_contract_divergence(
     return missing, extra, mismatched
 
 
+#: The per-column declaration fields exploration reads back (#498).
+_MEANING_FIELDS = ("role", "unit", "additivity", "references")
+
+
+def declared_meaning(
+    entry: Any, model: str, *, relation: str | None, source: str
+) -> ModelDeclaration | None:
+    """A model's declaration (#491) as the neutral read model, or None.
+
+    Read from a YAML ``models:`` entry (``columns`` a list) or a compiled manifest
+    node (``columns`` a mapping), through the same ``meta`` precedence
+    :func:`declared_grain` uses. Lenient by design: a field of the wrong shape is
+    left out rather than raised on, because this is a read of what a human wrote,
+    and the writer (`transform plan`) is where a malformed declaration is refused.
+    None when the entry declares none of grain, population or a column meaning.
+    """
+
+    from .guards.pii_meta import entry_meta
+
+    dex = entry_meta(entry).get("dex")
+    dex = dex if isinstance(dex, dict) else {}
+    population = _declared_population(dex.get("population"))
+
+    columns: dict[str, DeclaredColumnMeaning] = {}
+    raw = entry.get("columns") if isinstance(entry, dict) else None
+    items = (
+        list(raw.items())
+        if isinstance(raw, dict)
+        else [(None, column) for column in raw]
+        if isinstance(raw, list)
+        else []
+    )
+    for key, column in items:
+        if not isinstance(column, dict):
+            continue
+        name = column.get("name") if isinstance(column.get("name"), str) else key
+        if not isinstance(name, str) or not name:
+            continue
+        column_dex = entry_meta(column).get("dex")
+        if not isinstance(column_dex, dict):
+            continue
+        stated = {
+            field: column_dex[field].strip()
+            for field in _MEANING_FIELDS
+            if isinstance(column_dex.get(field), str) and column_dex[field].strip()
+        }
+        if stated:
+            columns[name] = DeclaredColumnMeaning(**stated)
+
+    grain = declared_grain(entry)
+    if not (grain or population or columns):
+        return None
+    return ModelDeclaration(
+        model=model,
+        relation=relation,
+        grain=grain,
+        population=population,
+        columns=columns,
+        source=source,
+    )
+
+
+def _declared_population(raw: Any) -> DeclaredPopulation | None:
+    if not isinstance(raw, dict):
+        return None
+    rule = raw.get("rule") if isinstance(raw.get("rule"), str) else None
+    filters: list[DeclaredPopulationFilter] = []
+    entries = raw.get("filters")
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("column"), str):
+            continue
+        includes = _scalar_values(entry.get("includes"))
+        excludes = _scalar_values(entry.get("excludes"))
+        if includes or excludes:
+            filters.append(
+                DeclaredPopulationFilter(
+                    column=entry["column"], includes=includes, excludes=excludes
+                )
+            )
+    if not (rule and rule.strip()) and not filters:
+        return None
+    return DeclaredPopulation(
+        rule=rule if rule and rule.strip() else None, filters=filters
+    )
+
+
+def _scalar_values(raw: Any) -> list[str | int | float | bool] | None:
+    if not isinstance(raw, list):
+        return None
+    kept = [value for value in raw if isinstance(value, str | int | float | bool)]
+    return kept or None
+
+
 def _parse_relation_ref(value: Any) -> str | None:
     """A ``ref('x')`` / ``source('a', 'b')`` argument as a referable name."""
 
@@ -1395,6 +1525,11 @@ def _declared_from_manifest(manifest: dict[str, Any], defs: ProjectDefinitions) 
         grain = declared_grain(node)
         if grain:
             defs.declared_grains[label] = grain
+        declaration = declared_meaning(
+            node, label, relation=model_relations.get(label), source="manifest"
+        )
+        if declaration is not None:
+            defs.model_declarations[label] = declaration
     for uid, node in sources.items():
         if not isinstance(node, dict):
             continue

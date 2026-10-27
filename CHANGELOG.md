@@ -14,6 +14,81 @@ pending fragments into a new section below. See
 
 <!-- towncrier release notes start -->
 
+## [1.16.3] - 2026-10-27
+
+### Added
+
+- **`explore` and `transform plan` flag reserved-word column names.** `explore profile`, `map` and `relationships` add a data-quality note for a column whose name the connector's dialect reserves (`window` on DuckDB, say), and `transform plan` warns when a `schema.yml` puts tests on such a column without `quote: true`, which dbt needs for those tests to compile. The word lists are sqlglot's, so DuckDB, BigQuery, Redshift and Trino are checked; Postgres, Snowflake, Databricks and ClickHouse are not yet. ([#875](https://github.com/exmergo/dex/pull/875))
+- **Dex ships a plugin folder for Anthropic's Claude plugin directory.** `claude/`
+  holds the Claude plugin the directory reads: the three skills, the Claude manifest,
+  the license, the Exmergo icon, and the README with its links made absolute. The
+  directory scans only that folder, so the monorepo stays whole. Installed from it,
+  the skills run the engine release they pin from PyPI. `scripts/prepare_release.sh`
+  regenerates the folder at every release, after the pins move, so nothing in it but
+  the icon is edited by hand. The skill wrappers' "uv not found" message now names
+  uv's installation docs rather than linking them, and the wrappers carry no URL.
+- **The release workflow refuses a tag `prepare_release.sh` did not write.** It
+  re-runs the script on the tagged commit and fails on any difference, so every file
+  the script owns is checked, the plugin manifests and the `claude/` folder
+  included, rather than only the wrapper pins and the changelog section. A stable
+  tag is also refused unless every plugin manifest carries its version.
+- **`explore --use-project` reads a model's declaration back.** `explore profile`
+  and `explore map` carry each declared model's declaration as `declaration` on the
+  relation it builds: its grain, its population rule, and each declared column's
+  role, unit, additivity and `references`. The declared grain is reported as
+  `grain`, while `candidate_keys` stays measured and `grain_status` says whether
+  measurement proves, contradicts or cannot speak to it. A column's `references`
+  becomes a declared join with `declared_by` naming the declaration; when a
+  `relationships` test states the same join it stays one edge with both sources.
+  The declaration is read from the repository on every run and never cached, so a
+  removed declaration clears on the next run. Declared columns are capped like
+  profiled ones and the cut is counted. Population values are withheld in
+  values-free mode and for a filter on a column flagged as personal data. Without
+  `--use-project` nothing changes.
+- **`transform plan` derives a declared mart's semantic model.** When a plan creates,
+  edits or declares a model under `transform.marts_paths` (a new `.dex/config.yml`
+  setting, default `[models/marts]`) and the model carries a declaration, the
+  engine derives the MetricFlow semantic model the declaration states and reports
+  it as `data.semantic_proposal`. A single-column grain becomes the primary entity,
+  foreign keys become entities (reusing the name the referenced model's semantic
+  model already gives the column), dimension and time columns become dimensions,
+  measures keep their declared aggregation, and a `semi_additive` measure carries
+  `non_additive_dimension` on the default time dimension. A composite grain, an
+  aggregation with no MetricFlow equivalent and a name already declared are named
+  rather than guessed around, and metrics are never derived. Where the project
+  already has a dbt semantic layer and a time spine, the derivation is added to the
+  same plan. Where it does not, nothing is added and the proposal is ready for
+  `semantic plan --definitions-file`. Every derivation passes MetricFlow's schemas,
+  the metric-input check and dbt's parse of a throwaway copy of the project before
+  it is offered, and that parse runs even under `semantic plan --no-parse`.
+
+### Fixed
+
+- **`transform plan` no longer prints an empty relation name for models built from table functions or VALUES.**
+  Drafting treats `range()` / `read_csv_auto()` / VALUES as generated SQL (not warehouse relations), so the plan warning says the model is generated in SQL instead of suggesting `explore profile` on a blank name. ([#870](https://github.com/exmergo/dex/pull/870))
+- **`maintain reconcile` offers both ways forward when definition or model churn is recorded.**
+  The warning now points at `explore map` then `maintain snapshot` when the current project state is intended, or `transform plan` otherwise; a high-severity grain finding in the same check puts the repair branch first so a regression is not snapshotted away. ([#871](https://github.com/exmergo/dex/pull/871))
+- **`transform plan` measures row attribution for joins to existing CTEs.** Adding, removing, or changing a join to a CTE that exists in the model is now recognized and measured as a row-affecting join change with its delta rather than being skipped as bookkeeping. ([#872](https://github.com/exmergo/dex/pull/872))
+- **`maintain verify` measures grain on tables the catalog has no count for.**
+  On Postgres, a table nobody has analyzed (and every view) reports no row
+  count, so the grain check used to come back unmeasured and blame the
+  connector. It now takes the exact row count from the same statement that
+  computes the distinct count, so a broken unique key is reported as
+  `grain_broken` with `exact: true`, and no grain verdict ever compares a
+  distinct count against the planner's estimate. When the count genuinely
+  cannot be supplied, the note says so instead of blaming the connector. ([#876](https://github.com/exmergo/dex/pull/876))
+- **The Codex manifest is ready for the OpenAI plugin directory.** It no longer
+  declares an empty `interface.screenshots`, which a skills-only upload refuses,
+  and its long description says the engine ships inside the plugin, with uv
+  downloading only its Python dependencies, rather than that the first command
+  downloads the engine from PyPI.
+- **`explore semantic query --local` runs on Postgres.** Every local metric query on
+  the Postgres connector failed before rendering, because Dex looked MetricFlow's
+  Postgres renderer up under a class name MetricFlow does not use. A test now
+  builds the renderer for every connector local metric queries support, so a
+  misspelling fails in the suite rather than on a user's first query.
+
+
 ## [1.16.2] - 2026-10-26
 
 ### Added

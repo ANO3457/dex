@@ -307,6 +307,35 @@ _STATEMENT = (
     "[].target",
     "[].template",
 )
+#: A model's declaration under ``--use-project`` (#498). Repository text, not a
+#: table read, but a population filter's values and its free-text rule are column
+#: values all the same, so in the mode ``population.rule`` and each filter's
+#: ``includes``/``excludes`` are always null and named in ``withheld_fields``.
+_DECLARATION = (
+    "",
+    ".model",
+    ".source",
+    ".grain",
+    ".grain[]",
+    ".grain_status",
+    ".population",
+    ".population.rule",
+    ".population.filters",
+    ".population.filters[]",
+    ".population.filters[].column",
+    ".population.filters[].includes",
+    ".population.filters[].excludes",
+    ".columns",
+    ".columns[]",
+    ".columns[].name",
+    ".columns[].role",
+    ".columns[].unit",
+    ".columns[].additivity",
+    ".columns[].references",
+    ".elided_column_count",
+    ".withheld_fields",
+    ".withheld_fields[]",
+)
 # Every result in the mode carries these.
 _COMMON = frozenset({"result_mode", "notes", "notes[]", "spend"})
 
@@ -360,6 +389,7 @@ KNOWN_FIELDS: dict[str, frozenset[str]] = {
         "[].profiled_at",
         "[].semantic_models",
         "[].semantic_models[]",
+        *(f"[].declaration{p}" for p in _DECLARATION),
         "[].suppressed_fields",
         "[].suppressed_fields[]",
         "[].withheld_fields",
@@ -464,6 +494,7 @@ KNOWN_FIELDS: dict[str, frozenset[str]] = {
         "[].candidate_key[]",
         "[].semantic_models",
         "[].semantic_models[]",
+        *(f"[].declaration{p}" for p in _DECLARATION),
         "[].columns",
         "[].columns[]",
         "[].columns[].name",

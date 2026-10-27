@@ -29,10 +29,14 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 __all__ = [
+    "DeclaredColumnMeaning",
     "DeclaredCompositeKey",
     "DeclaredForeignKey",
     "DeclaredKey",
+    "DeclaredPopulation",
+    "DeclaredPopulationFilter",
     "DeclaredRelationship",
+    "ModelDeclaration",
     "ProjectDefinitions",
 ]
 
@@ -98,6 +102,54 @@ class DeclaredCompositeKey(BaseModel):
     source: str
 
 
+class DeclaredColumnMeaning(BaseModel):
+    """What one column of a model is, in the model's own declaration (#491).
+
+    The fields exploration reads back (#498): what part the column plays, the
+    unit its values are in, how it adds up, and the ``<model>.<column>`` it
+    references. Every one is optional because a declaration may be partial, and
+    an unstated field stays unset rather than defaulted.
+    """
+
+    role: str | None = None
+    unit: str | None = None
+    additivity: str | None = None
+    references: str | None = None
+
+
+class DeclaredPopulationFilter(BaseModel):
+    """One filter of a declared population: the values a column keeps or drops."""
+
+    column: str
+    includes: list[str | int | float | bool] | None = None
+    excludes: list[str | int | float | bool] | None = None
+
+
+class DeclaredPopulation(BaseModel):
+    """Which rows a model keeps: a sentence, structured filters, or both."""
+
+    rule: str | None = None
+    filters: list[DeclaredPopulationFilter] = Field(default_factory=list)
+
+
+class ModelDeclaration(BaseModel):
+    """A model's declaration as the project states it (#491), read back (#498).
+
+    The model's own statement of what one row is (``grain``), which rows are in
+    (``population``) and what each column means (``columns``). ``source`` is the
+    channel it was read from, as on every other declared object here. A format
+    with no declarations leaves :attr:`ProjectDefinitions.model_declarations`
+    empty rather than inventing one.
+    """
+
+    model: str
+    relation: str | None = None
+    grain: list[str] | None = None
+    population: DeclaredPopulation | None = None
+    columns: dict[str, DeclaredColumnMeaning] = Field(default_factory=dict)
+    source: str
+
+
 class ProjectDefinitions(BaseModel):
     """What the project declares, loaded once for consumers that must keep
     working without one.
@@ -120,6 +172,8 @@ class ProjectDefinitions(BaseModel):
     declaration states (for dbt, ``config.meta.dex.grain``, #491): one column or
     several, the model's own statement of what one row is rather than a test's,
     and the first source `maintain verify` checks a grain from (#496).
+    ``model_declarations`` maps a model label to its whole declaration
+    (:class:`ModelDeclaration`), which `explore --use-project` reads back (#498).
     ``built_relation_names`` is bare table names (lowered) the
     project builds or sources, from files alone (populated even with no compiled
     artifact, unlike ``model_relations``) -- explore's orphan-relation
@@ -143,6 +197,7 @@ class ProjectDefinitions(BaseModel):
     source_relations: dict[str, str] = Field(default_factory=dict)
     primary_entities: dict[str, str] = Field(default_factory=dict)
     declared_grains: dict[str, list[str]] = Field(default_factory=dict)
+    model_declarations: dict[str, ModelDeclaration] = Field(default_factory=dict)
     metric_models: list[str] = Field(default_factory=list)
     built_relation_names: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

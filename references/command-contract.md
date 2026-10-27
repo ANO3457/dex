@@ -446,7 +446,18 @@ warning. On a model that already exists, `contradictions` lists each declared ru
 the edit and the post-change declaration disagree on, each also a warning naming
 the side that looks stale and both fixes; it never refuses. It reads the cache and
 the repository only and opens no connection; a contradicted population cites the
-delta row attribution measured, and measures nothing of its own. A command that takes no declarations refuses a payload
+delta row attribution measured, and measures nothing of its own. A model under
+`transform.marts_paths` (default `[models/marts]`) whose post-change YAML carries a
+declaration also gets `data.semantic_proposal`: the MetricFlow semantic model the
+declaration states (primary entity from a single-column grain, foreign entities,
+categorical and time dimensions, measures with their declared aggregation, and
+`non_additive_dimension` for a `semi_additive` measure), with every gap named
+rather than guessed and no metric ever derived. In a project with a dbt semantic
+layer (a semantic model and a time spine) a derivation that passes MetricFlow's
+schemas, the metric-input check and dbt's parse of a throwaway copy is added to the
+same plan; in one without, nothing is added and the object is ready to pass to
+`semantic plan --definitions-file`. The parse is never skipped for a derivation,
+whatever `--no-parse` says. A command that takes no declarations refuses a payload
 carrying them rather than dropping them. The full shape, the refusals and
 what each field renders into:
 [`skills/transform/references/declarations.md`](../skills/transform/references/declarations.md).
@@ -1222,11 +1233,45 @@ become declared joins at confidence 1.0 (resolved against the connection's
 inventory; a declared join that matches nothing or more than one object is
 reported in `notes`, never guessed, and a declared edge wins over the same
 inferred one), a semantic model's primary entity overrides the heuristic grain
-(disagreements and contradicted `unique` tests land in `data_quality`), and
+(disagreements and contradicted `unique` tests land in `data_quality`), a
+model's own declaration (#491) folds in as described below, and
 models reachable from metric definitions rank higher alongside the configured
 `ranking_hints`. The compiled manifest resolves names exactly when present;
 an uncompiled project falls back to name-based resolution and says so. A
 stale manifest (older than the model sources) is noted, not trusted silently.
+
+**A model's declaration folds in on the same flag (#498).** Each profiled or
+mapped object a declared model resolves to carries `declaration`: `model`,
+`source` (`manifest` or `yaml`), `grain`, `grain_status`, `population` (`rule`
+and `filters`, each `{column, includes, excludes}`), `columns` (each `{name,
+role, unit, additivity, references}`), `elided_column_count`, and
+`withheld_fields`. The key is absent rather than null where no declaration
+resolved, so output without `--use-project` is unchanged.
+
+- The declared grain is reported as `grain`, ahead of a semantic primary entity
+  or a composite test, because it is the model's own statement of what one row
+  is. `candidate_keys` stays measurement-only, and `grain_status` compares the
+  two: `proven` (a measured key is exactly the declared grain), `contradicted`
+  (a single declared column profiled with duplicates), `unmeasured`,
+  `missing_columns` (the relation lacks a declared column, so the grain is not
+  applied), or `unprofiled`. A data-quality note states where the grain came
+  from whenever it differs from the measured one.
+- A column's `references: <model>.<column>` becomes a declared join at
+  confidence 1.0 with `declared_by: declaration <model>.<column>`. The #491
+  writer renders a `relationships` test beside every `references`, so the usual
+  case is one edge with both sources in `declaration_sources`; a test naming a
+  different column for the same two relations is reported in `data.conflicts`.
+- The declaration is read from the repository on every run and never written to
+  the cache: a profile served from the cache is annotated as accurately as a
+  fresh one, and a removed declaration clears on the next run. Over a stale
+  manifest the YAML is read instead, since a declaration is plain YAML a human
+  edits.
+- Declared columns are capped at 12 per object (`explore profile --columns all`
+  lifts the cap there; `explore map` binds it in every mode), with the cut
+  counted in `elided_column_count` and in `notes`.
+- A population's values and its free-text rule are column values all the same:
+  in values-free mode, and for a filter on a column profiling flagged as
+  personal data, they are null and named in `withheld_fields`.
 
 `explore relationships` and `explore map` also accept the independent
 `--use-hosted-semantic-layer` opt-in. It permits a configured hosted layer read;

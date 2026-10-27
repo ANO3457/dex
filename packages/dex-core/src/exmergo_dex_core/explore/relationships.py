@@ -1380,6 +1380,73 @@ def declared_relationships(
     return relationships, notes
 
 
+def declaration_relationships(
+    defs: ProjectDefinitions, known_identifiers: list[str]
+) -> tuple[list[Relationship], list[str]]:
+    """Joins a model's own declaration states (#498), resolved like the rest.
+
+    A column declared with ``references: <model>.<column>`` (#491) is the
+    project saying which parent that column points at, so it arrives at the
+    declared tier beside a ``relationships`` test and a semantic entity.
+    ``declared_by`` names the declaring column, because the declaration is
+    something a reader can open and the edge does not otherwise say where it
+    came from. The parent is resolved through the relation the project
+    compiled it to where there is one, and by name otherwise, with the same
+    never-guess rule :func:`declared_relationships` applies: an endpoint
+    matching nothing or several objects yields a note instead of an edge.
+    """
+
+    relationships: list[Relationship] = []
+    notes: list[str] = []
+    seen: set[tuple] = set()
+    for model, declaration in sorted(defs.model_declarations.items()):
+        for column, meaning in sorted(declaration.columns.items()):
+            if not meaning.references:
+                continue
+            parent_model, _, parent_column = meaning.references.rpartition(".")
+            label = f"declared reference {model}.{column} -> {meaning.references}"
+            if not parent_model or not parent_column:
+                notes.append(
+                    f"{label} does not name <model>.<column>; skipped rather than "
+                    "guessed"
+                )
+                continue
+            child, child_ambiguous = resolve_declared(
+                declaration.relation, model, known_identifiers
+            )
+            parent, parent_ambiguous = resolve_declared(
+                defs.model_relations.get(parent_model)
+                or defs.source_relations.get(parent_model),
+                parent_model,
+                known_identifiers,
+            )
+            if child is None or parent is None:
+                reason = (
+                    "matches more than one object here"
+                    if (child_ambiguous or parent_ambiguous)
+                    else "references a relation not in this connection's inventory"
+                )
+                notes.append(f"{label} {reason}; skipped rather than guessed")
+                continue
+            key = (child.lower(), column.lower(), parent.lower(), parent_column.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            relationships.append(
+                Relationship(
+                    from_dataset=child,
+                    from_columns=[column],
+                    to_dataset=parent,
+                    to_columns=[parent_column],
+                    kind=RelationshipKind.DECLARED,
+                    confidence=1.0,
+                    declared_by=f"declaration {model}.{column}",
+                    declaration_sources=["declaration"],
+                )
+            )
+    return relationships, notes
+
+
 def semantic_relationships(
     joins: list[EntityJoin], known_identifiers: list[str]
 ) -> tuple[list[Relationship], list[str]]:
