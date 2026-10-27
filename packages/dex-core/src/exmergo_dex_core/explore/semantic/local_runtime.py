@@ -14,7 +14,7 @@ _RENDERERS: dict[str, tuple[str, str, str]] = {
     "bigquery": ("big_query", "BigQuerySqlPlanRenderer", "BIGQUERY"),
     "snowflake": ("snowflake", "SnowflakeSqlPlanRenderer", "SNOWFLAKE"),
     "databricks": ("databricks", "DatabricksSqlPlanRenderer", "DATABRICKS"),
-    "postgres": ("postgres", "PostgresSqlPlanRenderer", "POSTGRES"),
+    "postgres": ("postgres", "PostgresSQLSqlPlanRenderer", "POSTGRES"),
     "redshift": ("redshift", "RedshiftSqlPlanRenderer", "REDSHIFT"),
     "trino": ("trino", "TrinoSqlPlanRenderer", "TRINO"),
 }

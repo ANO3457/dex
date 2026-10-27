@@ -96,6 +96,9 @@ class _Reading:
 
     origins: dict[str, _Origin] = field(default_factory=dict)
     produced: list[str] | None = None
+    #: Output column name (lowered) to the expression that produces it, for a
+    #: reader that needs more than lineage (a cast's type, say).
+    expressions: dict[str, Any] = field(default_factory=dict)
     grain: list[str] | None = None
     grain_evidence: str | None = None
     grain_withheld: str | None = None
@@ -424,6 +427,7 @@ class _Lineage:
             )
         else:
             self.reading.produced = list(outputs)
+            self.reading.expressions = dict(outputs)
             for name, expression in outputs.items():
                 origin = self.origin(self.tree, expression)
                 if origin is not None:

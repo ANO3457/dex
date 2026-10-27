@@ -446,7 +446,18 @@ warning. On a model that already exists, `contradictions` lists each declared ru
 the edit and the post-change declaration disagree on, each also a warning naming
 the side that looks stale and both fixes; it never refuses. It reads the cache and
 the repository only and opens no connection; a contradicted population cites the
-delta row attribution measured, and measures nothing of its own. A command that takes no declarations refuses a payload
+delta row attribution measured, and measures nothing of its own. A model under
+`transform.marts_paths` (default `[models/marts]`) whose post-change YAML carries a
+declaration also gets `data.semantic_proposal`: the MetricFlow semantic model the
+declaration states (primary entity from a single-column grain, foreign entities,
+categorical and time dimensions, measures with their declared aggregation, and
+`non_additive_dimension` for a `semi_additive` measure), with every gap named
+rather than guessed and no metric ever derived. In a project with a dbt semantic
+layer (a semantic model and a time spine) a derivation that passes MetricFlow's
+schemas, the metric-input check and dbt's parse of a throwaway copy is added to the
+same plan; in one without, nothing is added and the object is ready to pass to
+`semantic plan --definitions-file`. The parse is never skipped for a derivation,
+whatever `--no-parse` says. A command that takes no declarations refuses a payload
 carrying them rather than dropping them. The full shape, the refusals and
 what each field renders into:
 [`skills/transform/references/declarations.md`](../skills/transform/references/declarations.md).

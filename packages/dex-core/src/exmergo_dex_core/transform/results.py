@@ -79,6 +79,11 @@ class PlanResult(Result):
     # fields nobody has supplied. A draft is offered, never written. Absent when
     # the plan touches no model.
     declarations: dict[str, dict[str, Any]] | None = None
+    # The semantic model derived from each declared mart the plan touches
+    # (issue #499): added to the plan where the project has a dbt semantic
+    # layer, offered here where it does not. Absent when no declared mart was
+    # touched.
+    semantic_proposal: dict[str, Any] | None = None
 
     def data(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -92,6 +97,8 @@ class PlanResult(Result):
             payload["decisions"] = self.decisions
         if self.declarations is not None:
             payload["declarations"] = self.declarations
+        if self.semantic_proposal is not None:
+            payload["semantic_proposal"] = self.semantic_proposal
         if self.defined is not None:
             payload["defined"] = self.defined
         if self.updated is not None:

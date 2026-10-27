@@ -568,6 +568,35 @@ class ConventionWarnings(BaseModel):
     resolved_keys: bool = True
 
 
+class TransformConfig(BaseModel):
+    """Where the project's layers live, for what ``transform plan`` derives.
+
+    ``marts_paths``: the folders, relative to the dbt project directory, whose
+    models are marts. A declared mart is the one model a semantic model is
+    derived from (issue #499): a staging model's declaration describes a source,
+    and a semantic model on it would put an unconformed relation in front of
+    every metric. The default is the folder ``transform init`` scaffolds, so a
+    project dex created needs nothing here; a house that keeps marts elsewhere
+    names its own. A folder covers everything beneath it.
+    """
+
+    marts_paths: list[str] = Field(default_factory=lambda: ["models/marts"])
+
+    @model_validator(mode="after")
+    def _check_marts_paths(self) -> TransformConfig:
+        normalized: list[str] = []
+        for name in self.marts_paths:
+            path = PurePosixPath(name.strip())
+            if not name.strip() or path.is_absolute() or ".." in path.parts:
+                raise ValueError(
+                    f"transform.marts_paths: '{name}' has to name a folder inside "
+                    "the dbt project, written relative to it"
+                )
+            normalized.append(str(path))
+        self.marts_paths = normalized
+        return self
+
+
 # Which deployments each semantic-layer vendor ships, and the spellings that name
 # them. The table exists because `backend:` collapsed vendor and deployment into
 # one enum, which only extends while there is exactly one vendor, and there is
@@ -1184,6 +1213,9 @@ class DexConfig(BaseModel):
     # on by default: each stays silent unless the project's own models agree
     # unanimously, so a repo with no convention never hears from them.
     conventions: ConventionWarnings = Field(default_factory=ConventionWarnings)
+    # Where the project's marts live, which is where `transform plan` derives a
+    # semantic model from a declaration (issue #499).
+    transform: TransformConfig = Field(default_factory=TransformConfig)
     query: QueryLimits = Field(default_factory=QueryLimits)
     # Opt-in tightening for a guarded build in a sandbox. Off by default, so an
     # interactive build behaves exactly as it did before this existed.
