@@ -1211,3 +1211,62 @@ def test_plan_deletes_empty_scaffold_gitkeep_when_first_model_lands(tmp_path: Pa
     assert by_path["models/staging/.gitkeep"].op is EditOp.DELETE
     assert "models/marts/.gitkeep" not in by_path
     assert any(d["path"] == "models/staging/.gitkeep" for d in diffs)
+
+
+# --- reserved-word column names need `quote: true` for their tests (#651) ----
+
+
+def _reserved_plan(dbt_project_dir: Path, schema: str) -> list[str]:
+    edit = _cfg_edit("models/staging/schema.yml", schema, transform.EditKind.SCHEMA_YML)
+    _plan, _diffs, warnings = transform.plan(
+        "test a reserved-word column",
+        [edit],
+        dbt_project_dir,
+        repo_root=dbt_project_dir.parent,
+        store=FilesystemStore(dbt_project_dir.parent),
+        dialect="duckdb",
+    )
+    return [w for w in warnings if "reserved word" in w]
+
+
+@pytest.mark.parametrize(
+    ("schema", "named"),
+    [
+        (
+            "version: 2\nmodels:\n  - name: stg_events\n    columns:\n"
+            "      - name: window\n        data_tests: [not_null]\n",
+            "window of stg_events",
+        ),
+        (
+            "version: 2\nsources:\n  - name: raw\n    tables:\n"
+            "      - name: events\n        columns:\n          - name: window\n"
+            "            tests:\n              - accepted_values:\n"
+            "                  values: [day]\n",
+            "window of raw.events",
+        ),
+    ],
+)
+def test_reserved_column_with_tests_and_no_quote_warns(
+    dbt_project_dir: Path, schema: str, named: str
+):
+    warnings = _reserved_plan(dbt_project_dir, schema)
+    assert len(warnings) == 1 and named in warnings[0], warnings
+    assert "quote: true" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        # Quoted: dbt writes it quoted, so the test compiles.
+        "version: 2\nsources:\n  - name: raw\n    tables:\n"
+        "      - name: events\n        columns:\n          - name: window\n"
+        "            quote: true\n            tests: [not_null]\n",
+        # No tests: nothing writes the column into SQL at plan time.
+        "version: 2\nmodels:\n  - name: stg_events\n    columns:\n"
+        "      - name: window\n        description: the window\n",
+    ],
+)
+def test_reserved_column_quoted_or_untested_is_silent(
+    dbt_project_dir: Path, schema: str
+):
+    assert _reserved_plan(dbt_project_dir, schema) == []

@@ -78,6 +78,7 @@ from ..guards.query_firewall import (
 from ..guards.sql_guard import referenced_relations, split_statements
 from ..guards.values_free_shape import assert_values_free_shape
 from ..progress import ProgressReporter
+from ..reserved_words import reserved_column_names
 from ..results import BudgetExhaustedError, ConfirmationRequest, to_envelope
 from ..semantic_catalog import (
     EntityInfo,
@@ -623,7 +624,10 @@ def _profile_into_cache(
         raise _budget_exhausted(store, adapter, accumulated, len(identifiers)) from None
 
     _annotate_grain(
-        profiled, defs, high_null_fraction=config.profile_high_null_fraction
+        profiled,
+        defs,
+        high_null_fraction=config.profile_high_null_fraction,
+        dialect=adapter.dialect,
     )
     if withhold:
         for dataset in profiled:
@@ -985,7 +989,10 @@ def relationships(
     # grain, the same shape a `map`-written cache has. Only the freshly profiled
     # need it; the fresh-cached already carry theirs from the cache write.
     _annotate_grain(
-        profiled, defs, high_null_fraction=config.profile_high_null_fraction
+        profiled,
+        defs,
+        high_null_fraction=config.profile_high_null_fraction,
+        dialect=adapter.dialect,
     )
 
     # Fold same-lineage duplicates before the merge, as `map` does, so the folded
@@ -2352,6 +2359,7 @@ def map(
         orphaned=orphaned,
         baselined=baselined,
         high_null_fraction=config.profile_high_null_fraction,
+        dialect=adapter.dialect,
     )
     suppressed: list[rel_mod.SuppressedMatch] = []
     affix_matches: list[rel_mod.AffixMatch] = []
@@ -4265,6 +4273,7 @@ def _annotate_grain(
     orphaned: set[str] | None = None,
     baselined: set[str] | None = None,
     high_null_fraction: float = 0.95,
+    dialect: str | None = None,
 ) -> None:
     """Attach the interpretation layer to raw profiles: candidate keys, the likely
     grain, the data-quality warnings an analyst would write (non-unique own
@@ -4285,7 +4294,8 @@ def _annotate_grain(
     unmeasured declared key is a claim, and the cache is a drift baseline.
     ``orphaned`` (map only) badges a relation no current model/source builds:
     as likely residue when ``baselined`` (the snapshot's identifiers) knew it,
-    and otherwise as a new relation no source declares yet.
+    and otherwise as a new relation no source declares yet. ``dialect`` (the
+    connector's) notes columns whose names it reserves (#651).
     """
 
     declared_grain: dict[str, str] = {}
@@ -4327,6 +4337,14 @@ def _annotate_grain(
         # exactly its order; the probe's suppressed entries ride through.
         ds.key_evidence = rel_mod.key_evidence(ds)
         ds.data_quality.extend(rel_mod.data_quality_notes(ds))
+        if dialect is not None:
+            reserved = reserved_column_names(dialect, [c.name for c in ds.columns])
+            if reserved:
+                ds.data_quality.append(
+                    f"column(s) {', '.join(reserved)} are reserved words in "
+                    f"{dialect}; declare them with `quote: true` in dbt, or its "
+                    "generic tests on them fail to compile"
+                )
         if orphaned and ds.identifier in orphaned:
             if baselined and ds.identifier.lower() in baselined:
                 ds.data_quality.append(

@@ -4211,6 +4211,7 @@ def _failure_message(prefix: str, messages: list[str]) -> str:
 
 
 def _make_plan(engine: DexEngine, intent: str, edits: list[PlanEdit]) -> PlanResult:
+    from ..adapters import get_dialect
     from ..adapters.project import PlacingProject, placement_gap
 
     repo_root = engine.require_repo_root("storing a transform plan")
@@ -4249,6 +4250,9 @@ def _make_plan(engine: DexEngine, intent: str, edits: list[PlanEdit]) -> PlanRes
             # decision belongs in the committed config rather than in a flag,
             # so it holds for every caller rather than for whoever remembered.
             conventions=engine.config.conventions,
+            # Reserved-word column names are the connector's, so the plan
+            # warns on a test only that warehouse would fail to compile.
+            dialect=get_dialect(engine.connector or engine.config.connector),
             # Agent-authored edits, which is the caller `editing_surface` exists
             # for: there is no placement to compare a path against here, only the
             # surface the format admits to owning. A format declining the write

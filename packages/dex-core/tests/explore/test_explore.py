@@ -2225,3 +2225,29 @@ def test_map_still_warns_when_every_profile_is_a_cache_hit(
         "the same warning, from carried profiles"
     )
     assert len(orphaned) == 1, orphaned
+
+
+@pytest.mark.parametrize("command", ["map", "profile"])
+def test_reserved_word_column_gets_a_quote_note(tmp_path: Path, command: str):
+    """A DuckDB column named `window` passed explore silently, then broke dbt's
+    generic tests on the first build (#651)."""
+
+    import duckdb
+
+    from exmergo_dex_core import DexEngine
+
+    warehouse = tmp_path / "reserved.duckdb"
+    conn = duckdb.connect(str(warehouse))
+    conn.execute('CREATE TABLE events (id INTEGER, "window" VARCHAR, kind VARCHAR)')
+    conn.execute("INSERT INTO events VALUES (1, 'day', 'a'), (2, 'week', 'b')")
+    conn.close()
+
+    with DexEngine(connector="duckdb", path=str(warehouse)) as engine:
+        result = engine.map() if command == "map" else engine.profile("events")
+
+    objects = result.objects if command == "map" else result.datasets
+    notes = [note for obj in objects for note in obj.data_quality]
+    reserved = [note for note in notes if "reserved words" in note]
+    assert len(reserved) == 1, notes
+    assert "window" in reserved[0] and "kind" not in reserved[0]
+    assert "quote: true" in reserved[0]
