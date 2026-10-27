@@ -58,7 +58,8 @@ found the way every command finds it, by walking up to the git root.
 Objects are space- or comma-separated. Each profile carries column profiles, PII
 flags recorded as (column, category, confidence) and never example values, ranked
 candidate keys, the likely grain, `key_evidence`, and data-quality warnings (for
-example an id unique on all but 110 rows, which will fan out on joins).
+example an id unique on all but 110 rows, which will fan out on joins, or a
+column named `window`, which DuckDB reserves and dbt must quote).
 
 - `candidate_keys` is ordered, tightest proven key first.
 - `key_evidence` holds one entry per combination considered, with its `status`
