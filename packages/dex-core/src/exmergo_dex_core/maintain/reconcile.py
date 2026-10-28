@@ -297,6 +297,48 @@ def _run_operation_args(identifiers: list[str]) -> str:
     return f"{{relations: [{relations}], dry_run: false}}"
 
 
+def _cardinality_advisory(finding: DriftFinding) -> str:
+    """Advisory text for ``dimension_cardinality_changed`` (#890).
+
+    Only distinct counts are stored at snapshot time, never the value set, so a
+    count delta cannot name which values arrived or disappeared, and an
+    approximate baseline (``finding.exact is False``) is an estimate rather than
+    proof the value set changed at all.
+    """
+
+    before = finding.data.get("distinct_before")
+    after = finding.data.get("distinct_after")
+    marker = "" if finding.exact else "~"
+    approx = (
+        ""
+        if finding.exact
+        else "the baseline distinct count was approximate, so an estimated "
+        "count difference alone does not prove the value set changed; "
+    )
+    if isinstance(before, int) and isinstance(after, int) and after < before:
+        return (
+            f"{approx}fewer distinct values were observed ({marker}{before} -> "
+            f"{after}); investigate missing categories, filters, upstream "
+            "coverage, or expected population changes, and use a firewalled "
+            "`explore query` to inspect the current values"
+        )
+    if isinstance(before, int) and isinstance(after, int) and after > before:
+        return (
+            f"{approx}more distinct values were observed ({marker}{before} -> "
+            f"{after}); investigate the additional categories and decide "
+            "whether they belong in the impacted metric definitions (a "
+            "distinct-count difference alone does not identify which values "
+            "changed; use a firewalled `explore query` to inspect the current "
+            "values)"
+        )
+    return (
+        f"{approx}distinct count changed since the baseline; investigate "
+        "whether categories were added, dropped, or replaced in the impacted "
+        "metric definitions, and use a firewalled `explore query` to inspect "
+        "the current values"
+    )
+
+
 def _advisory(finding: DriftFinding) -> Proposal:
     if finding.code == "orphan_relation":
         return Proposal(
@@ -314,6 +356,15 @@ def _advisory(finding: DriftFinding) -> Proposal:
                 "drop_orphan_relations --args "
                 f"'{_run_operation_args([finding.identifier])}'"
             ),
+        )
+    if finding.code == "dimension_cardinality_changed":
+        return Proposal(
+            axis=finding.axis,
+            kind="advisory",
+            finding_code=finding.code,
+            identifier=finding.identifier,
+            column=finding.column,
+            action=_cardinality_advisory(finding),
         )
     actions = {
         "table_added": (
@@ -354,10 +405,6 @@ def _advisory(finding: DriftFinding) -> Proposal:
         "join_orphans_increased": (
             "investigate the upstream load; a dbt `relationships` test would "
             "make the orphaned keys visible in builds"
-        ),
-        "dimension_cardinality_changed": (
-            "decide whether the new categorical value belongs in the impacted "
-            "metric definitions; a firewalled `explore query` can name it"
         ),
         "dangling_reference": (
             "update the semantic definition with `semantic update`, or restore "
