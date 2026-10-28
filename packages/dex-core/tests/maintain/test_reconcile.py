@@ -1091,3 +1091,97 @@ def test_a_declaration_spelled_in_another_case_is_still_the_column(maintain_repo
 
     assert payload["data"]["mechanical_count"] == 1
     assert "-      - name: STATUS" in _diff(payload, _STG_YML)["unified"]
+
+
+def test_dimension_cardinality_advisory_reflects_direction_and_exactness():
+    """#890: cardinality advisories distinguish contraction, expansion, and
+    approximate baselines instead of assuming every change is one new value."""
+
+    from exmergo_dex_core.maintain.drift import DriftFinding
+    from exmergo_dex_core.maintain.reconcile import build
+    from exmergo_dex_core.maintain.snapshot import Snapshot, WarehouseBaseline
+
+    contraction = DriftFinding(
+        axis="semantic",
+        code="dimension_cardinality_changed",
+        identifier="db.main.stg_orders",
+        column="status",
+        severity="medium",
+        detail=(
+            "dimension 'status' on semantic model 'orders' narrowed: "
+            "4 -> 1 distinct values in db.main.stg_orders.status"
+        ),
+        exact=True,
+        data={
+            "distinct_before": 4,
+            "distinct_after": 1,
+            "dimension": "status",
+            "semantic_model": "orders",
+        },
+    )
+    expansion = DriftFinding(
+        axis="semantic",
+        code="dimension_cardinality_changed",
+        identifier="db.main.stg_orders",
+        column="status",
+        severity="medium",
+        detail=(
+            "dimension 'status' on semantic model 'orders' widened: "
+            "3 -> 5 distinct values in db.main.stg_orders.status"
+        ),
+        exact=True,
+        data={
+            "distinct_before": 3,
+            "distinct_after": 5,
+            "dimension": "status",
+            "semantic_model": "orders",
+        },
+    )
+    approx_expansion = expansion.model_copy(
+        update={
+            "detail": (
+                "dimension 'status' on semantic model 'orders' widened: "
+                "~100 -> 150 distinct values in db.main.stg_orders.status"
+            ),
+            "exact": False,
+            "data": {
+                "distinct_before": 100,
+                "distinct_after": 150,
+                "dimension": "status",
+                "semantic_model": "orders",
+            },
+        }
+    )
+    snap = Snapshot(
+        created_at="2026-07-03T10:00:00+00:00",
+        connector="duckdb",
+        warehouse=WarehouseBaseline(datasets=[]),
+    )
+
+    proposals, edits, _warnings = build(
+        [contraction, expansion, approx_expansion], snap, None, None
+    )
+
+    assert edits == []
+    assert [p.kind for p in proposals] == ["advisory", "advisory", "advisory"]
+
+    contracted_action = proposals[0].action
+    assert "4 -> 1" in contracted_action
+    assert "missing categories" in contracted_action
+    assert "filters" in contracted_action
+    assert "upstream coverage" in contracted_action
+    assert "new categorical value" not in contracted_action
+    assert "approximate" not in contracted_action
+
+    expanded_action = proposals[1].action
+    assert "3 -> 5" in expanded_action
+    assert "additional categories" in expanded_action
+    assert "impacted metric definitions" in expanded_action
+    assert "does not identify which values changed" in expanded_action
+    assert "new categorical value" not in expanded_action
+    assert "approximate" not in expanded_action
+
+    approx_action = proposals[2].action
+    assert "~100 -> 150" in approx_action
+    assert "approximate" in approx_action
+    assert "does not prove the value set changed" in approx_action

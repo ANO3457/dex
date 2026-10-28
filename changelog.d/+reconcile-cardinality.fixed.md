@@ -1,0 +1,1 @@
+`maintain reconcile` now distinguishes cardinality contractions, expansions, and approximate baselines on `dimension_cardinality_changed` findings instead of assuming every count change introduces a single new categorical value.
