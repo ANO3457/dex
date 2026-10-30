@@ -22,6 +22,7 @@ writes to the project and human edits stay authoritative at apply time.
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -95,7 +96,7 @@ def build(
     findings: list[DriftFinding],
     snap: Snapshot,
     cache: DexCache | None,
-    view: DbtProjectView | None,
+    view: Any | None,
     *,
     pii_overrides: PIIOverrideMatcher | None = None,
     placement: PlacingProject | None = None,
@@ -133,7 +134,11 @@ def build(
     definition_churn = False
     orphan_identifiers: list[str] = []
     for finding in findings:
-        if finding.axis == "schema" and finding.code in _PATCHABLE:
+        if (
+            finding.axis == "schema"
+            and finding.code in _PATCHABLE
+            and finding.identifier is not None
+        ):
             schema_patches.setdefault(finding.identifier, []).append(finding)
         elif finding.code.startswith("definition_") or finding.code.startswith(
             "model_"
@@ -143,7 +148,7 @@ def build(
             # warehouse-side fix to propose.
             definition_churn = True
         else:
-            if finding.code == "orphan_relation":
+            if finding.code == "orphan_relation" and finding.identifier is not None:
                 orphan_identifiers.append(finding.identifier)
             proposals.append(_advisory(finding))
 
@@ -184,7 +189,7 @@ def build(
                     for finding in written
                 )
             continue
-        if view is None or model_path not in view.files:
+        if view is None or model_path is None or model_path not in view.files:
             reason = (
                 "this project format cannot receive edits"
                 if view is None
@@ -297,8 +302,53 @@ def _run_operation_args(identifiers: list[str]) -> str:
     return f"{{relations: [{relations}], dry_run: false}}"
 
 
+def _cardinality_advisory(finding: DriftFinding) -> str:
+    """Advisory text for ``dimension_cardinality_changed`` (#890).
+
+    Only distinct counts are stored at snapshot time, never the value set, so a
+    count delta cannot name which values arrived or disappeared, and an
+    approximate baseline (``finding.exact is False``) is an estimate rather than
+    proof the value set changed at all.
+    """
+
+    before = finding.data.get("distinct_before")
+    after = finding.data.get("distinct_after")
+    marker = "" if finding.exact else "~"
+    approx = (
+        ""
+        if finding.exact
+        else "the baseline distinct count was approximate, so an estimated "
+        "count difference alone does not prove the value set changed; "
+    )
+    if isinstance(before, int) and isinstance(after, int) and after < before:
+        return (
+            f"{approx}fewer distinct values were observed ({marker}{before} -> "
+            f"{after}); investigate missing categories, filters, upstream "
+            "coverage, or expected population changes, and use a firewalled "
+            "`explore query` to inspect the current values"
+        )
+    if isinstance(before, int) and isinstance(after, int) and after > before:
+        return (
+            f"{approx}more distinct values were observed ({marker}{before} -> "
+            f"{after}); investigate the additional categories and decide "
+            "whether they belong in the impacted metric definitions (a "
+            "distinct-count difference alone does not identify which values "
+            "changed; use a firewalled `explore query` to inspect the current "
+            "values)"
+        )
+    return (
+        f"{approx}distinct count changed since the baseline; investigate "
+        "whether categories were added, dropped, or replaced in the impacted "
+        "metric definitions, and use a firewalled `explore query` to inspect "
+        "the current values"
+    )
+
+
 def _advisory(finding: DriftFinding) -> Proposal:
     if finding.code == "orphan_relation":
+        operation_args = _run_operation_args(
+            [finding.identifier] if finding.identifier else []
+        )
         return Proposal(
             axis=finding.axis,
             kind="advisory",
@@ -311,9 +361,17 @@ def _advisory(finding: DriftFinding) -> Proposal:
                 "governed macro (dex never executes this itself): scaffold "
                 "it with `transform macro drop_orphan_relations` if the "
                 "project does not have it yet, then run dbt run-operation "
-                "drop_orphan_relations --args "
-                f"'{_run_operation_args([finding.identifier])}'"
+                f"drop_orphan_relations --args '{operation_args}'"
             ),
+        )
+    if finding.code == "dimension_cardinality_changed":
+        return Proposal(
+            axis=finding.axis,
+            kind="advisory",
+            finding_code=finding.code,
+            identifier=finding.identifier,
+            column=finding.column,
+            action=_cardinality_advisory(finding),
         )
     actions = {
         "table_added": (
@@ -354,10 +412,6 @@ def _advisory(finding: DriftFinding) -> Proposal:
         "join_orphans_increased": (
             "investigate the upstream load; a dbt `relationships` test would "
             "make the orphaned keys visible in builds"
-        ),
-        "dimension_cardinality_changed": (
-            "decide whether the new categorical value belongs in the impacted "
-            "metric definitions; a firewalled `explore query` can name it"
         ),
         "dangling_reference": (
             "update the semantic definition with `semantic update`, or restore "
